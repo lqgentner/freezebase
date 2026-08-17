@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the project is pre-1.0 (`0.x`), minor releases may contain breaking changes.
 
+## [0.4.0] - 2026-08-17
+
+### Added
+
+- `HTTPDownloader.close()` and context-manager support, which close the
+  downloader's session and release its pooled connections. Creating one
+  downloader per download previously held a connection open until the garbage
+  collector ran, which made downstream test suites fail unpredictably. The
+  session is also closed on garbage collection as a fallback.
+
+### Changed
+
+- **Breaking:** `HTTPDownloader` no longer forwards arbitrary keyword arguments
+  to `requests`. `method` and `timeout` are now named parameters and are spelled
+  exactly as before, so calls that only used those keep working; `method` is
+  restricted to `"GET"` and `"POST"`. Any other `requests` keyword, such as
+  `params` or `headers`, now raises `TypeError` instead of reaching the request.
+  To configure the transport, for example a connection pool size, mount an
+  adapter on `HTTPDownloader.session`.
+  
 ## [0.3.0] - 2026-08-05
 
 ### Added

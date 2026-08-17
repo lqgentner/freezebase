@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import gc
 import io
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
+from urllib.parse import urlparse
+import weakref
 
 import pytest
 import requests
+from requests.adapters import BaseAdapter
 from requests.structures import CaseInsensitiveDict
 
 from freezebase.download import (
@@ -23,6 +28,7 @@ if TYPE_CHECKING:
 
 HOST = "https://host.example"
 OTHER_HOST = "https://evil.example"
+TRUSTED_OTHER_HOST = "https://trusted.example"
 
 
 def make_response(
@@ -69,10 +75,58 @@ class FakeSession:
         return resp
 
 
+class _ScriptedAdapter(BaseAdapter):
+    """Transport adapter serving canned responses by URL.
+
+    Mounted on a real `requests.Session`, so the requests it records are the
+    fully prepared ones a server would receive, headers included. `FakeSession`
+    intercepts higher up and only records the arguments passed to it.
+    """
+
+    def __init__(self, responses: dict[str, requests.Response]) -> None:
+        super().__init__()
+        self._responses = responses
+        self.calls: list[requests.PreparedRequest] = []
+
+    def send(self, request: requests.PreparedRequest, **_kwargs: object) -> requests.Response:
+        self.calls.append(request)
+        resp = self._responses[request.url]
+        resp.request = request
+        resp.raw = io.BytesIO(b"payload")  # reset the stream for re-reads
+        return resp
+
+    def close(self) -> None:
+        pass
+
+
 def make_downloader(session: FakeSession, **kwargs: object) -> HTTPDownloader:
     dl = HTTPDownloader(progress=False, **kwargs)  # type: ignore[arg-type]
     dl.session = session  # type: ignore[assignment]
     return dl
+
+
+def _adapter_downloader(
+    target: str,
+    **kwargs: object,
+) -> tuple[_ScriptedAdapter, HTTPDownloader]:
+    """Build a downloader whose transport serves `HOST/a` -> `target` via a 302."""
+    adapter = _ScriptedAdapter(
+        {
+            f"{HOST}/a": make_response(
+                status=302,
+                url=f"{HOST}/a",
+                headers={"Location": target},
+            ),
+            target: make_response(
+                url=target,
+                headers={"Content-Disposition": 'attachment; filename="real.zip"'},
+            ),
+        },
+    )
+    dl = HTTPDownloader(progress=False, **kwargs)  # type: ignore[arg-type]
+    dl.session.mount("http://", adapter)
+    dl.session.mount("https://", adapter)
+    return adapter, dl
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +361,64 @@ class TestRedirectCredentialSafety:
             dl(f"{HOST}/a", tmp_path)
         assert len(session.calls) == MAX_REDIRECTS + 1
 
+    def test_auth_preserved_on_trusted_cross_host_redirect(self, tmp_path: Path) -> None:
+        """A host named in `trusted_hosts` still receives the credentials.
+
+        Asserts on the `Authorization` header the server would actually see,
+        rather than on the `auth` argument, so the whole path from `auth=` to
+        the wire is covered.
+        """
+        adapter, dl = _adapter_downloader(
+            f"{TRUSTED_OTHER_HOST}/b",
+            auth=("user", "pass"),
+            trusted_hosts=[urlparse(TRUSTED_OTHER_HOST).hostname],
+        )
+        dl(f"{HOST}/a", tmp_path)
+
+        assert len(adapter.calls) == 2
+        assert "Authorization" in adapter.calls[0].headers
+        assert "Authorization" in adapter.calls[1].headers
+
+    def test_auth_not_sent_to_untrusted_host_on_the_wire(self, tmp_path: Path) -> None:
+        """The counterpart: an unlisted host receives no `Authorization` header."""
+        adapter, dl = _adapter_downloader(f"{OTHER_HOST}/b", auth=("user", "pass"))
+        dl(f"{HOST}/a", tmp_path)
+
+        assert len(adapter.calls) == 2
+        assert "Authorization" in adapter.calls[0].headers
+        assert "Authorization" not in adapter.calls[1].headers
+
+
+# ---------------------------------------------------------------------------
+# Session lifecycle: close() / context manager / __del__ backstop
+# ---------------------------------------------------------------------------
+
+
+class TestSessionLifecycle:
+    def test_close_closes_session(self) -> None:
+        dl = HTTPDownloader(progress=False)
+        dl.session = MagicMock(wraps=dl.session)
+        dl.close()
+        dl.session.close.assert_called_once()
+
+    def test_context_manager_closes_session_on_exit(self) -> None:
+        with HTTPDownloader(progress=False) as dl:
+            dl.session = MagicMock(wraps=dl.session)
+            session = dl.session
+        session.close.assert_called_once()
+
+    def test_gc_closes_session_as_backstop(self) -> None:
+        dl = HTTPDownloader(progress=False)
+        session = MagicMock(wraps=dl.session)
+        dl.session = session
+        ref = weakref.ref(dl)
+
+        del dl
+        gc.collect()
+
+        assert ref() is None
+        session.close.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # Redirect method rewriting and RFC 5987 decoding
@@ -315,18 +427,13 @@ class TestRedirectCredentialSafety:
 
 class TestRedirectMethodRewrite:
     def test_see_other_becomes_get(self) -> None:
-        method, kwargs = _rewrite_redirect_method(303, "POST", {"data": b"x"})
-        assert method == "GET"
-        assert "data" not in kwargs
+        assert _rewrite_redirect_method(303, "POST") == "GET"
 
     def test_moved_post_becomes_get(self) -> None:
-        method, _ = _rewrite_redirect_method(301, "POST", {})
-        assert method == "GET"
+        assert _rewrite_redirect_method(301, "POST") == "GET"
 
-    def test_temporary_redirect_preserves_method_and_body(self) -> None:
-        method, kwargs = _rewrite_redirect_method(307, "POST", {"data": b"x"})
-        assert method == "POST"
-        assert kwargs == {"data": b"x"}
+    def test_temporary_redirect_preserves_method(self) -> None:
+        assert _rewrite_redirect_method(307, "POST") == "POST"
 
 
 class TestExtractFilenameFromCd:

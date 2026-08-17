@@ -126,8 +126,8 @@ class GeoVectorData(ABC):
         save_dir = self.raw_path.parent
         filename = self.raw_path.name
 
-        downloader = HTTPDownloader()
-        downloader(url=url, save_dir=save_dir, filename=filename)
+        with HTTPDownloader() as downloader:
+            downloader(url=url, save_dir=save_dir, filename=filename)
 
     def get_data(self, *, download: bool = False) -> gpd.GeoDataFrame:
         """Return the processed data, preparing it if necessary."""

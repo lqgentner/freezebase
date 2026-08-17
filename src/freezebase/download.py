@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import contextlib
 from functools import partial
 import logging
 import ntpath
@@ -10,7 +11,7 @@ from pathlib import Path
 import posixpath
 import re
 from secrets import token_hex
-from typing import TYPE_CHECKING, Any, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, Self, TypeVar, cast, overload
 from urllib.parse import unquote, urljoin, urlparse
 
 import requests
@@ -150,52 +151,57 @@ class HTTPDownloader:
 
     Built upon `requests`. Inspired by `pooch.HTTPDownloader`.
     Supports downloading with GET and POST requests.
+
+    Response bodies are always streamed to disk in chunks, so memory use stays
+    flat no matter how large the file is, and redirects are always followed by
+    the downloader itself, so `trusted_hosts` governs where credentials go.
+
+    Holds an open `requests.Session`, which keeps a connection to the server
+    alive between downloads. Call `close()` when done, or use the downloader as
+    a context manager. If neither happens, the session is closed once Python
+    discards the downloader.
     """
 
     def __init__(
         self,
         *,
+        method: Literal["GET", "POST"] = "GET",
         auth: tuple[str, str] | AuthBase | None = None,
         trusted_hosts: str | Iterable[str] | None = None,
+        timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
         progress: bool = True,
-        **kwargs,
     ) -> None:
         """
         Initialize an HTTPDownloader instance.
 
         Parameters
         ----------
+        method : {"GET", "POST"}
+            HTTP method used to request the file.
         auth : tuple[str, str] or instance of AuthBase subclass, optional
             HTTP authentication object (default is None). For HTTP Basic Authentication,
             provide `(user, pass)` tuple
         trusted_hosts : str or iterable of str, optional
             Hostnames for which auth should be preserved during redirects. If not specified,
             auth is only sent to the original host.
+        timeout : float or tuple[float, float]
+            Seconds to wait for the server, as a single value or a
+            `(connect, read)` pair.
         progress : bool
             If True, show a progress bar during download.
-        **kwargs : dict[str, Any]
-            Keyword arguments that will be passed to `requests.request`.
 
         """
         self.session = requests.Session()
-        # Auth is tracked on the instance and passed per-request rather than
-        # stored on the session, so a redirect that leaves a trusted host can
-        # drop credentials for that single hop without permanently mutating
-        # shared state (which would break later calls on this downloader).
+        self.method = method
+        # Kept per-instance and passed per-request, never stored on the session, so
+        # dropping credentials for one hop does not affect later calls.
         self._auth = auth
-        if auth is not None:
-            # Handle redirects manually to allow for auth preservation
-            kwargs.setdefault("allow_redirects", False)
         if trusted_hosts is None:
             trusted_hosts = []
         elif isinstance(trusted_hosts, str):
             trusted_hosts = [trusted_hosts]
         self.trusted_hosts = trusted_hosts
-        # Set defaults for requests.request() kwargs
-        kwargs.setdefault("method", "GET")
-        kwargs.setdefault("timeout", DEFAULT_TIMEOUT)
-        kwargs.setdefault("stream", True)
-        self.kwargs = kwargs
+        self.timeout = timeout
         self.show_progress = progress
 
     @overload
@@ -298,17 +304,23 @@ class HTTPDownloader:
 
         Credentials are sent only while the hop stays on a trusted host and on
         an HTTPS connection; leaving a trusted host or downgrading to plaintext
-        drops them for the remainder of the chain. Each intermediate streamed
+        drops them for the rest of the chain. Each intermediate streamed
         response is closed before the next request, and the redirect method is
-        rewritten to mirror ``requests``/browser behavior (303 and 301/302 on
-        POST become GET; 307/308 preserve the method).
+        rewritten to match browser behavior (303, and 301/302 on POST, become
+        GET; 307/308 keep the method).
         """
         auth = self._auth
-        kwargs = dict(self.kwargs)
-        method = kwargs.pop("method", "GET")
+        method: str = self.method
 
         for _ in range(MAX_REDIRECTS + 1):
-            response = self.session.request(method, url=url, auth=auth, **kwargs)
+            response = self.session.request(
+                method,
+                url=url,
+                auth=auth,
+                timeout=self.timeout,
+                stream=True,
+                allow_redirects=False,
+            )
             if not response.is_redirect:
                 return response
 
@@ -331,11 +343,32 @@ class HTTPDownloader:
             if not is_trusted or is_downgrade:
                 auth = None
 
-            method, kwargs = _rewrite_redirect_method(response.status_code, method, kwargs)
+            method = _rewrite_redirect_method(response.status_code, method)
             url = new_url
 
         msg = f"Exceeded maximum of {MAX_REDIRECTS} redirects for URL."
         raise RuntimeError(msg)
+
+    def close(self) -> None:
+        """Close the session and its connections to the server."""
+        self.session.close()
+
+    def __enter__(self) -> Self:
+        """Return self for use as a context manager."""
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        """Close the session on context exit."""
+        self.close()
+
+    def __del__(self) -> None:
+        """Close the session when Python discards the downloader.
+
+        Errors are ignored: this can run while the interpreter is shutting
+        down, or on a downloader whose `__init__` did not finish.
+        """
+        with contextlib.suppress(Exception):
+            self.close()
 
 
 def _is_downloadable_content(response: requests.Response) -> bool:
@@ -422,28 +455,15 @@ def _write_file[T: Path | UPath](
     return filepath
 
 
-def _rewrite_redirect_method(
-    status_code: int,
-    method: str,
-    kwargs: dict[str, Any],
-) -> tuple[str, dict[str, Any]]:
-    """Rewrite the request method/body for a redirect, mirroring ``requests``.
+def _rewrite_redirect_method(status_code: int, method: str) -> str:
+    """Return the method to use for a redirect, matching browser behavior.
 
-    A 303 (and a 301/302 on a POST) becomes a bodyless GET; 307/308 preserve
-    the original method and body.
+    A 303, and a 301/302 on a POST, becomes a GET; 307/308 keep the method.
     """
-    new_method = method
-    becomes_get = (status_code == _HTTP_SEE_OTHER and method != "HEAD") or (
+    becomes_get = status_code == _HTTP_SEE_OTHER or (
         status_code in (_HTTP_MOVED_PERMANENTLY, _HTTP_FOUND) and method == "POST"
     )
-    if becomes_get:
-        new_method = "GET"
-
-    new_kwargs = dict(kwargs)
-    if new_method != method:
-        for body_key in ("data", "json", "files"):
-            new_kwargs.pop(body_key, None)
-    return new_method, new_kwargs
+    return "GET" if becomes_get else method
 
 
 def _sanitize_filename(filename: str, *, explicit: bool) -> str:

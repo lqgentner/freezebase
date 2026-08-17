@@ -121,8 +121,8 @@ Download a file with retries and a progress bar:
 ```python
 from freezebase.download import HTTPDownloader
 
-download = HTTPDownloader(auth=("user", "pass"))
-path = download("https://example.org/data.zip", "cache/")  # -> Path
+with HTTPDownloader(auth=("user", "pass")) as download:
+    path = download("https://example.org/data.zip", "cache/")  # -> Path
 ```
 
 ## Documentation
