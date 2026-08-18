@@ -36,8 +36,9 @@ A few things worth knowing about each.
 live S3-compatible service and are skipped unless the `FREEZEBASE_TEST_S3_*` environment
 variables are set — see [S3 integration tests](#s3-integration-tests) below.
 
-**Lint.** `ruff` runs with a broad rule set and numpydoc docstring conventions, both
-configured in `pyproject.toml`. Docstrings on public functions need `Parameters`,
+**Lint.** `ruff` runs its expanded default rule set plus project-specific checks and
+numpydoc docstring conventions, all configured in `pyproject.toml`. It also formats Python
+code blocks in Markdown and Quarto files. Docstrings on public functions need `Parameters`,
 `Returns`, and `Raises` sections; the linter enforces it.
 
 **Types.** The package ships a `py.typed` marker, so its annotations are part of the public

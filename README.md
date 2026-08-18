@@ -49,8 +49,8 @@ from shapely import box
 from freezebase.mgrs import MGRSGrid
 
 grid = MGRSGrid(box(8.4, 47.3, 8.6, 47.5))  # Zürich, WGS84
-gdf = grid.to_geodataframe()                # mgrs_code, zone, epsg, geometry, ...
-square = grid[0]                            # an odc.geo GeoBox per grid square
+gdf = grid.to_geodataframe()  # mgrs_code, zone, epsg, geometry, ...
+square = grid[0]  # an odc.geo GeoBox per grid square
 ```
 
 Each square is an `MGRSGeoBox` — a subclass of
@@ -77,7 +77,7 @@ Rewrite a local GeoTIFF as a Cloud-Optimized GeoTIFF:
 ```python
 from freezebase.raster import COG_PROFILE, rewrite_tiff
 
-rewrite_tiff("in.tif", "out.tif", profile=COG_PROFILE)             # copy
+rewrite_tiff("in.tif", "out.tif", profile=COG_PROFILE)  # copy
 rewrite_tiff("in.tif", "out.tif", profile=COG_PROFILE, move=True)  # move
 ```
 
