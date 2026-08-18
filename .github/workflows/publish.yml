@@ -12,6 +12,11 @@ name: Publish
 #   - Publish a GitHub Release  -> publishes to PyPI (deliberate UI action; the
 #     release's tag, e.g. `v0.1.0`, becomes the version via hatch-vcs).
 #   - Run manually (workflow_dispatch)  -> rehearse on TestPyPI first.
+#
+# Nothing is uploaded until the same commit has passed the full CI gate: `gate`
+# runs the identical lint, typing, test-matrix, lower-bound, S3 integration and
+# build jobs used on every push. A red commit cannot be released, whether by
+# publishing a GitHub Release or by dispatching manually.
 
 on:
   release:
@@ -19,7 +24,16 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Reuses ci.yml wholesale rather than duplicating its steps, so the release
+  # gate can never drift from the checks run on `main`.
+  gate:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      id-token: write
+
   build:
+    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

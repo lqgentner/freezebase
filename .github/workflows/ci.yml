@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # Lets publish.yml run this exact gate before uploading anything, so a release
+  # can never ship a commit that has not passed these checks.
+  workflow_call:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -37,6 +40,9 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -49,7 +55,14 @@ jobs:
       - name: Run tests with coverage
         run: >
           uv run --python ${{ matrix.python-version }} --all-extras
-          pytest -q --cov=freezebase --cov-branch --cov-report=term-missing
+          pytest -q --cov=freezebase --cov-branch
+          --cov-report=term-missing --cov-report=xml
+      - name: Upload coverage to Codecov
+        if: matrix.python-version == '3.13'
+        uses: codecov/codecov-action@v7
+        with:
+          files: ./coverage.xml
+          use_oidc: true
 
   test-lowest:
     # Verifies the declared dependency lower bounds actually install and pass on
@@ -109,6 +122,33 @@ jobs:
         run: uv build
       - name: Check metadata
         run: uvx twine check dist/*
+      - name: Verify distribution contents
+        # The wheel smoke tests below cover runtime modules; this checks the
+        # typing marker and the files promised specifically by the sdist.
+        run: |
+          python - <<'EOF'
+          import glob, sys, tarfile, zipfile
+
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          missing = []
+          if "freezebase/py.typed" not in names:
+              missing.append("wheel:freezebase/py.typed")
+
+          sdist = glob.glob("dist/*.tar.gz")[0]
+          members = ["/".join(n.split("/")[1:]) for n in tarfile.open(sdist).getnames()]
+          for name in ("pyproject.toml", "README.md", "LICENSE", "CHANGELOG.md"):
+              if name not in members:
+                  missing.append(f"sdist:{name}")
+          if not any(m.startswith("tests/") for m in members):
+              missing.append("sdist:tests/")
+          if not any(m.startswith("src/freezebase/") for m in members):
+              missing.append("sdist:src/freezebase/")
+
+          if missing:
+              sys.exit(f"Distributions are missing: {missing}")
+          print("packaging OK")
+          EOF
       - name: Smoke-test base wheel in a clean environment
         run: |
           uv venv /tmp/base
