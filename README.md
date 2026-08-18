@@ -1,5 +1,12 @@
 # freezebase
 
+[![CI](https://github.com/lqgentner/freezebase/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lqgentner/freezebase/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/freezebase.svg)](https://pypi.org/project/freezebase/)
+[![Python versions](https://img.shields.io/pypi/pyversions/freezebase.svg)](https://pypi.org/project/freezebase/)
+[![License](https://img.shields.io/pypi/l/freezebase.svg)](https://github.com/lqgentner/freezebase/blob/main/LICENSE)
+[![mypy](https://img.shields.io/badge/type_checked-mypy-blue.svg)](https://mypy-lang.org/)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+
 Lightweight geospatial helpers for reproducible MGRS grids and S3-backed raster workflows.
 
 freezebase grew out of large-scale glacier mapping, where scattered areas of
