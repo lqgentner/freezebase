@@ -1,6 +1,7 @@
 # freezebase
 
 [![CI](https://github.com/lqgentner/freezebase/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lqgentner/freezebase/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/lqgentner/freezebase/graph/badge.svg?token=XASWV60VNS)](https://codecov.io/gh/lqgentner/freezebase)
 [![PyPI](https://img.shields.io/pypi/v/freezebase.svg)](https://pypi.org/project/freezebase/)
 [![Python versions](https://img.shields.io/pypi/pyversions/freezebase.svg)](https://pypi.org/project/freezebase/)
 [![License](https://img.shields.io/pypi/l/freezebase.svg)](https://github.com/lqgentner/freezebase/blob/main/LICENSE)
