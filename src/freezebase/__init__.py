@@ -1,8 +1,11 @@
 """Initialize the freezebase module."""
 
 import functools
+from importlib.metadata import version as _version
 import logging
 from typing import Literal
+
+__version__ = _version("freezebase")
 
 logger = logging.getLogger(__name__)
 

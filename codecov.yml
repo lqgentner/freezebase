@@ -1,0 +1,11 @@
+coverage:
+  status:
+    # Overall coverage is enforced locally by coverage.py's `fail_under`.
+    project: off
+    patch:
+      default:
+        target: 90%
+        threshold: 0%
+        informational: false
+        if_not_found: failure
+        only_pulls: true

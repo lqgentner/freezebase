@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the project is pre-1.0 (`0.x`), minor releases may contain breaking changes.
 
+## Unreleased
+
+### Added
+
+- `freezebase.__version__`, read from the installed distribution metadata. The
+  version is still derived from git tags at build time by hatch-vcs; it is now
+  also reachable at runtime.
+
 ## [0.4.0] - 2026-08-17
 
 ### Added
