@@ -8,6 +8,12 @@ on:
   # Lets publish.yml run this exact gate before uploading anything, so a release
   # can never ship a commit that has not passed these checks.
   workflow_call:
+    inputs:
+      build_version:
+        description: Optional PEP 440 version override used for TestPyPI builds.
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -49,6 +55,8 @@ jobs:
         python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
@@ -119,7 +127,13 @@ jobs:
         with:
           enable-cache: true
       - name: Build sdist and wheel
-        run: uv build
+        env:
+          BUILD_VERSION: ${{ inputs.build_version }}
+        run: |
+          if [ -n "$BUILD_VERSION" ]; then
+            export SETUPTOOLS_SCM_PRETEND_VERSION="$BUILD_VERSION"
+          fi
+          uv build
       - name: Check metadata
         run: uvx twine check dist/*
       - name: Verify distribution contents
@@ -163,3 +177,5 @@ jobs:
         with:
           name: dist
           path: dist/*
+          if-no-files-found: error
+          retention-days: 14

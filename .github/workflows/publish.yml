@@ -1,58 +1,48 @@
 name: Publish
 
-# Builds the distribution and publishes it via PyPI Trusted Publishing (OIDC),
-# so no API tokens are stored in the repo. Configure the trusted publisher and
-# the GitHub environments once before first use:
+# Builds and validates the distribution once, then publishes those exact files
+# via PyPI Trusted Publishing (OIDC), so no API tokens are stored in the repo.
+# Configure the trusted publisher and GitHub environments once before first use:
 #
 #   1. On PyPI (and TestPyPI): add a trusted publisher for this repo pointing at
 #      this workflow file (`publish.yml`) and the matching environment name.
 #   2. On GitHub: create environments named `pypi` and `testpypi`.
 #
 # Usage:
-#   - Publish a GitHub Release  -> publishes to PyPI (deliberate UI action; the
-#     release's tag, e.g. `v0.1.0`, becomes the version via hatch-vcs).
-#   - Run manually (workflow_dispatch)  -> rehearse on TestPyPI first.
+#   - Publish a GitHub Release -> publishes vX.Y.Z or vX.Y.ZrcN to PyPI. Mark
+#     an rc release as a GitHub prerelease; development versions are rejected.
+#   - Run manually -> publishes X.Y.Z.dev<run number> to TestPyPI, where X.Y.Z
+#     is the requested target release.
 #
 # Nothing is uploaded until the same commit has passed the full CI gate: `gate`
 # runs the identical lint, typing, test-matrix, lower-bound, S3 integration and
-# build jobs used on every push. A red commit cannot be released, whether by
-# publishing a GitHub Release or by dispatching manually.
+# build jobs used on every push. It also supplies the immutable artifact to the
+# publishing job, so a red commit or untested rebuild can never be released.
 
 on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      target_version:
+        description: Target release for the TestPyPI dev build (X.Y.Z).
+        required: true
+        type: string
 
 jobs:
   # Reuses ci.yml wholesale rather than duplicating its steps, so the release
   # gate can never drift from the checks run on `main`.
   gate:
     uses: ./.github/workflows/ci.yml
+    with:
+      build_version: ${{ github.event_name == 'workflow_dispatch' && format('{0}.dev{1}', inputs.target_version, github.run_number) || '' }}
     permissions:
       contents: read
       id-token: write
 
-  build:
-    needs: gate
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          # hatch-vcs derives the version from git tags/history.
-          fetch-depth: 0
-      - uses: astral-sh/setup-uv@v7
-      - name: Build sdist and wheel
-        run: uv build
-      - name: Check metadata
-        run: uvx twine check dist/*
-      - uses: actions/upload-artifact@v7
-        with:
-          name: dist
-          path: dist/*
-
   publish-testpypi:
-    # Manual rehearsal: dispatch this workflow to push to TestPyPI.
-    needs: build
+    # Manual rehearsal: publish the gate's unique .devN artifact to TestPyPI.
+    needs: gate
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment: testpypi
@@ -68,14 +58,22 @@ jobs:
           repository-url: https://test.pypi.org/legacy/
 
   publish-pypi:
-    # Real release: only when a GitHub Release is published.
-    needs: build
+    # Stable and rc releases publish the exact artifact accepted by the gate.
+    needs: gate
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write
     steps:
+      - name: Validate release tag
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(rc[0-9]+)?$ ]]; then
+            echo "PyPI releases require a vX.Y.Z or vX.Y.ZrcN tag; got $RELEASE_TAG" >&2
+            exit 1
+          fi
       - uses: actions/download-artifact@v8
         with:
           name: dist
