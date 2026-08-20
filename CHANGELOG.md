@@ -10,6 +10,7 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ### Added
 
+- Python 3.14 support, verified in CI.
 - `freezebase.__version__`, read from the installed distribution metadata. The
   version is still derived from git tags at build time by hatch-vcs; it is now
   also reachable at runtime.
