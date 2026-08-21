@@ -15,6 +15,11 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   version is still derived from git tags at build time by hatch-vcs; it is now
   also reachable at runtime.
 
+### Fixed
+
+- `HTTPDownloader` now closes the streamed response on every path out of a
+  download, not only on the successful one.
+
 ## [0.4.0] - 2026-08-17
 
 ### Added

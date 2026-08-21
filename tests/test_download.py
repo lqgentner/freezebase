@@ -421,6 +421,81 @@ class TestSessionLifecycle:
 
 
 # ---------------------------------------------------------------------------
+# Response lifecycle: a streamed body is closed on every path out of __call__
+# ---------------------------------------------------------------------------
+
+
+class TestResponseClosedOnFailure:
+    """A streamed response holds its connection until closed.
+
+    The connection is checked out of the pool for the lifetime of the streamed
+    body, so `HTTPDownloader.close()` cannot reclaim it: only closing the
+    response itself returns the socket. Leaving that to garbage collection
+    leaks the connection and raises `ResourceWarning` at an unrelated moment,
+    typically interpreter shutdown.
+    """
+
+    def test_error_status_closes_response(self, tmp_path: Path) -> None:
+        url = f"{HOST}/file.zip"
+        session = FakeSession({url: make_response(status=500, url=url)})
+        dl = make_downloader(session)
+
+        with pytest.raises(requests.HTTPError):
+            dl(url=url, save_dir=tmp_path, filename="file.zip")
+
+        assert session.closed == [url]
+
+    def test_undownloadable_body_closes_response(self, tmp_path: Path) -> None:
+        url = f"{HOST}/file.zip"
+        session = FakeSession(
+            {url: make_response(url=url, headers={"Content-Type": "text/html"})},
+        )
+        dl = make_downloader(session)
+
+        with pytest.raises(RuntimeError, match="No downloadable file found"):
+            dl(url=url, save_dir=tmp_path, filename="file.zip")
+
+        assert session.closed == [url]
+
+    def test_rejected_filename_closes_response(self, tmp_path: Path) -> None:
+        url = f"{HOST}/file.zip"
+        session = FakeSession(
+            {url: make_response(url=url, headers={"Content-Type": "application/zip"})},
+        )
+        dl = make_downloader(session)
+
+        with pytest.raises(ValueError, match="directory separator"):
+            dl(url=url, save_dir=tmp_path, filename="../escape.zip")
+
+        assert session.closed == [url]
+
+    def test_existing_target_closes_response(self, tmp_path: Path) -> None:
+        url = f"{HOST}/file.zip"
+        session = FakeSession(
+            {url: make_response(url=url, headers={"Content-Type": "application/zip"})},
+        )
+        dl = make_downloader(session)
+        (tmp_path / "file.zip").write_bytes(b"already here")
+
+        with pytest.raises(FileExistsError):
+            dl(url=url, save_dir=tmp_path, filename="file.zip")
+
+        assert session.closed == [url]
+
+    def test_successful_download_closes_response(self, tmp_path: Path) -> None:
+        url = f"{HOST}/file.zip"
+        session = FakeSession(
+            {url: make_response(url=url, headers={"Content-Type": "application/zip"})},
+        )
+        dl = make_downloader(session)
+
+        filepath = dl(url=url, save_dir=tmp_path, filename="file.zip")
+
+        assert filepath.read_bytes() == b"payload"
+        assert session.closed == [url]
+
+
+# ---------------------------------------------------------------------------
 # Redirect method rewriting and RFC 5987 decoding
 # ---------------------------------------------------------------------------
 

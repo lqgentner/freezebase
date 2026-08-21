@@ -267,37 +267,39 @@ class HTTPDownloader:
             If the target exists and ``overwrite`` is ``False``.
 
         """
-        response = self._follow_redirects(url)
-        response.raise_for_status()
+        # Ensures the streamed response is properly closed
+        # (`close()` only closes the session)
+        with contextlib.closing(self._follow_redirects(url)) as response:
+            response.raise_for_status()
 
-        if not _is_downloadable_content(response):
-            msg = (
-                f"No downloadable file found for URL: '{url}'. "
-                "Make sure the authentication is correct."
-            )
-            raise RuntimeError(msg)
-
-        explicit_filename = filename is not None
-        if not filename:
-            cd = response.headers.get("Content-Disposition")
-            filename = _extract_filename_from_cd(cd) or _extract_filename_from_url(url)
-            if not filename:
-                msg = "Could not infer filename. Please specify with `filename=` argument."
+            if not _is_downloadable_content(response):
+                msg = (
+                    f"No downloadable file found for URL: '{url}'. "
+                    "Make sure the authentication is correct."
+                )
                 raise RuntimeError(msg)
 
-        safe_name = _sanitize_filename(filename, explicit=explicit_filename)
+            explicit_filename = filename is not None
+            if not filename:
+                cd = response.headers.get("Content-Disposition")
+                filename = _extract_filename_from_cd(cd) or _extract_filename_from_url(url)
+                if not filename:
+                    msg = "Could not infer filename. Please specify with `filename=` argument."
+                    raise RuntimeError(msg)
 
-        if isinstance(save_dir, str):
-            save_dir = Path(save_dir)
-        save_dir.mkdir(parents=True, exist_ok=True)
-        filepath = _resolve_within(save_dir, safe_name)
-        logger.info("Downloading '%s' from '%s' to '%s'.", safe_name, url, str(save_dir))
-        return _write_file(
-            response,
-            filepath,
-            show_progress=self.show_progress,
-            overwrite=overwrite,
-        )
+            safe_name = _sanitize_filename(filename, explicit=explicit_filename)
+
+            if isinstance(save_dir, str):
+                save_dir = Path(save_dir)
+            save_dir.mkdir(parents=True, exist_ok=True)
+            filepath = _resolve_within(save_dir, safe_name)
+            logger.info("Downloading '%s' from '%s' to '%s'.", safe_name, url, str(save_dir))
+            return _write_file(
+                response,
+                filepath,
+                show_progress=self.show_progress,
+                overwrite=overwrite,
+            )
 
     def _follow_redirects(self, url: str) -> requests.Response:
         """Follow redirects manually, bounding depth and protecting credentials.
@@ -551,7 +553,7 @@ def _extract_filename_from_cd(cd: str | None) -> str | None:
 
 def _extract_filename_from_url(
     url: str | None,
-) -> None | str:
+) -> str | None:
     """Extract the filename from an URL."""
     if not url:
         return None
