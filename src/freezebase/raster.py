@@ -454,8 +454,7 @@ def merge_tiffs(
     Raises
     ------
     ValueError
-        If src_files is empty.
-        If files have different CRS (when validate_crs=True).
+        If src_files is empty, or the files do not all share a CRS.
     FileNotFoundError
         If any source file does not exist.
     RuntimeError
@@ -598,10 +597,10 @@ def rewrite_tiff(
         stage(
             src_file,
             dst_file,
-            driver,
-            dst_profile,
-            band_names,
-            color_interp,
+            driver=driver,
+            dst_profile=dst_profile,
+            band_names=band_names,
+            color_interp=color_interp,
         )
     except Exception as e:
         msg = f"Failed to rewrite GeoTIFF: {e}"
@@ -616,6 +615,7 @@ def rewrite_tiff(
 def _rewrite_via_memory(
     src_file: UPath,
     dst_file: UPath,
+    *,
     driver: str,
     dst_profile: dict[str, Any],
     band_names: list[str] | None,
@@ -644,6 +644,7 @@ def _rewrite_via_memory(
 def _rewrite_via_tempfile(
     src_file: UPath,
     dst_file: UPath,
+    *,
     driver: str,
     dst_profile: dict[str, Any],
     band_names: list[str] | None,

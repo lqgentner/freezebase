@@ -4,26 +4,32 @@ from __future__ import annotations
 
 import gc
 import io
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 from unittest.mock import MagicMock
 from urllib.parse import urlparse
+from uuid import uuid4
 import weakref
 
 import pytest
 import requests
 from requests.adapters import BaseAdapter
 from requests.structures import CaseInsensitiveDict
+from upath import UPath
 
 from freezebase.download import (
     MAX_REDIRECTS,
+    REMOTE_BLOCK_SIZE,
     HTTPDownloader,
     _extract_filename_from_cd,
+    _extract_filename_from_url,
     _resolve_within,
     _rewrite_redirect_method,
     _sanitize_filename,
+    _write_file,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 HOST = "https://host.example"
@@ -88,8 +94,14 @@ class _ScriptedAdapter(BaseAdapter):
         self._responses = responses
         self.calls: list[requests.PreparedRequest] = []
 
-    def send(self, request: requests.PreparedRequest, **_kwargs: object) -> requests.Response:
+    def send(
+        self,
+        request: requests.PreparedRequest,
+        *_args: object,
+        **_kwargs: object,
+    ) -> requests.Response:
         self.calls.append(request)
+        assert request.url is not None
         resp = self._responses[request.url]
         resp.request = request
         resp.raw = io.BytesIO(b"payload")  # reset the stream for re-reads
@@ -158,6 +170,28 @@ class TestSanitizeFilename:
     )
     def test_rejects_unsafe_names(self, name: str) -> None:
         with pytest.raises(ValueError, match="Refusing"):
+            _sanitize_filename(name, explicit=False)
+
+    @pytest.mark.parametrize(
+        ("name", "reason"),
+        [
+            ("", "not a valid file name"),
+            (".", "not a valid file name"),
+            ("..", "not a valid file name"),
+            ("bad\x00name", "control characters"),
+            ("/etc/passwd", "directory separator"),
+            ("a/b.zip", "directory separator"),
+            ("..\\evil.zip", "directory separator"),
+            ("C:\\Windows", "directory separator"),
+            ("name:stream", "contains ':'"),
+            ("C:file", "contains ':'"),
+            ("CON", "reserved device name"),
+        ],
+    )
+    def test_names_the_guard_that_rejected_the_name(self, name: str, reason: str) -> None:
+        # Pins which check does the work: a reordering that leaves one guard
+        # shadowed by another shows up here rather than as dead code.
+        with pytest.raises(ValueError, match=reason):
             _sanitize_filename(name, explicit=False)
 
     @pytest.mark.parametrize("name", ["file.zip", "S1A_20200101.tif", "data.tar.gz", "plain"])
@@ -246,6 +280,117 @@ class TestDownloadFilenameConfinement:
 
         dl(f"{HOST}/file", tmp_path)
         assert not list(tmp_path.glob("*.partial"))
+
+
+# ---------------------------------------------------------------------------
+# Remote (non-local) destinations
+# ---------------------------------------------------------------------------
+
+
+class _RecordingRemoteFile:
+    """Minimal stand-in for a remote file handle that records its open kwargs."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.chunks: list[bytes] = []
+        self.open_kwargs: dict[str, object] = {}
+        self.exists_value = False
+
+    # Not a `pathlib.Path`: that is what `_write_file` branches on.
+    def exists(self) -> bool:
+        return self.exists_value
+
+    def open(self, mode: str, **kwargs: object) -> Self:
+        assert mode == "wb"
+        self.open_kwargs = kwargs
+        return self
+
+    def write(self, chunk: bytes) -> None:
+        self.chunks.append(chunk)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        pass
+
+
+@pytest.fixture
+def memory_dir() -> Iterator[UPath]:
+    """Return an empty in-memory directory, unique to this test."""
+    directory = UPath(f"memory://bucket/{uuid4().hex}")
+    yield directory
+    if directory.exists():
+        directory.fs.rm(directory.path, recursive=True)
+
+
+class TestRemoteDestination:
+    """Downloads to a non-local ``UPath`` write the final key directly."""
+
+    def test_writes_file_to_remote_path(self, memory_dir: UPath) -> None:
+        resp = make_response(headers={"Content-Disposition": 'attachment; filename="real.zip"'})
+        dl = make_downloader(FakeSession({f"{HOST}/file": resp}))
+
+        out = dl(f"{HOST}/file", memory_dir)
+
+        assert out == memory_dir / "real.zip"
+        assert out.read_bytes() == b"payload"
+
+    def test_creates_the_remote_directory(self, memory_dir: UPath) -> None:
+        resp = make_response(headers={"Content-Disposition": 'attachment; filename="real.zip"'})
+        dl = make_downloader(FakeSession({f"{HOST}/file": resp}))
+
+        dl(f"{HOST}/file", memory_dir)
+
+        assert memory_dir.exists()
+
+    def test_no_partial_file_is_staged_remotely(self, memory_dir: UPath) -> None:
+        resp = make_response(headers={"Content-Disposition": 'attachment; filename="real.zip"'})
+        dl = make_downloader(FakeSession({f"{HOST}/file": resp}))
+
+        dl(f"{HOST}/file", memory_dir)
+
+        assert [p.name for p in memory_dir.iterdir()] == ["real.zip"]
+
+    def test_existing_remote_target_not_overwritten_by_default(self, memory_dir: UPath) -> None:
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        (memory_dir / "real.zip").write_bytes(b"original")
+        resp = make_response(headers={"Content-Disposition": 'attachment; filename="real.zip"'})
+        dl = make_downloader(FakeSession({f"{HOST}/file": resp}))
+
+        with pytest.raises(FileExistsError):
+            dl(f"{HOST}/file", memory_dir)
+        assert (memory_dir / "real.zip").read_bytes() == b"original"
+
+    def test_overwrite_true_replaces_remote_target(self, memory_dir: UPath) -> None:
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        (memory_dir / "real.zip").write_bytes(b"original")
+        resp = make_response(headers={"Content-Disposition": 'attachment; filename="real.zip"'})
+        dl = make_downloader(FakeSession({f"{HOST}/file": resp}))
+
+        out = dl(f"{HOST}/file", memory_dir, overwrite=True)
+
+        assert out.read_bytes() == b"payload"
+
+    def test_remote_write_uses_the_large_block_size(self) -> None:
+        # Object stores pay per request, hence the larger block size.
+        resp = make_response()
+        target = _RecordingRemoteFile("real.zip")
+
+        _write_file(resp, target, show_progress=False)  # type: ignore[type-var]
+
+        assert target.open_kwargs == {"block_size": REMOTE_BLOCK_SIZE}
+        assert b"".join(target.chunks) == b"payload"
+
+    def test_remote_write_respects_overwrite_guard(self) -> None:
+        resp = make_response()
+        target = _RecordingRemoteFile("real.zip")
+        target.exists_value = True
+
+        with pytest.raises(FileExistsError, match="Target already exists"):
+            _write_file(resp, target, show_progress=False)  # type: ignore[type-var]
+
+        assert target.chunks == []
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +566,81 @@ class TestSessionLifecycle:
 
 
 # ---------------------------------------------------------------------------
+# Response lifecycle: a streamed body is closed on every path out of __call__
+# ---------------------------------------------------------------------------
+
+
+class TestResponseClosedOnFailure:
+    """A streamed response holds its connection until closed.
+
+    The connection is checked out of the pool for the lifetime of the streamed
+    body, so `HTTPDownloader.close()` cannot reclaim it: only closing the
+    response itself returns the socket. Leaving that to garbage collection
+    leaks the connection and raises `ResourceWarning` at an unrelated moment,
+    typically interpreter shutdown.
+    """
+
+    def test_error_status_closes_response(self, tmp_path: Path) -> None:
+        url = f"{HOST}/file.zip"
+        session = FakeSession({url: make_response(status=500, url=url)})
+        dl = make_downloader(session)
+
+        with pytest.raises(requests.HTTPError):
+            dl(url=url, save_dir=tmp_path, filename="file.zip")
+
+        assert session.closed == [url]
+
+    def test_undownloadable_body_closes_response(self, tmp_path: Path) -> None:
+        url = f"{HOST}/file.zip"
+        session = FakeSession(
+            {url: make_response(url=url, headers={"Content-Type": "text/html"})},
+        )
+        dl = make_downloader(session)
+
+        with pytest.raises(RuntimeError, match="No downloadable file found"):
+            dl(url=url, save_dir=tmp_path, filename="file.zip")
+
+        assert session.closed == [url]
+
+    def test_rejected_filename_closes_response(self, tmp_path: Path) -> None:
+        url = f"{HOST}/file.zip"
+        session = FakeSession(
+            {url: make_response(url=url, headers={"Content-Type": "application/zip"})},
+        )
+        dl = make_downloader(session)
+
+        with pytest.raises(ValueError, match="directory separator"):
+            dl(url=url, save_dir=tmp_path, filename="../escape.zip")
+
+        assert session.closed == [url]
+
+    def test_existing_target_closes_response(self, tmp_path: Path) -> None:
+        url = f"{HOST}/file.zip"
+        session = FakeSession(
+            {url: make_response(url=url, headers={"Content-Type": "application/zip"})},
+        )
+        dl = make_downloader(session)
+        (tmp_path / "file.zip").write_bytes(b"already here")
+
+        with pytest.raises(FileExistsError):
+            dl(url=url, save_dir=tmp_path, filename="file.zip")
+
+        assert session.closed == [url]
+
+    def test_successful_download_closes_response(self, tmp_path: Path) -> None:
+        url = f"{HOST}/file.zip"
+        session = FakeSession(
+            {url: make_response(url=url, headers={"Content-Type": "application/zip"})},
+        )
+        dl = make_downloader(session)
+
+        filepath = dl(url=url, save_dir=tmp_path, filename="file.zip")
+
+        assert filepath.read_bytes() == b"payload"
+        assert session.closed == [url]
+
+
+# ---------------------------------------------------------------------------
 # Redirect method rewriting and RFC 5987 decoding
 # ---------------------------------------------------------------------------
 
@@ -446,3 +666,54 @@ class TestExtractFilenameFromCd:
 
     def test_none_when_absent(self) -> None:
         assert _extract_filename_from_cd("attachment") is None
+
+    def test_none_for_empty_header(self) -> None:
+        assert _extract_filename_from_cd(None) is None
+        assert _extract_filename_from_cd("") is None
+
+
+class TestExtractFilenameFromUrl:
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            (f"{HOST}/files/data.tar.gz", "data.tar.gz"),
+            (f"{HOST}/a.zip?token=abc", "a.zip"),
+            (f"{HOST}/r%C3%A9sum%C3%A9.pdf", "résumé.pdf"),
+        ],
+    )
+    def test_extracts_name_with_extension(self, url: str, expected: str) -> None:
+        assert _extract_filename_from_url(url) == expected
+
+    @pytest.mark.parametrize("url", [f"{HOST}/download", f"{HOST}/", "", None])
+    def test_none_without_an_extension(self, url: str | None) -> None:
+        # An extensionless path segment is not a usable filename, so the caller
+        # falls through to raising rather than saving a directory name.
+        assert _extract_filename_from_url(url) is None
+
+
+class TestFilenameInference:
+    def test_infers_from_url_when_no_content_disposition(self, tmp_path: Path) -> None:
+        url = f"{HOST}/files/data.tar.gz"
+        resp = make_response(url=url, headers={"Content-Type": "application/gzip"})
+        dl = make_downloader(FakeSession({url: resp}))
+
+        out = dl(url, tmp_path)
+
+        assert out == tmp_path / "data.tar.gz"
+
+    def test_unresolvable_filename_raises(self, tmp_path: Path) -> None:
+        url = f"{HOST}/download"
+        resp = make_response(url=url, headers={"Content-Type": "application/zip"})
+        dl = make_downloader(FakeSession({url: resp}))
+
+        with pytest.raises(RuntimeError, match="Could not infer filename"):
+            dl(url, tmp_path)
+
+    def test_accepts_a_str_save_dir(self, tmp_path: Path) -> None:
+        resp = make_response(headers={"Content-Disposition": 'attachment; filename="real.zip"'})
+        dl = make_downloader(FakeSession({f"{HOST}/file": resp}))
+
+        out = dl(f"{HOST}/file", str(tmp_path / "nested"))
+
+        assert out == tmp_path / "nested" / "real.zip"
+        assert out.read_bytes() == b"payload"

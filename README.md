@@ -1,6 +1,7 @@
 # freezebase
 
 [![CI](https://github.com/lqgentner/freezebase/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lqgentner/freezebase/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/lqgentner/freezebase/graph/badge.svg?token=XASWV60VNS)](https://codecov.io/gh/lqgentner/freezebase)
 [![PyPI](https://img.shields.io/pypi/v/freezebase.svg)](https://pypi.org/project/freezebase/)
 [![Python versions](https://img.shields.io/pypi/pyversions/freezebase.svg)](https://pypi.org/project/freezebase/)
 [![License](https://img.shields.io/pypi/l/freezebase.svg)](https://github.com/lqgentner/freezebase/blob/main/LICENSE)
@@ -48,8 +49,8 @@ from shapely import box
 from freezebase.mgrs import MGRSGrid
 
 grid = MGRSGrid(box(8.4, 47.3, 8.6, 47.5))  # Zürich, WGS84
-gdf = grid.to_geodataframe()                # mgrs_code, zone, epsg, geometry, ...
-square = grid[0]                            # an odc.geo GeoBox per grid square
+gdf = grid.to_geodataframe()  # mgrs_code, zone, epsg, geometry, ...
+square = grid[0]  # an odc.geo GeoBox per grid square
 ```
 
 Each square is an `MGRSGeoBox` — a subclass of
@@ -76,7 +77,7 @@ Rewrite a local GeoTIFF as a Cloud-Optimized GeoTIFF:
 ```python
 from freezebase.raster import COG_PROFILE, rewrite_tiff
 
-rewrite_tiff("in.tif", "out.tif", profile=COG_PROFILE)             # copy
+rewrite_tiff("in.tif", "out.tif", profile=COG_PROFILE)  # copy
 rewrite_tiff("in.tif", "out.tif", profile=COG_PROFILE, move=True)  # move
 ```
 

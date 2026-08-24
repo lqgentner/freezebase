@@ -1,7 +1,10 @@
 coverage:
   status:
-    # Overall coverage is enforced locally by coverage.py's `fail_under`.
-    project: off
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        if_not_found: success
     patch:
       default:
         target: 90%

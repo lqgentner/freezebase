@@ -200,8 +200,10 @@ aoi_gdf.boundary.plot(ax=ax, color="black", linewidth=2.0, linestyle="--")
 cx.add_basemap(ax, source=cx.providers.CartoDB.Positron, crs=web_mercator, attribution_size=6)
 ax.legend(
     handles=[
-        *(Patch(facecolor=color, alpha=0.25, edgecolor=color, label=f"UTM zone {zone}")
-          for zone, color in zone_colors.items()),
+        *(
+            Patch(facecolor=color, alpha=0.25, edgecolor=color, label=f"UTM zone {zone}")
+            for zone, color in zone_colors.items()
+        ),
         Patch(facecolor="none", edgecolor="black", linestyle="--", label="AOI"),
     ],
     loc="lower right",

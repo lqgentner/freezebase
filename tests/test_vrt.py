@@ -8,11 +8,18 @@ from xml.etree import ElementTree as ET
 import numpy as np
 import pytest
 import rasterio
-from rasterio.transform import from_origin
+from rasterio.transform import Affine, from_origin
 
-from freezebase.vrt import build_vrt_mosaic, create_decibel_vrt, create_rgb_vrt
+from freezebase.vrt import _nodata_equal, build_vrt_mosaic, create_decibel_vrt, create_rgb_vrt
 
 WIDTH, HEIGHT = 6, 4
+
+
+def find(element: ET.Element, path: str) -> ET.Element:
+    """Return the descendant at ``path``, failing the test if it is absent."""
+    found = element.find(path)
+    assert found is not None, f"no element at {path!r}"
+    return found
 
 
 def make_tiff(
@@ -20,25 +27,31 @@ def make_tiff(
     *,
     origin: tuple[float, float] = (500000, 5200000),
     fill: float | None = None,
+    dtype: str = "float32",
+    count: int = 1,
+    nodata: float | None = np.nan,
+    transform: Affine | None = None,
+    crs: str = "EPSG:32632",
 ) -> None:
     rng = np.random.default_rng(0)
     if fill is not None:
-        data = np.full((HEIGHT, WIDTH), fill, dtype=np.float32)
+        data = np.full((HEIGHT, WIDTH), fill, dtype=dtype)
     else:
-        data = rng.random((HEIGHT, WIDTH)).astype(np.float32)
+        data = rng.random((HEIGHT, WIDTH)).astype(dtype)
     with rasterio.open(
         path,
         "w",
         driver="GTiff",
         width=WIDTH,
         height=HEIGHT,
-        count=1,
-        dtype="float32",
-        crs="EPSG:32632",
-        transform=from_origin(origin[0], origin[1], 10, 10),
-        nodata=np.nan,
+        count=count,
+        dtype=dtype,
+        crs=crs,
+        transform=transform if transform is not None else from_origin(*origin, 10, 10),
+        nodata=nodata,
     ) as dst:
-        dst.write(data, 1)
+        for band in range(1, count + 1):
+            dst.write(data, band)
         dst.set_band_description(1, "VV")
 
 
@@ -68,7 +81,7 @@ class TestDecibelVrt:
         band = root.find("VRTRasterBand")
         assert band is not None
         assert band.findtext("PixelFunctionType") == "dB"
-        assert band.find("PixelFunctionArguments").get("fact") == "10"
+        assert find(band, "PixelFunctionArguments").get("fact") == "10"
 
         # GDAL must be able to open the derived VRT
         with rasterio.open(vrt_path) as src:
@@ -81,7 +94,7 @@ class TestDecibelVrt:
         create_decibel_vrt(vv_tiff, vrt_path, from_intensity=False)
 
         root = ET.parse(vrt_path).getroot()  # noqa: S314 -- parsing our own just-written fixture
-        assert root.find("VRTRasterBand/PixelFunctionArguments").get("fact") == "20"
+        assert find(root, "VRTRasterBand/PixelFunctionArguments").get("fact") == "20"
 
     def test_source_referenced_relative(self, vv_tiff: Path, tmp_path: Path) -> None:
         vrt_path = tmp_path / "vv_db.vrt"
@@ -89,7 +102,7 @@ class TestDecibelVrt:
         create_decibel_vrt(vv_tiff, vrt_path)
 
         root = ET.parse(vrt_path).getroot()  # noqa: S314 -- parsing our own just-written fixture
-        source = root.find("VRTRasterBand/SimpleSource/SourceFilename")
+        source = find(root, "VRTRasterBand/SimpleSource/SourceFilename")
         assert source.text == "vv.tif"
         assert source.get("relativeToVRT") == "1"
 
@@ -165,6 +178,14 @@ class TestRgbVrt:
             dst.write(np.zeros((HEIGHT, WIDTH), dtype=np.float32), 1)
 
         with pytest.raises(ValueError, match="CRS"):
+            create_rgb_vrt(vv_tiff, vh_path, tmp_path / "rgb.vrt")
+
+    def test_rejects_mismatched_geotransform(self, vv_tiff: Path, tmp_path: Path) -> None:
+        # Same size and CRS, different origin: the bands cover different ground.
+        vh_path = tmp_path / "vh_shifted.tif"
+        make_tiff(vh_path, origin=(600000, 5300000))
+
+        with pytest.raises(ValueError, match="geotransform"):
             create_rgb_vrt(vv_tiff, vh_path, tmp_path / "rgb.vrt")
 
 
@@ -307,3 +328,93 @@ class TestBuildVrtMosaic:
 
         with pytest.raises(ValueError, match="aligned"):
             build_vrt_mosaic([tile_a, tile_b], tmp_path / "mosaic.vrt")
+
+    def test_rejects_multiband_reference_tile(self, tmp_path: Path) -> None:
+        tile_a = tmp_path / "a.tif"
+        tile_b = tmp_path / "b.tif"
+        make_tiff(tile_a, fill=1.0, count=2)
+        make_tiff(tile_b, origin=(500000 + WIDTH * 10, 5200000), fill=2.0, count=2)
+
+        with pytest.raises(ValueError, match="single-band"):
+            build_vrt_mosaic([tile_a, tile_b], tmp_path / "mosaic.vrt")
+
+    def test_rejects_multiband_non_reference_tile(self, tmp_path: Path) -> None:
+        # A later multi-band tile hits the per-tile check, not the up-front one.
+        tile_a = tmp_path / "a.tif"
+        tile_b = tmp_path / "b.tif"
+        make_tiff(tile_a, fill=1.0)
+        make_tiff(tile_b, origin=(500000 + WIDTH * 10, 5200000), fill=2.0, count=2)
+
+        with pytest.raises(ValueError, match="single-band"):
+            build_vrt_mosaic([tile_a, tile_b], tmp_path / "mosaic.vrt")
+
+    def test_rejects_unsupported_dtype(self, tmp_path: Path) -> None:
+        tile_a = tmp_path / "a.tif"
+        make_tiff(tile_a, fill=1.0, dtype="complex64", nodata=None)
+
+        # Complex dtypes have no GDAL name; better than emitting a broken VRT.
+        with pytest.raises(ValueError, match="Unsupported tile dtype"):
+            build_vrt_mosaic([tile_a], tmp_path / "mosaic.vrt")
+
+    def test_rejects_mismatched_nodata(self, tmp_path: Path) -> None:
+        tile_a = tmp_path / "a.tif"
+        tile_b = tmp_path / "b.tif"
+        make_tiff(tile_a, fill=1.0, nodata=np.nan)
+        make_tiff(tile_b, origin=(500000 + WIDTH * 10, 5200000), fill=2.0, nodata=0.0)
+
+        # Matching CRS, dtype and pixel size is not enough; seams need NODATA too.
+        with pytest.raises(ValueError, match="NODATA"):
+            build_vrt_mosaic([tile_a, tile_b], tmp_path / "mosaic.vrt")
+
+    def test_rejects_sheared_tile(self, tmp_path: Path) -> None:
+        tile_a = tmp_path / "a.tif"
+        tile_b = tmp_path / "b.tif"
+        make_tiff(tile_a, fill=1.0)
+        make_tiff(
+            tile_b,
+            fill=2.0,
+            transform=Affine(10, 2, 500000 + WIDTH * 10, 0, -10, 5200000),
+        )
+
+        with pytest.raises(ValueError, match="Rotated/sheared"):
+            build_vrt_mosaic([tile_a, tile_b], tmp_path / "mosaic.vrt")
+
+    def test_accepts_tiles_without_nodata(self, tmp_path: Path) -> None:
+        tile_a = tmp_path / "a.tif"
+        tile_b = tmp_path / "b.tif"
+        make_tiff(tile_a, fill=1.0, nodata=None)
+        make_tiff(tile_b, origin=(500000 + WIDTH * 10, 5200000), fill=2.0, nodata=None)
+        vrt_path = tmp_path / "mosaic.vrt"
+
+        build_vrt_mosaic([tile_a, tile_b], vrt_path)
+
+        # Without a NODATA value the sources are plain SimpleSource entries.
+        root = ET.parse(vrt_path).getroot()  # noqa: S314 -- parsing our own just-written fixture
+        band = root.find("VRTRasterBand")
+        assert band is not None
+        assert band.find("NoDataValue") is None
+        assert len(band.findall("SimpleSource")) == 2
+        assert band.findall("ComplexSource") == []
+
+        with rasterio.open(vrt_path) as ds:
+            assert ds.width == WIDTH * 2
+
+
+class TestNodataEqual:
+    def test_both_none_is_equal(self) -> None:
+        assert _nodata_equal(None, None)
+
+    def test_none_against_value_is_not_equal(self) -> None:
+        assert not _nodata_equal(None, 0.0)
+        assert not _nodata_equal(0.0, None)
+
+    def test_nan_matches_nan(self) -> None:
+        # `nan == nan` is False, so NODATA comparison needs the special case.
+        assert _nodata_equal(float("nan"), float("nan"))
+
+    def test_nan_against_value_is_not_equal(self) -> None:
+        assert not _nodata_equal(float("nan"), 0.0)
+
+    def test_plain_values_compare_by_value(self) -> None:
+        assert _nodata_equal(0.0, 0.0)
+        assert not _nodata_equal(0.0, -9999.0)

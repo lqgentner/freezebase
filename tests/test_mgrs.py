@@ -1,10 +1,11 @@
 """Tests for freezebase.mgrs - MGRS grid system."""
 
 from affine import Affine
+import geopandas as gpd
 import numpy as np
 from pyproj import CRS
 import pytest
-from shapely import Point, box
+from shapely import Point, Polygon, box
 
 from freezebase.mgrs import (
     MGRSGeoBox,
@@ -57,7 +58,7 @@ class TestUtmToCrs:
 
     def test_rejects_invalid_hemisphere(self) -> None:
         with pytest.raises(ValueError, match="Hemisphere"):
-            utm_to_crs(32, "X")
+            utm_to_crs(32, "X")  # type: ignore[arg-type]
 
     def test_rejects_invalid_zone(self) -> None:
         with pytest.raises(ValueError, match="UTM zone"):
@@ -91,7 +92,7 @@ class TestUTMZoneGenerator:
 
     def test_get_zone_geometry_rejects_invalid_hemisphere(self) -> None:
         with pytest.raises(ValueError, match="Hemisphere"):
-            UTMZones().get_zone_geometry(32, "X")
+            UTMZones().get_zone_geometry(32, "X")  # type: ignore[arg-type]
 
     def test_find_intersecting_scalar_geometry(self) -> None:
         # Previously raised IndexError for a scalar geometry query.
@@ -103,6 +104,94 @@ class TestUTMZoneGenerator:
         geoms = np.array([Point(8.5, 47.4), Point(-100.0, 40.0)])
         hits = UTMZones().find_intersecting(geoms)
         assert len(hits) >= 2
+
+
+# ---------------------------------------------------------------------------
+# Norway / Svalbard zone-width exceptions
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def northern_zones() -> gpd.GeoDataFrame:
+    gdf = UTMZones().gdf
+    return gdf[gdf.hemisphere == "N"]
+
+
+def _containing_zones(northern_zones: gpd.GeoDataFrame, lon: float, lat: float) -> list[int]:
+    hits = northern_zones[northern_zones.geometry.contains(Point(lon, lat))]
+    return sorted(hits.zone.tolist())
+
+
+class TestUTMZoneExceptions:
+    """The Norway and Svalbard deviations from the regular 6-degree zone width."""
+
+    @pytest.mark.parametrize(
+        ("lon", "lat", "expected"),
+        [
+            # Norway, 56-64 N: zone 31 is narrowed to 0-3 E, zone 32 widened to 3-12 E.
+            (1.5, 60.0, 31),
+            (4.5, 60.0, 32),
+            (10.5, 60.0, 32),
+            # Below 56 N the same longitudes follow the regular 6-degree zones.
+            (1.5, 50.0, 31),
+            (4.5, 50.0, 31),
+            (10.5, 50.0, 32),
+        ],
+    )
+    def test_norway_band(
+        self,
+        northern_zones: gpd.GeoDataFrame,
+        lon: float,
+        lat: float,
+        expected: int,
+    ) -> None:
+        assert _containing_zones(northern_zones, lon, lat) == [expected]
+
+    @pytest.mark.parametrize(
+        ("lon", "expected"),
+        [
+            (4.5, 31),  # 31X spans 0-9 E
+            (7.5, 31),
+            (12.0, 33),  # 33X spans 9-21 E
+            (19.0, 33),
+            (25.0, 35),  # 35X spans 21-33 E
+            (38.0, 37),  # 37X spans 33-42 E
+        ],
+    )
+    def test_svalbard_band_above_72_degrees(
+        self,
+        northern_zones: gpd.GeoDataFrame,
+        lon: float,
+        expected: int,
+    ) -> None:
+        assert _containing_zones(northern_zones, lon, 78.0) == [expected]
+
+    @pytest.mark.parametrize("zone", [32, 34, 36])
+    def test_even_zones_absent_above_72_degrees(self, zone: int) -> None:
+        # Zones 32X, 34X and 36X do not exist; the odd zones absorb them.
+        geom = UTMZones().get_zone_geometry(zone, "N")
+        assert geom.bounds[3] == 72
+
+    def test_even_zones_still_reach_72_degrees(self, northern_zones: gpd.GeoDataFrame) -> None:
+        # The cut is at 72 N, not 64 N.
+        assert _containing_zones(northern_zones, 10.0, 70.0) == [32]
+        assert _containing_zones(northern_zones, 10.0, 74.0) == [33]
+
+    def test_exception_region_is_covered_exactly_once(
+        self,
+        northern_zones: gpd.GeoDataFrame,
+    ) -> None:
+        # The exception geometries must neither overlap nor leave gaps.
+        offenders = []
+        for lon_step in range(-2, 44):
+            lon = lon_step + 0.25
+            for lat_step in range(54, 84):
+                lat = lat_step + 0.25
+                zones = _containing_zones(northern_zones, lon, lat)
+                if len(zones) != 1:
+                    offenders.append((lon, lat, zones))
+
+        assert offenders == []
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +282,82 @@ class TestMGRSGrid:
         assert row.easting == 610000
         assert row.northing == 2350000
         assert row.geometry.contains(box(-157.9, 21.28, -157.88, 21.30))
+
+
+class TestMGRSGridFilterGeometryInput:
+    """``filter_geometry`` accepts four container types and one CRS."""
+
+    EXPECTED = len(MGRSGrid(ZURICH_AOI))
+
+    def test_accepts_scalar_geometry(self) -> None:
+        assert len(MGRSGrid(ZURICH_AOI)) == self.EXPECTED
+
+    def test_accepts_geoseries(self) -> None:
+        series = gpd.GeoSeries([ZURICH_AOI], crs="EPSG:4326")
+        assert len(MGRSGrid(series)) == self.EXPECTED
+
+    def test_accepts_geodataframe(self) -> None:
+        gdf = gpd.GeoDataFrame({"geometry": [ZURICH_AOI]}, crs="EPSG:4326")
+        assert len(MGRSGrid(gdf)) == self.EXPECTED  # type: ignore[arg-type]
+
+    def test_accepts_plain_list(self) -> None:
+        assert len(MGRSGrid([ZURICH_AOI])) == self.EXPECTED  # type: ignore[arg-type]
+
+    def test_rejects_projected_crs(self) -> None:
+        # A projected AOI would be read as degrees and select the wrong squares.
+        series = gpd.GeoSeries([box(460000, 5240000, 480000, 5260000)], crs="EPSG:32632")
+        with pytest.raises(ValueError, match="filter_geometry"):
+            MGRSGrid(series)
+
+    def test_empty_geometry_yields_empty_grid(self) -> None:
+        grid = MGRSGrid(gpd.GeoSeries([Polygon()], crs="EPSG:4326"))
+        assert len(grid) == 0
+
+    def test_empty_geometry_does_not_displace_its_neighbours(self) -> None:
+        # Empty geometries are nulled out, not dropped, to keep tree indices aligned.
+        mixed = gpd.GeoSeries([Polygon(), ZURICH_AOI], crs="EPSG:4326")
+        assert len(MGRSGrid(mixed)) == self.EXPECTED
+
+
+class TestMGRSGridInExceptionZones:
+    """Grids built over the Norway and Svalbard exception zones."""
+
+    @pytest.mark.parametrize(
+        ("aoi", "expected_prefix"),
+        [
+            (box(15.0, 78.0, 15.3, 78.1), "33X"),  # Svalbard, widened zone 33
+            (box(4.0, 60.0, 4.3, 60.1), "32V"),  # Norway, widened zone 32
+            (box(1.0, 60.0, 1.3, 60.1), "31V"),  # Norway, narrowed zone 31
+        ],
+    )
+    def test_squares_land_in_the_exception_zone(self, aoi: Polygon, expected_prefix: str) -> None:
+        grid = MGRSGrid(aoi)
+
+        assert len(grid) > 0
+        assert {code[:3] for code in grid.mgrs_codes} == {expected_prefix}
+
+    @pytest.mark.parametrize(
+        "aoi",
+        [
+            box(15.0, 78.0, 15.3, 78.1),
+            box(4.0, 60.0, 4.3, 60.1),
+        ],
+    )
+    def test_geoboxes_round_trip_through_their_code(self, aoi: Polygon) -> None:
+        # The grid and `from_mgrs` derive the CRS by different routes.
+        grid = MGRSGrid(aoi)
+
+        for square in grid:
+            rebuilt = MGRSGeoBox.from_mgrs(square.mgrs_code)
+            assert square.crs == rebuilt.crs
+            assert square.affine == rebuilt.affine
+            assert square.shape == rebuilt.shape
+
+    def test_squares_intersect_the_aoi(self) -> None:
+        aoi = box(15.0, 78.0, 15.3, 78.1)
+        gdf = MGRSGrid(aoi).to_geodataframe()
+
+        assert gdf.geometry.intersects(aoi).all()
 
 
 # ---------------------------------------------------------------------------

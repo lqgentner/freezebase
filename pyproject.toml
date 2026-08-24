@@ -26,18 +26,19 @@ classifiers = [
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: GIS",
     "Operating System :: OS Independent",
     "Typing :: Typed",
 ]
 dynamic = ["version"]
 # Lower bounds reflect the oldest release that both supports the required
-# Python (>=3.12) and works with this code. Notably `numpy>=2.0` is required
-# because the code uses `np.concat` (added in NumPy 2.0).
+# Python (>=3.12) and works with this code.
 dependencies = [
     "affine>=2.4.0",
     "geopandas>=1.1",
     "mgrs>=1.4.4",
+    # Required because the code uses `np.concat`
     "numpy>=2.0",
     "odc-geo>=0.5.0",
     "pandas>=2.3",
@@ -46,7 +47,8 @@ dependencies = [
     "pyproj>=3.6.1",
     "rasterio>=1.5.0",
     "requests>=2.28",
-    "rich>=13",
+    # Required because `track_progress` passes `completed` to `Progress.track`
+    "rich>=13.8",
     "shapely>=2.1.0",
     "tenacity>=8.2",
     "universal-pathlib>=0.3",
@@ -71,21 +73,21 @@ Changelog = "https://github.com/lqgentner/freezebase/blob/main/CHANGELOG.md"
 # (used by the lowest-bound CI job) resolves a working toolchain instead of
 # dragging e.g. pytest down to an ancient, uninstallable release.
 dev = [
-    "mypy>=1.11",
-    "pandas-stubs>=2.2",
-    "pytest>=8.2",
-    "pytest-cov>=5.0",
-    "ruff>=0.6",
-    "types-geopandas>=1.0",
-    "types-requests>=2.31",
+    "mypy>=2.3",
+    "pandas-stubs>=2.3",
+    "pytest>=9.1",
+    "pytest-cov>=7.1",
+    "ruff>=0.16",
+    "types-geopandas>=1.1",
+    "types-requests>=2.33",
 ]
 # Documentation toolchain. `great-docs` renders the site via Quarto (which must
 # be installed separately, see user_guide/). The plotting stack is only needed
 # because the user guide executes its figures at build time.
 docs = [
-    "great-docs>=0.16",
-    "matplotlib>=3.9",
-    "contextily>=1.6",
+    "great-docs>=0.17",
+    "matplotlib>=3.11",
+    "contextily>=1.7",
 ]
 
 [build-system]
@@ -115,10 +117,9 @@ exclude = [".gitignore"]
 [tool.ruff]
 line-length = 99
 src = ["src"]
-extend-include = ["*.ipynb"]
+extension = { qmd = "markdown" }
 
 [tool.ruff.lint]
-# Source: https://github.com/CoreyMSchafer/dotfiles/blob/master/settings/ruff.toml
 extend-select = [
     "E",    # Pycodestyle errors (style issues)
     "W",    # Pycodestyle warnings (style issues)
@@ -127,28 +128,21 @@ extend-select = [
     "N",    # PEP8 Naming – naming conventions
     "D",    # Pydocstyle – docstring formatting
     "UP",   # Pyupgrade – upgrades syntax to newer Python versions
-    "YTT",  # Flake8-2020 – checks for Python 2020 best practices
     "ANN",  # Flake8-annotations – enforces type annotation style
     "ASYNC",# Flake8-async – checks async/await usage
     "S",    # Flake8-bandit – security issues
-    "BLE",  # Flake8-blind-except – flags bare excepts
     "FBT",  # Flake8-boolean-trap – potential pitfalls with booleans
     "B",    # Flake8-bugbear – common bug patterns
     "A",    # Flake8-builtins – misuse of Python built-in names
     "COM",  # Flake8-commas – trailing/comma issues
     "C4",   # Flake8-comprehensions – best practices in comprehensions
-    "DTZ",  # Flake8-datetimez – requires timezone-aware datetime objects
-    "T10",  # Flake8-debugger – debugger statements (e.g. pdb)
-    "DJ",   # Flake8-django – Django-specific conventions
     "EM",   # Flake8-errmsg – error message style
     "EXE",  # Flake8-executable – executable file checks
-    "FA",   # Flake8-future-annotations – future import for annotations
     "ISC",  # Flake8-implicit-str-concat – warns on implicit string concatenation
     "ICN",  # Flake8-import-conventions – enforces conventional import aliases
     "LOG",  # Flake8-logging – proper logging usage
     "G",    # Flake8-logging-format – logging format string issues
     "INP",  # Flake8-no-pep420 – warns against non-PEP420 namespace usage
-    "PIE",  # Flake8-pie – Python improvement suggestions
     # "T20",  # Flake8-print – disallows print statements
     "PYI",  # Flake8-pyi – checks for type stub (.pyi) consistency
     "PT",   # Flake8-pytest-style – pytest best practices
@@ -160,7 +154,6 @@ extend-select = [
     "SIM",  # Flake8-simplify – code simplification hints
     "TID",  # Flake8-tidy-imports – enforces specific import styles (e.g., no relative imports)
     "TC",   # Flake8-type-checking – proper import of typing in type checks
-    "INT",  # Flake8-gettext – checks for proper internationalization usage
     "ARG",  # Flake8-unused-arguments – flags unused function arguments
     "PTH",  # Flake8-use-pathlib – encourages pathlib over os.path
     "TD",   # Flake8-todos – flags TODO comments
@@ -170,19 +163,15 @@ extend-select = [
     "PGH",  # Pygrep-hooks – custom grep hooks for linting
     "PL",   # Pylint – integration with Pylint conventions
     "TRY",  # Tryceratops – try/except usage suggestions
-    "FLY",  # Flynt – f-string conversion suggestions
     "NPY",  # NumPy-specific rules – ensures NumPy coding standards
-    "FAST", # FastAPI – FastAPI-specific linting rules
-    "AIR",  # Airflow – Airflow-specific linting rules
     "PERF", # Perflint – performance-related checks
     "FURB", # Refurb – rules for code refurbishment
-    "DOC",  # Pydoclint – docstring linting and consistency
     "RUF",  # Ruff-specific rules – additional Ruff checks
 ]
-
 ignore = [
     "ANN003",   # flake8-annotations - Missing type annotations for **kwargs
     "ANN401",   # Dynamically typed expressions (typing.Any) are disallowed in `value`
+    "COM812",   # Trailing-comma rule that conflicts with the formatter
     "PLR0913",  # Pylint - Too many arguments
 ]
 
@@ -232,8 +221,7 @@ branch = true
 source = ["freezebase"]
 
 [tool.coverage.report]
-# Regression guard, not a target. The floor is intentionally below current
-# coverage because the S3 credential/env paths in `raster.py` need a live
-# object store to exercise; raise this as S3 integration tests land.
-fail_under = 78
+# Coarse backstop, not a target.
+# Covers local runs and the publish.yml release gate.
+fail_under = 80
 show_missing = true

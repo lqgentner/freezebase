@@ -69,7 +69,7 @@ set_custom_error_handler(_retry_transient_s3_errors)
 
 
 @lru_cache(maxsize=32)
-def _aws_session(
+def _aws_session(  # noqa: PLR0917 -- all six values define the cache identity
     unsigned: bool,  # noqa: FBT001
     key: str | None,
     secret: str | None,
