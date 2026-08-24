@@ -42,7 +42,7 @@ jobs:
           enable-cache: true
       - run: uv sync --all-extras
       - name: mypy
-        run: uv run mypy src/freezebase
+        run: uv run mypy src/freezebase tests
 
   test:
     runs-on: ubuntu-latest

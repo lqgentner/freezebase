@@ -58,7 +58,7 @@ class TestUtmToCrs:
 
     def test_rejects_invalid_hemisphere(self) -> None:
         with pytest.raises(ValueError, match="Hemisphere"):
-            utm_to_crs(32, "X")
+            utm_to_crs(32, "X")  # type: ignore[arg-type]
 
     def test_rejects_invalid_zone(self) -> None:
         with pytest.raises(ValueError, match="UTM zone"):
@@ -92,7 +92,7 @@ class TestUTMZoneGenerator:
 
     def test_get_zone_geometry_rejects_invalid_hemisphere(self) -> None:
         with pytest.raises(ValueError, match="Hemisphere"):
-            UTMZones().get_zone_geometry(32, "X")
+            UTMZones().get_zone_geometry(32, "X")  # type: ignore[arg-type]
 
     def test_find_intersecting_scalar_geometry(self) -> None:
         # Previously raised IndexError for a scalar geometry query.

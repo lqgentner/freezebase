@@ -93,8 +93,14 @@ class _ScriptedAdapter(BaseAdapter):
         self._responses = responses
         self.calls: list[requests.PreparedRequest] = []
 
-    def send(self, request: requests.PreparedRequest, **_kwargs: object) -> requests.Response:
+    def send(
+        self,
+        request: requests.PreparedRequest,
+        *_args: object,
+        **_kwargs: object,
+    ) -> requests.Response:
         self.calls.append(request)
+        assert request.url is not None
         resp = self._responses[request.url]
         resp.request = request
         resp.raw = io.BytesIO(b"payload")  # reset the stream for re-reads

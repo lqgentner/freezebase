@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -118,7 +118,7 @@ class TestMakeS3Upath:
         "creds",
         [{"key": "a"}, {"secret": "b"}, {"token": "TK"}, {"key": "a", "secret": "b"}],
     )
-    def test_anon_true_with_credentials_rejected(self, creds: dict[str, str]) -> None:
+    def test_anon_true_with_credentials_rejected(self, creds: dict[str, Any]) -> None:
         with pytest.raises(ValueError, match="anon=True cannot be combined"):
             make_s3_upath("s3://b/k", anon=True, **creds)
 
@@ -130,19 +130,19 @@ class TestMakeS3Upath:
         "creds",
         [{"key": "a"}, {"secret": "b"}, {"token": "TK"}, {"key": "a", "secret": "b"}],
     )
-    def test_profile_with_explicit_credentials_rejected(self, creds: dict[str, str]) -> None:
+    def test_profile_with_explicit_credentials_rejected(self, creds: dict[str, Any]) -> None:
         with pytest.raises(ValueError, match=r"profile.*explicit"):
             make_s3_upath("s3://b/k", profile="research", **creds)
 
     @pytest.mark.parametrize("auth", [{"profile": "research"}, {"anon": True}])
-    def test_client_kwargs_credentials_rejected(self, auth: dict[str, object]) -> None:
+    def test_client_kwargs_credentials_rejected(self, auth: dict[str, Any]) -> None:
         # s3fs forwards these to the client, where they win; `s3_env` never sees
         # them. Rejecting them keeps both layers signing the same way.
         with pytest.raises(ValueError, match="client_kwargs"):
             make_s3_upath(
                 "s3://b/k",
                 client_kwargs={"aws_access_key_id": "AK", "aws_secret_access_key": "SK"},
-                **auth,  # type: ignore[arg-type]
+                **auth,
             )
 
     def test_empty_profile_rejected(self) -> None:

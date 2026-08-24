@@ -15,6 +15,13 @@ from freezebase.vrt import _nodata_equal, build_vrt_mosaic, create_decibel_vrt, 
 WIDTH, HEIGHT = 6, 4
 
 
+def find(element: ET.Element, path: str) -> ET.Element:
+    """Return the descendant at ``path``, failing the test if it is absent."""
+    found = element.find(path)
+    assert found is not None, f"no element at {path!r}"
+    return found
+
+
 def make_tiff(
     path: Path,
     *,
@@ -74,7 +81,7 @@ class TestDecibelVrt:
         band = root.find("VRTRasterBand")
         assert band is not None
         assert band.findtext("PixelFunctionType") == "dB"
-        assert band.find("PixelFunctionArguments").get("fact") == "10"
+        assert find(band, "PixelFunctionArguments").get("fact") == "10"
 
         # GDAL must be able to open the derived VRT
         with rasterio.open(vrt_path) as src:
@@ -87,7 +94,7 @@ class TestDecibelVrt:
         create_decibel_vrt(vv_tiff, vrt_path, from_intensity=False)
 
         root = ET.parse(vrt_path).getroot()  # noqa: S314 -- parsing our own just-written fixture
-        assert root.find("VRTRasterBand/PixelFunctionArguments").get("fact") == "20"
+        assert find(root, "VRTRasterBand/PixelFunctionArguments").get("fact") == "20"
 
     def test_source_referenced_relative(self, vv_tiff: Path, tmp_path: Path) -> None:
         vrt_path = tmp_path / "vv_db.vrt"
@@ -95,7 +102,7 @@ class TestDecibelVrt:
         create_decibel_vrt(vv_tiff, vrt_path)
 
         root = ET.parse(vrt_path).getroot()  # noqa: S314 -- parsing our own just-written fixture
-        source = root.find("VRTRasterBand/SimpleSource/SourceFilename")
+        source = find(root, "VRTRasterBand/SimpleSource/SourceFilename")
         assert source.text == "vv.tif"
         assert source.get("relativeToVRT") == "1"
 
