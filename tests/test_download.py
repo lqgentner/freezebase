@@ -21,6 +21,7 @@ from freezebase.download import (
     REMOTE_BLOCK_SIZE,
     HTTPDownloader,
     _extract_filename_from_cd,
+    _extract_filename_from_url,
     _resolve_within,
     _rewrite_redirect_method,
     _sanitize_filename,
@@ -665,3 +666,54 @@ class TestExtractFilenameFromCd:
 
     def test_none_when_absent(self) -> None:
         assert _extract_filename_from_cd("attachment") is None
+
+    def test_none_for_empty_header(self) -> None:
+        assert _extract_filename_from_cd(None) is None
+        assert _extract_filename_from_cd("") is None
+
+
+class TestExtractFilenameFromUrl:
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            (f"{HOST}/files/data.tar.gz", "data.tar.gz"),
+            (f"{HOST}/a.zip?token=abc", "a.zip"),
+            (f"{HOST}/r%C3%A9sum%C3%A9.pdf", "résumé.pdf"),
+        ],
+    )
+    def test_extracts_name_with_extension(self, url: str, expected: str) -> None:
+        assert _extract_filename_from_url(url) == expected
+
+    @pytest.mark.parametrize("url", [f"{HOST}/download", f"{HOST}/", "", None])
+    def test_none_without_an_extension(self, url: str | None) -> None:
+        # An extensionless path segment is not a usable filename, so the caller
+        # falls through to raising rather than saving a directory name.
+        assert _extract_filename_from_url(url) is None
+
+
+class TestFilenameInference:
+    def test_infers_from_url_when_no_content_disposition(self, tmp_path: Path) -> None:
+        url = f"{HOST}/files/data.tar.gz"
+        resp = make_response(url=url, headers={"Content-Type": "application/gzip"})
+        dl = make_downloader(FakeSession({url: resp}))
+
+        out = dl(url, tmp_path)
+
+        assert out == tmp_path / "data.tar.gz"
+
+    def test_unresolvable_filename_raises(self, tmp_path: Path) -> None:
+        url = f"{HOST}/download"
+        resp = make_response(url=url, headers={"Content-Type": "application/zip"})
+        dl = make_downloader(FakeSession({url: resp}))
+
+        with pytest.raises(RuntimeError, match="Could not infer filename"):
+            dl(url, tmp_path)
+
+    def test_accepts_a_str_save_dir(self, tmp_path: Path) -> None:
+        resp = make_response(headers={"Content-Disposition": 'attachment; filename="real.zip"'})
+        dl = make_downloader(FakeSession({f"{HOST}/file": resp}))
+
+        out = dl(f"{HOST}/file", str(tmp_path / "nested"))
+
+        assert out == tmp_path / "nested" / "real.zip"
+        assert out.read_bytes() == b"payload"
