@@ -1,0 +1,52 @@
+version: 2
+
+updates:
+  # Python dependencies, resolved via uv (pyproject.toml + uv.lock).
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "build"
+    cooldown:
+      default-days: 5
+      semver-major-days: 21
+      semver-minor-days: 7
+      semver-patch-days: 3
+    groups:
+      # `dev` and `docs` (pyproject.toml [dependency-groups]) aren't part of
+      # the published package's API surface, so bump them in one PR without
+      # holding back on majors. Dependabot can't yet tell uv's
+      # [dependency-groups] apart from [project.dependencies] via the
+      # `dependency-type` group filter (unsupported for the uv ecosystem,
+      # see https://github.com/dependabot/dependabot-core/issues/13202), so
+      # membership is listed explicitly and needs updating if the groups in
+      # pyproject.toml change.
+      dev-dependencies:
+        patterns:
+          - "mypy"
+          - "pandas-stubs"
+          - "pytest"
+          - "pytest-cov"
+          - "ruff"
+          - "types-geopandas"
+          - "types-requests"
+      docs-dependencies:
+        patterns:
+          - "great-docs"
+          - "matplotlib"
+          - "contextily"
+
+  # Actions used by the CI/docs/publish workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "ci"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
