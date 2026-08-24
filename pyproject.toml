@@ -220,8 +220,7 @@ branch = true
 source = ["freezebase"]
 
 [tool.coverage.report]
-# Regression guard, not a target. The floor is intentionally below current
-# coverage because the S3 credential/env paths in `raster.py` need a live
-# object store to exercise; raise this as S3 integration tests land.
-fail_under = 78
+# Coarse backstop, not a target.
+# Covers local runs and the publish.yml release gate.
+fail_under = 80
 show_missing = true
