@@ -6,9 +6,7 @@ from collections.abc import Callable
 import contextlib
 from functools import partial
 import logging
-import ntpath
 from pathlib import Path
-import posixpath
 import re
 from secrets import token_hex
 from typing import TYPE_CHECKING, Any, Literal, Self, TypeVar, cast, overload
@@ -495,13 +493,9 @@ def _sanitize_filename(filename: str, *, explicit: bool) -> str:
         # data streams (``name:stream``).
         msg = f"Refusing {source} filename {filename!r}: contains ':'."
         raise ValueError(msg)
-    if posixpath.isabs(filename) or ntpath.isabs(filename):
-        msg = f"Refusing {source} filename {filename!r}: is an absolute path."
-        raise ValueError(msg)
-    # ``basename`` on either platform must be a no-op for a bare file name.
-    if posixpath.basename(filename) != filename or ntpath.basename(filename) != filename:
-        msg = f"Refusing {source} filename {filename!r}: not a bare file name."
-        raise ValueError(msg)
+    # The separator and ':' checks above already reject every name that
+    # ``posixpath``/``ntpath`` would call absolute or non-bare, so no further
+    # path-shape check can fire.
     stem = filename.split(".", 1)[0].upper()
     if stem in _WINDOWS_RESERVED_NAMES:
         msg = f"Refusing {source} filename {filename!r}: reserved device name."

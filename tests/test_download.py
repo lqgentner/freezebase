@@ -171,6 +171,28 @@ class TestSanitizeFilename:
         with pytest.raises(ValueError, match="Refusing"):
             _sanitize_filename(name, explicit=False)
 
+    @pytest.mark.parametrize(
+        ("name", "reason"),
+        [
+            ("", "not a valid file name"),
+            (".", "not a valid file name"),
+            ("..", "not a valid file name"),
+            ("bad\x00name", "control characters"),
+            ("/etc/passwd", "directory separator"),
+            ("a/b.zip", "directory separator"),
+            ("..\\evil.zip", "directory separator"),
+            ("C:\\Windows", "directory separator"),
+            ("name:stream", "contains ':'"),
+            ("C:file", "contains ':'"),
+            ("CON", "reserved device name"),
+        ],
+    )
+    def test_names_the_guard_that_rejected_the_name(self, name: str, reason: str) -> None:
+        # Pins which check does the work: a reordering that leaves one guard
+        # shadowed by another shows up here rather than as dead code.
+        with pytest.raises(ValueError, match=reason):
+            _sanitize_filename(name, explicit=False)
+
     @pytest.mark.parametrize("name", ["file.zip", "S1A_20200101.tif", "data.tar.gz", "plain"])
     def test_accepts_safe_names(self, name: str) -> None:
         assert _sanitize_filename(name, explicit=True) == name
