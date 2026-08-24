@@ -56,8 +56,10 @@ dependencies = [
 
 [project.optional-dependencies]
 s3 = [
-    # s3fs 2026.2.0 first exposes `set_custom_error_handler` (used in s3.py).
-    "s3fs>=2026.2.0",
+    # 2026.7.0 stops caching a prefix-filtered listing as a complete directory
+    # listing (fsspec/s3fs#1034); before it, one `glob("prefix*")` makes every
+    # later listing on that directory miss files.
+    "s3fs>=2026.7.0",
     "fsspec>=2026.2.0",
     "boto3>=1.36",
 ]

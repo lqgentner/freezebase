@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the project is pre-1.0 (`0.x`), minor releases may contain breaking changes.
 
+## [Unreleased]
+
+### Fixed
+
+- The `s3` extra now requires `s3fs>=2026.7.0`. Earlier versions cache a
+  prefix-filtered listing under the unfiltered directory key
+  ([fsspec/s3fs#1034](https://github.com/fsspec/s3fs/pull/1034)), so a single
+  `glob("prefix*")` makes every later listing miss files.
+
 ## [0.5.0] - 2026-08-24
 
 ### Added

@@ -188,3 +188,45 @@ class TestRewriteTiffS3:
         with rasterio_open(s3_key2) as ds:
             assert ds.descriptions == ("VH",)
             assert np.array_equal(ds.read(1), data)
+
+
+class TestListingsCache:
+    """Guards the `s3fs>=2026.7.0` floor that keeps prefix globs from poisoning.
+
+    Before fsspec/s3fs#1034, `_lsdir` wrote a prefix-filtered listing into
+    `dircache` under the unfiltered directory key. These fail on a downgrade.
+    """
+
+    @staticmethod
+    def _seed(root: UPath) -> str:
+        """Write one object per prefix and return the shared parent."""
+        parent = f"{uuid.uuid4().hex}"
+        for name in ("AAA_one.tif", "BBB_two.tif"):
+            (root / parent / name).write_bytes(b"x")
+        return parent
+
+    def test_glob_of_one_prefix_does_not_hide_another(self, bucket_root: UPath) -> None:
+        # Globbing "AAA*" must not cache a partial listing under the directory
+        # key, or the next glob for "BBB*" is answered from it and finds nothing.
+        parent = self._seed(bucket_root)
+        try:
+            directory = bucket_root / parent
+            assert len(list(directory.glob("AAA*.tif"))) == 1
+            assert len(list(directory.glob("BBB*.tif"))) == 1
+        finally:
+            for name in ("AAA_one.tif", "BBB_two.tif"):
+                (bucket_root / parent / name).unlink(missing_ok=True)
+
+    def test_glob_does_not_make_an_existing_object_look_absent(
+        self,
+        bucket_root: UPath,
+    ) -> None:
+        # The same poisoned listing also answers exists() and info().
+        parent = self._seed(bucket_root)
+        try:
+            directory = bucket_root / parent
+            list(directory.glob("AAA*.tif"))
+            assert (directory / "BBB_two.tif").exists()
+        finally:
+            for name in ("AAA_one.tif", "BBB_two.tif"):
+                (bucket_root / parent / name).unlink(missing_ok=True)
