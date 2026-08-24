@@ -4,26 +4,31 @@ from __future__ import annotations
 
 import gc
 import io
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 from unittest.mock import MagicMock
 from urllib.parse import urlparse
+from uuid import uuid4
 import weakref
 
 import pytest
 import requests
 from requests.adapters import BaseAdapter
 from requests.structures import CaseInsensitiveDict
+from upath import UPath
 
 from freezebase.download import (
     MAX_REDIRECTS,
+    REMOTE_BLOCK_SIZE,
     HTTPDownloader,
     _extract_filename_from_cd,
     _resolve_within,
     _rewrite_redirect_method,
     _sanitize_filename,
+    _write_file,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 HOST = "https://host.example"
@@ -246,6 +251,117 @@ class TestDownloadFilenameConfinement:
 
         dl(f"{HOST}/file", tmp_path)
         assert not list(tmp_path.glob("*.partial"))
+
+
+# ---------------------------------------------------------------------------
+# Remote (non-local) destinations
+# ---------------------------------------------------------------------------
+
+
+class _RecordingRemoteFile:
+    """Minimal stand-in for a remote file handle that records its open kwargs."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.chunks: list[bytes] = []
+        self.open_kwargs: dict[str, object] = {}
+        self.exists_value = False
+
+    # Not a `pathlib.Path`: that is what `_write_file` branches on.
+    def exists(self) -> bool:
+        return self.exists_value
+
+    def open(self, mode: str, **kwargs: object) -> Self:
+        assert mode == "wb"
+        self.open_kwargs = kwargs
+        return self
+
+    def write(self, chunk: bytes) -> None:
+        self.chunks.append(chunk)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        pass
+
+
+@pytest.fixture
+def memory_dir() -> Iterator[UPath]:
+    """Return an empty in-memory directory, unique to this test."""
+    directory = UPath(f"memory://bucket/{uuid4().hex}")
+    yield directory
+    if directory.exists():
+        directory.fs.rm(directory.path, recursive=True)
+
+
+class TestRemoteDestination:
+    """Downloads to a non-local ``UPath`` write the final key directly."""
+
+    def test_writes_file_to_remote_path(self, memory_dir: UPath) -> None:
+        resp = make_response(headers={"Content-Disposition": 'attachment; filename="real.zip"'})
+        dl = make_downloader(FakeSession({f"{HOST}/file": resp}))
+
+        out = dl(f"{HOST}/file", memory_dir)
+
+        assert out == memory_dir / "real.zip"
+        assert out.read_bytes() == b"payload"
+
+    def test_creates_the_remote_directory(self, memory_dir: UPath) -> None:
+        resp = make_response(headers={"Content-Disposition": 'attachment; filename="real.zip"'})
+        dl = make_downloader(FakeSession({f"{HOST}/file": resp}))
+
+        dl(f"{HOST}/file", memory_dir)
+
+        assert memory_dir.exists()
+
+    def test_no_partial_file_is_staged_remotely(self, memory_dir: UPath) -> None:
+        resp = make_response(headers={"Content-Disposition": 'attachment; filename="real.zip"'})
+        dl = make_downloader(FakeSession({f"{HOST}/file": resp}))
+
+        dl(f"{HOST}/file", memory_dir)
+
+        assert [p.name for p in memory_dir.iterdir()] == ["real.zip"]
+
+    def test_existing_remote_target_not_overwritten_by_default(self, memory_dir: UPath) -> None:
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        (memory_dir / "real.zip").write_bytes(b"original")
+        resp = make_response(headers={"Content-Disposition": 'attachment; filename="real.zip"'})
+        dl = make_downloader(FakeSession({f"{HOST}/file": resp}))
+
+        with pytest.raises(FileExistsError):
+            dl(f"{HOST}/file", memory_dir)
+        assert (memory_dir / "real.zip").read_bytes() == b"original"
+
+    def test_overwrite_true_replaces_remote_target(self, memory_dir: UPath) -> None:
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        (memory_dir / "real.zip").write_bytes(b"original")
+        resp = make_response(headers={"Content-Disposition": 'attachment; filename="real.zip"'})
+        dl = make_downloader(FakeSession({f"{HOST}/file": resp}))
+
+        out = dl(f"{HOST}/file", memory_dir, overwrite=True)
+
+        assert out.read_bytes() == b"payload"
+
+    def test_remote_write_uses_the_large_block_size(self) -> None:
+        # Object stores pay per request, hence the larger block size.
+        resp = make_response()
+        target = _RecordingRemoteFile("real.zip")
+
+        _write_file(resp, target, show_progress=False)  # type: ignore[type-var]
+
+        assert target.open_kwargs == {"block_size": REMOTE_BLOCK_SIZE}
+        assert b"".join(target.chunks) == b"payload"
+
+    def test_remote_write_respects_overwrite_guard(self) -> None:
+        resp = make_response()
+        target = _RecordingRemoteFile("real.zip")
+        target.exists_value = True
+
+        with pytest.raises(FileExistsError, match="Target already exists"):
+            _write_file(resp, target, show_progress=False)  # type: ignore[type-var]
+
+        assert target.chunks == []
 
 
 # ---------------------------------------------------------------------------
