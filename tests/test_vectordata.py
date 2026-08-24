@@ -5,12 +5,13 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 import geopandas as gpd
 import pytest
 import shapely
 
+from freezebase import vectordata
 from freezebase.utils import file_sha256
 from freezebase.vectordata import (
     DatasetMetadata,
@@ -182,6 +183,43 @@ class TestVerifyDownloadBranch:
         assert ds.downloads
         assert ds.prepares == []
         assert not ds.processed_path.exists()
+
+
+class TestDefaultDownload:
+    """The base `_download`, which subclasses inherit unless they override it."""
+
+    def test_wires_the_downloader_to_the_raw_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seen: dict[str, object] = {}
+
+        class _FakeDownloader:
+            def __enter__(self) -> Self:
+                return self
+
+            def __exit__(self, *exc_info: object) -> None:
+                seen["closed"] = True
+
+            def __call__(self, *, url: str, save_dir: Path, filename: str) -> Path:
+                seen.update(url=url, save_dir=save_dir, filename=filename)
+                save_dir.mkdir(parents=True, exist_ok=True)
+                target = save_dir / filename
+                _sample_gdf().to_file(target, driver="GeoJSON")
+                return target
+
+        monkeypatch.setattr(vectordata, "HTTPDownloader", _FakeDownloader)
+        ds = _FakeDataset(cache_dir=tmp_path / "cache")
+
+        gdf = ds.get_data(download=True)
+
+        assert seen["url"] == ds.metadata.source_url
+        assert seen["save_dir"] == ds.raw_path.parent
+        assert seen["filename"] == ds.raw_path.name
+        # The downloader is used as a context manager, so its session is closed.
+        assert seen["closed"] is True
+        assert len(gdf) == 1
 
 
 class TestConcurrentPreparation:
