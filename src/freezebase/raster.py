@@ -454,8 +454,7 @@ def merge_tiffs(
     Raises
     ------
     ValueError
-        If src_files is empty.
-        If files have different CRS (when validate_crs=True).
+        If src_files is empty, or the files do not all share a CRS.
     FileNotFoundError
         If any source file does not exist.
     RuntimeError
