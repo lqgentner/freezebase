@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the project is pre-1.0 (`0.x`), minor releases may contain breaking changes.
 
+## [0.6.0] - 2026-08-25
+
+### Added
+
+- `write_cog` and `rewrite_tiff` take `tags`, `band_tags` and `units`, writing
+  dataset-level tags, per-band tags and band unit strings. All three are
+  keyword-only and default to `None`, so existing calls are unchanged.
+
+### Fixed
+
+- `rewrite_tiff` no longer loses `LAYOUT: COG` when a non-GTiff destination
+  carries band descriptions, tags, band tags or units. All of those live in the
+  GDAL_METADATA TIFF tag, which grows when written into a finished file and is
+  relocated behind the image data; they now go into an intermediate GTiff so
+  the driver copy writes the final layout around them.
+- Every per-band sequence (`band_names`, `color_interp`, `band_tags`, `units`)
+  is now rejected if it does not match the band count.
+- The `s3` extra now requires `s3fs>=2026.7.0`. Earlier versions cache a
+  prefix-filtered listing under the unfiltered directory key
+  ([fsspec/s3fs#1034](https://github.com/fsspec/s3fs/pull/1034)), so a single
+  `glob("prefix*")` makes every later listing miss files.
+
 ## [0.5.0] - 2026-08-24
 
 ### Added
