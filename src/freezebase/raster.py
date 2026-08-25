@@ -22,7 +22,7 @@ import rasterio.shutil
 from upath import UPath
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Sequence
+    from collections.abc import Generator, Mapping, Sequence
 
     import numpy as np
     from rasterio.enums import ColorInterp
@@ -226,8 +226,11 @@ def _inject_band_metadata(
     *,
     band_names: list[str] | None = None,
     color_interp: list[ColorInterp] | None = None,
+    tags: Mapping[str, str] | None = None,
+    band_tags: Sequence[Mapping[str, str]] | None = None,
+    units: list[str] | None = None,
 ) -> None:
-    """Inject band descriptions and color interpretation into a raster file.
+    """Inject descriptions, color interpretation, tags and units into a raster file.
 
     Supports both VRT files (used as COG source) and GeoTIFF COGs. For COGs,
     GDAL requires the IGNORE_COG_LAYOUT_BREAK open option to allow in-place
@@ -241,15 +244,73 @@ def _inject_band_metadata(
         Band descriptions to set, one per band.
     color_interp : list[ColorInterp] | None
         Color interpretation per band.
+    tags : Mapping[str, str] | None
+        Dataset-level tags, merged into the existing ones.
+    band_tags : Sequence[Mapping[str, str]] | None
+        Per-band tags, one mapping per band, each merged into that band's
+        existing tags.
+    units : list[str] | None
+        Band unit strings, one per band.
     """
-    if band_names is None and color_interp is None:
+    if all(x is None for x in (band_names, color_interp, tags, band_tags, units)):
         return
     with rasterio_open(dst_file, "r+", IGNORE_COG_LAYOUT_BREAK="YES") as ds:
-        if band_names is not None:
-            for i, name in enumerate(band_names, 1):
-                ds.set_band_description(i, name)
-        if color_interp is not None:
-            ds.colorinterp = color_interp
+        _apply_band_metadata(
+            ds,
+            band_names=band_names,
+            color_interp=color_interp,
+            tags=tags,
+            band_tags=band_tags,
+            units=units,
+        )
+
+
+def _check_band_lengths(count: int, **sequences: Sequence[Any] | None) -> None:
+    """Reject a per-band sequence that does not hold exactly one entry per band."""
+    for name, values in sequences.items():
+        if values is not None and len(values) != count:
+            msg = f"{name} must hold one entry per band; got {len(values)} for {count} bands."
+            raise ValueError(msg)
+
+
+def _apply_band_metadata(
+    ds: DatasetWriter,
+    *,
+    band_names: list[str] | None = None,
+    color_interp: list[ColorInterp] | None = None,
+    tags: Mapping[str, str] | None = None,
+    band_tags: Sequence[Mapping[str, str]] | None = None,
+    units: list[str] | None = None,
+) -> None:
+    """Write descriptions, color interpretation, tags and units onto an open dataset.
+
+    Raises
+    ------
+    ValueError
+        If a per-band sequence does not hold one entry per band. A short one
+        leaves the trailing bands untouched, and nothing later reveals it: an
+        unset unit reads back as ``None``, exactly like one written empty.
+    """
+    _check_band_lengths(
+        ds.count,
+        band_names=band_names,
+        color_interp=color_interp,
+        band_tags=band_tags,
+        units=units,
+    )
+    if band_names is not None:
+        for i, name in enumerate(band_names, 1):
+            ds.set_band_description(i, name)
+    if color_interp is not None:
+        ds.colorinterp = color_interp
+    if tags is not None:
+        ds.update_tags(**tags)
+    if band_tags is not None:
+        for i, band in enumerate(band_tags, 1):
+            ds.update_tags(i, **band)
+    if units is not None:
+        for i, unit in enumerate(units, 1):
+            ds.set_band_unit(i, unit)
 
 
 def get_utm_zone_string(projparams: Any) -> str:
@@ -530,6 +591,9 @@ def rewrite_tiff(
     band_names: list[str] | None = None,
     color_interp: list[ColorInterp] | None = None,
     *,
+    tags: Mapping[str, str] | None = None,
+    band_tags: Sequence[Mapping[str, str]] | None = None,
+    units: list[str] | None = None,
     move: bool = False,
 ) -> None:
     """Rewrite a GeoTIFF, optionally to a different storage backend.
@@ -561,6 +625,14 @@ def rewrite_tiff(
     color_interp : list[ColorInterp] or None, optional
         New per-band color interpretation. If None, the source's existing
         color interpretation is preserved.
+    tags : Mapping[str, str] or None, optional
+        Dataset-level tags to merge into the ones carried over from the source.
+    band_tags : Sequence[Mapping[str, str]] or None, optional
+        Per-band tags, one mapping per band, merged into the ones carried over
+        from the source.
+    units : list[str] or None, optional
+        New band unit strings, one per band. If None, the source's existing
+        units are preserved.
     move : bool, default False
         If ``True``, delete ``src_file`` after a successful rewrite to a
         different path (a move). If ``False`` (the default), the source is
@@ -601,6 +673,9 @@ def rewrite_tiff(
             dst_profile=dst_profile,
             band_names=band_names,
             color_interp=color_interp,
+            tags=tags,
+            band_tags=band_tags,
+            units=units,
         )
     except Exception as e:
         msg = f"Failed to rewrite GeoTIFF: {e}"
@@ -620,6 +695,9 @@ def _rewrite_via_memory(
     dst_profile: dict[str, Any],
     band_names: list[str] | None,
     color_interp: list[ColorInterp] | None,
+    tags: Mapping[str, str] | None,
+    band_tags: Sequence[Mapping[str, str]] | None,
+    units: list[str] | None,
 ) -> None:
     """Stage a rewrite entirely in memory, then atomically PutObject to S3.
 
@@ -636,7 +714,14 @@ def _rewrite_via_memory(
     with MemoryFile() as memfile:
         with _env_for_path(src_file):
             rasterio.shutil.copy(_to_vsi_uri(src_file), memfile.name, driver="GTiff")
-        _inject_band_metadata(memfile.name, band_names=band_names, color_interp=color_interp)
+        _inject_band_metadata(
+            memfile.name,
+            band_names=band_names,
+            color_interp=color_interp,
+            tags=tags,
+            band_tags=band_tags,
+            units=units,
+        )
         with _env_for_path(dst_file):
             rasterio.shutil.copy(memfile.name, _to_vsi_uri(dst_file), driver=driver, **dst_profile)
 
@@ -649,6 +734,9 @@ def _rewrite_via_tempfile(
     dst_profile: dict[str, Any],
     band_names: list[str] | None,
     color_interp: list[ColorInterp] | None,
+    tags: Mapping[str, str] | None,
+    band_tags: Sequence[Mapping[str, str]] | None,
+    units: list[str] | None,
 ) -> None:
     """Stage a local rewrite to a unique sibling temp, then atomically replace.
 
@@ -656,21 +744,54 @@ def _rewrite_via_tempfile(
     destination is only replaced after the copy and metadata injection both
     succeed, so a pre-existing destination survives any failure. The
     destination is always local here, so only the source read needs credentials.
+
+    Everything but color interpretation lives in the GDAL_METADATA TIFF tag,
+    which grows when written into a finished file and is relocated behind the
+    image data, costing the ``COG`` driver its header-first layout. So a
+    non-GTiff destination carrying any of it takes an extra hop through an
+    intermediate GTiff, and the driver copy writes the final layout around it.
     """
     work_dst = dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.tmp")
+    needs_gtiff_stage = driver != "GTiff" and any(
+        x is not None for x in (band_names, tags, band_tags, units)
+    )
+    work_stage = (
+        dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.stage.tif")
+        if needs_gtiff_stage
+        else None
+    )
+    inject_into = work_stage if work_stage is not None else work_dst
     try:
         with _env_for_path(src_file):
             rasterio.shutil.copy(
                 _to_vsi_uri(src_file),
+                _to_vsi_uri(inject_into),
+                driver="GTiff" if work_stage is not None else driver,
+                **({} if work_stage is not None else dst_profile),
+            )
+        _inject_band_metadata(
+            inject_into,
+            band_names=band_names,
+            color_interp=color_interp,
+            tags=tags,
+            band_tags=band_tags,
+            units=units,
+        )
+        if work_stage is not None:
+            # Both ends are local, so no credentialed env is needed here.
+            rasterio.shutil.copy(
+                _to_vsi_uri(work_stage),
                 _to_vsi_uri(work_dst),
                 driver=driver,
                 **dst_profile,
             )
-        _inject_band_metadata(work_dst, band_names=band_names, color_interp=color_interp)
         work_dst.replace(dst_file)
     except BaseException:
         work_dst.unlink(missing_ok=True)
         raise
+    finally:
+        if work_stage is not None:
+            work_stage.unlink(missing_ok=True)
 
 
 def write_cog(
@@ -680,6 +801,9 @@ def write_cog(
     *,
     band_names: list[str] | None = None,
     color_interp: list[ColorInterp] | None = None,
+    tags: Mapping[str, str] | None = None,
+    band_tags: Sequence[Mapping[str, str]] | None = None,
+    units: list[str] | None = None,
 ) -> None:
     """Write an in-memory array as a Cloud Optimized GeoTIFF.
 
@@ -702,6 +826,12 @@ def write_cog(
         Band descriptions, one per band.
     color_interp : list[ColorInterp] or None, optional
         Per-band color interpretation.
+    tags : Mapping[str, str] or None, optional
+        Dataset-level tags.
+    band_tags : Sequence[Mapping[str, str]] or None, optional
+        Per-band tags, one mapping per band.
+    units : list[str] or None, optional
+        Band unit strings, one per band.
 
     Raises
     ------
@@ -732,11 +862,16 @@ def write_cog(
                     mem_ds.write(data, 1)
                 else:
                     mem_ds.write(data)
-                if band_names is not None:
-                    for i, name in enumerate(band_names, 1):
-                        mem_ds.set_band_description(i, name)
-                if color_interp is not None:
-                    mem_ds.colorinterp = color_interp
+                # Set on the staging file, not on the finished COG: writing
+                # metadata into a COG afterwards would break its layout.
+                _apply_band_metadata(
+                    mem_ds,
+                    band_names=band_names,
+                    color_interp=color_interp,
+                    tags=tags,
+                    band_tags=band_tags,
+                    units=units,
+                )
 
             with _env_for_path(dst_file):
                 rasterio.shutil.copy(memfile.name, _to_vsi_uri(work_dst), **COG_PROFILE)

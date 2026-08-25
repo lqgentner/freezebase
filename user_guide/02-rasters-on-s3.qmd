@@ -204,6 +204,23 @@ rewrite_tiff(source_on_store_a, destination_on_store_b)
 rewrite_tiff("scene.tif", "scene.cog.tif", move=True)
 ```
 
+Both functions also carry metadata into the file. `tags` sets dataset-level
+tags, `band_tags` sets per-band tags (one mapping per band), and `units` sets
+each band's unit string. `rewrite_tiff()` merges them onto whatever the source
+already carried, so a rewrite can add a key without discarding the rest:
+
+```python
+write_cog(
+    data,
+    destination,
+    profile,
+    band_names=["elevation"],
+    tags={"PRODUCT_TYPE": "DEM", "VERTICAL_DATUM": "EGM2008"},
+    band_tags=[{"SOURCE": "Copernicus GLO-30"}],
+    units=["m"],
+)
+```
+
 ## Putting S3 and MGRS together
 
 The public DEM is in geographic coordinates and does not share the MGRS pixel

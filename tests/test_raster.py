@@ -16,6 +16,7 @@ from freezebase.raster import (
     COG_PROFILE,
     RASTERIO_PROFILE_DEFAULTS,
     _env_for_path,
+    _rewrite_via_memory,
     _to_vsi_uri,
     build_rasterio_profile,
     get_epsg_string,
@@ -276,6 +277,9 @@ class TestRewriteTiffLocal:
 
         rewrite_tiff(path, path, profile=COG_PROFILE, band_names=["renamed"])
 
+        # A description of a different length grows GDAL_METADATA, so writing it
+        # into the finished COG would relocate the tag and cost the layout.
+        assert_is_cog(path)
         with rasterio.open(path) as ds:
             assert ds.descriptions == ("renamed",)
 
@@ -286,6 +290,9 @@ class TestRewriteTiffLocal:
 
         rewrite_tiff(src, dst, profile=COG_PROFILE, color_interp=[ColorInterp.gray])
 
+        # Color interpretation sits in fixed TIFF tags, so unlike the others it
+        # can be written into the finished COG without disturbing the layout.
+        assert_is_cog(dst)
         with rasterio.open(dst) as ds:
             assert ds.colorinterp == (ColorInterp.gray,)
             # Injecting metadata must not cost the source's band description.
@@ -513,3 +520,217 @@ class TestWriteCog:
             assert ds.descriptions == ("VV", "VH")
             assert (ds.read(1) == 1.0).all()
             assert (ds.read(2) == 2.0).all()
+
+
+class TestMetadataInjection:
+    """Dataset tags, band tags and band units, on both write paths.
+
+    They live in the GDAL_METADATA TIFF tag, which is written last and can cost
+    a COG its header-first layout, so every case asserts ``LAYOUT: COG`` too.
+    """
+
+    profile = {  # noqa: RUF012
+        "dtype": "float32",
+        "count": 2,
+        "width": WIDTH,
+        "height": HEIGHT,
+        "crs": "EPSG:32632",
+        "transform": from_origin(500000, 5200000, 10, 10),
+        "nodata": np.nan,
+    }
+
+    def test_write_cog_retains_tags_units_and_cog_layout(self, tmp_path: Path) -> None:
+        dst = tmp_path / "tagged.tif"
+        data = np.stack(
+            [
+                np.full((HEIGHT, WIDTH), 1.0, dtype=np.float32),
+                np.full((HEIGHT, WIDTH), 2.0, dtype=np.float32),
+            ],
+        )
+
+        write_cog(
+            data,
+            dst,
+            self.profile,
+            band_names=["VV", "VH"],
+            tags={"PRODUCT_TYPE": "RTC_LRW", "BACKSCATTER_CONVENTION": "Power"},
+            band_tags=[{"POLARIZATION": "VV"}, {"POLARIZATION": "VH"}],
+            units=["natural", "natural"],
+        )
+
+        assert_is_cog(dst)
+        with rasterio.open(dst) as ds:
+            assert ds.tags()["PRODUCT_TYPE"] == "RTC_LRW"
+            assert ds.tags()["BACKSCATTER_CONVENTION"] == "Power"
+            assert ds.tags(1) == {"POLARIZATION": "VV"}
+            assert ds.tags(2) == {"POLARIZATION": "VH"}
+            assert ds.units == ("natural", "natural")
+            assert ds.descriptions == ("VV", "VH")
+
+    def test_rewrite_to_cog_retains_tags_units_and_cog_layout(self, tmp_path: Path) -> None:
+        src = tmp_path / "src.tif"
+        dst = tmp_path / "dst.tif"
+        make_tiff(src)
+
+        rewrite_tiff(
+            src,
+            dst,
+            profile=COG_PROFILE,
+            tags={"PRODUCT_TYPE": "RTC"},
+            band_tags=[{"POLARIZATION": "VV"}],
+            units=["natural"],
+        )
+
+        assert_is_cog(dst)
+        with rasterio.open(dst) as ds:
+            assert ds.tags()["PRODUCT_TYPE"] == "RTC"
+            assert ds.tags(1) == {"POLARIZATION": "VV"}
+            assert ds.units == ("natural",)
+            # The extra staging hop must not cost the source's band description.
+            assert ds.descriptions == ("VV",)
+        # The intermediate GTiff stage is cleaned up along with the temp.
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["dst.tif", "src.tif"]
+
+    def test_rewrite_in_place_to_cog_retains_tags(self, tmp_path: Path) -> None:
+        path = tmp_path / "tile.tif"
+        make_tiff(path)
+
+        rewrite_tiff(path, path, profile=COG_PROFILE, tags={"A": "1"}, units=["natural"])
+
+        assert_is_cog(path)
+        with rasterio.open(path) as ds:
+            assert ds.tags()["A"] == "1"
+            assert ds.units == ("natural",)
+
+    def test_rewrite_merges_tags_onto_the_source_ones(self, tmp_path: Path) -> None:
+        src = tmp_path / "src.tif"
+        dst = tmp_path / "dst.tif"
+        make_tiff(src)
+        with rasterio.open(src, "r+") as ds:
+            ds.update_tags(KEPT="from-source", OVERWRITTEN="from-source")
+
+        rewrite_tiff(src, dst, profile=COG_PROFILE, tags={"OVERWRITTEN": "from-caller"})
+
+        with rasterio.open(dst) as ds:
+            assert ds.tags()["KEPT"] == "from-source"
+            assert ds.tags()["OVERWRITTEN"] == "from-caller"
+
+    def test_rewrite_to_gtiff_retains_tags_without_staging(self, tmp_path: Path) -> None:
+        src = tmp_path / "src.tif"
+        dst = tmp_path / "dst.tif"
+        make_tiff(src)
+
+        rewrite_tiff(src, dst, tags={"A": "1"}, band_tags=[{"B": "2"}], units=["dB"])
+
+        with rasterio.open(dst) as ds:
+            assert ds.driver == "GTiff"
+            assert ds.tags()["A"] == "1"
+            assert ds.tags(1) == {"B": "2"}
+            assert ds.units == ("dB",)
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["dst.tif", "src.tif"]
+
+    def test_rewrite_leaves_no_staging_file_on_failure(self, tmp_path: Path) -> None:
+        src = tmp_path / "src.tif"
+        dst = tmp_path / "dst.tif"
+        make_tiff(src)
+
+        # A unit for a band that does not exist fails during injection, after
+        # the staging copy has already been written.
+        with pytest.raises(RuntimeError):
+            rewrite_tiff(src, dst, profile=COG_PROFILE, tags={"A": "1"}, units=["natural", "dB"])
+
+        assert not dst.exists()
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["src.tif"]
+
+    def test_memory_stage_retains_tags_units_and_cog_layout(self, tmp_path: Path) -> None:
+        # The S3 destination path, exercised locally: the metadata goes into the
+        # in-memory GTiff and the COG driver writes the layout around it.
+        src = tmp_path / "src.tif"
+        dst = tmp_path / "dst.tif"
+        make_tiff(src)
+        dst_profile = {k: v for k, v in COG_PROFILE.items() if k != "driver"}
+
+        _rewrite_via_memory(
+            UPath(src),
+            UPath(dst),
+            driver="COG",
+            dst_profile=dst_profile,
+            band_names=None,
+            color_interp=None,
+            tags={"A": "1"},
+            band_tags=[{"B": "2"}],
+            units=["natural"],
+        )
+
+        assert_is_cog(dst)
+        with rasterio.open(dst) as ds:
+            assert ds.tags()["A"] == "1"
+            assert ds.tags(1) == {"B": "2"}
+            assert ds.units == ("natural",)
+
+
+class TestPerBandLengths:
+    """Every per-band sequence must hold exactly one entry per band.
+
+    A short sequence used to be applied to the leading bands and leave the rest
+    untouched, which nothing downstream can detect: an unset unit reads back as
+    ``None``, exactly like one written empty on purpose.
+    """
+
+    profile = {  # noqa: RUF012
+        "dtype": "float32",
+        "count": 2,
+        "width": WIDTH,
+        "height": HEIGHT,
+        "crs": "EPSG:32632",
+        "transform": from_origin(500000, 5200000, 10, 10),
+        "nodata": np.nan,
+    }
+
+    def _data(self) -> np.ndarray:
+        return np.stack(
+            [
+                np.full((HEIGHT, WIDTH), 1.0, dtype=np.float32),
+                np.full((HEIGHT, WIDTH), 2.0, dtype=np.float32),
+            ],
+        )
+
+    @pytest.mark.parametrize(
+        ("kwargs", "expected"),
+        [
+            ({"units": ["natural"]}, "units"),
+            ({"band_names": ["VV"]}, "band_names"),
+            ({"band_tags": [{"A": "1"}]}, "band_tags"),
+            ({"color_interp": [ColorInterp.gray]}, "color_interp"),
+        ],
+    )
+    def test_write_cog_rejects_a_short_sequence(
+        self,
+        tmp_path: Path,
+        kwargs: dict,
+        expected: str,
+    ) -> None:
+        with pytest.raises(RuntimeError, match=f"{expected} must hold one entry per band"):
+            write_cog(self._data(), tmp_path / "out.tif", self.profile, **kwargs)
+
+    def test_write_cog_rejects_a_long_sequence(self, tmp_path: Path) -> None:
+        with pytest.raises(RuntimeError, match="one entry per band"):
+            write_cog(
+                self._data(),
+                tmp_path / "out.tif",
+                self.profile,
+                units=["natural", "natural", "dB"],
+            )
+
+    def test_rewrite_rejects_a_short_sequence(self, tmp_path: Path) -> None:
+        src = tmp_path / "src.tif"
+        write_cog(self._data(), src, self.profile, band_names=["VV", "VH"])
+
+        with pytest.raises(RuntimeError, match="units must hold one entry per band"):
+            rewrite_tiff(src, tmp_path / "dst.tif", units=["natural"])
+
+    def test_a_rejected_write_leaves_nothing_behind(self, tmp_path: Path) -> None:
+        with pytest.raises(RuntimeError):
+            write_cog(self._data(), tmp_path / "out.tif", self.profile, units=["natural"])
+
+        assert list(tmp_path.iterdir()) == []
