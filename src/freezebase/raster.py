@@ -59,14 +59,21 @@ callers rewriting existing files to COG via :func:`rewrite_tiff`."""
 
 _COG_CREATION_OPTIONS = (
     "blocksize",
+    "compress",
+    "interleave",
+    "level",
+    "max_z_error",
+    "max_z_error_overview",
     "overviews",
+    "overview_count",
+    "overview_quality",
     "overview_resampling",
     "overview_predictor",
     "overview_compress",
-    # GTiff rejects the COG driver's YES/NO/STANDARD
     "predictor",
+    "quality",
 )
-"""COG-driver creation options the GTiff driver rejects or does not know."""
+"""COG creation options accepted by :func:`write_cog` for the final copy."""
 
 
 @contextmanager
@@ -655,9 +662,7 @@ def rewrite_tiff(
         dst_profile.pop(_k, None)
     if driver != "GTiff":
         # RASTERIO_PROFILE_DEFAULTS carries GTiff-specific creation options
-        # (e.g. blockxsize/blockysize instead of the COG driver's BLOCKSIZE)
-        # that other drivers don't recognise; drop them so callers can target
-        # e.g. driver="COG" via `profile` without GDAL warning on every key.
+        # that other drivers do not recognise.
         for _k in ("tiled", "blockxsize", "blockysize", "interleave"):
             dst_profile.pop(_k, None)
 
@@ -850,10 +855,25 @@ def write_cog(
 
     mem_profile = build_rasterio_profile(profile)
     mem_profile.pop("driver", None)  # staging file is always GTiff
-    # COG-driver-only options are rejected or ignored by GTiff, and the final
-    # COG creation options come from COG_PROFILE below regardless.
+    # The caller's codec settings describe the finished COG, not this throwaway
+    # staging image, and applying a lossy one here would quantise twice — once
+    # into the staging file and again in the copy below. Strip them and keep the
+    # lossless default, so the staging image stays as cheap in memory as it was
+    # before these settings were honoured at all.
     for key in _COG_CREATION_OPTIONS:
         mem_profile.pop(key, None)
+    mem_profile["compress"] = "deflate"
+
+    # The caller's codec settings belong to the finished COG, not the staging
+    # image. Merged over COG_PROFILE so unspecified options keep their defaults.
+    cog_profile = COG_PROFILE | {
+        key: profile[key] for key in _COG_CREATION_OPTIONS if key in profile
+    }
+    # A predictor is meaningless once LERC is doing the quantising, and GDAL
+    # ignores it there; drop it so the creation options describe what happens.
+    if str(cog_profile.get("compress", "")).lower().startswith("lerc"):
+        cog_profile.pop("predictor", None)
+        cog_profile.pop("overview_predictor", None)
 
     try:
         with MemoryFile() as memfile:
@@ -874,7 +894,7 @@ def write_cog(
                 )
 
             with _env_for_path(dst_file):
-                rasterio.shutil.copy(memfile.name, _to_vsi_uri(work_dst), **COG_PROFILE)
+                rasterio.shutil.copy(memfile.name, _to_vsi_uri(work_dst), **cog_profile)
 
         if not is_s3:
             work_dst.replace(dst_file)
