@@ -82,6 +82,22 @@ def dataset(tmp_path: Path) -> _FakeDataset:
     return ds
 
 
+def test_metadata_display_dict_flattens_additional_fields_and_omits_none() -> None:
+    metadata = DatasetMetadata(
+        name="Example",
+        source_url="https://example.test/data",
+        attribution="Example authors",
+        additional_fields={"resolution": "10 m"},
+    )
+
+    assert metadata.to_display_dict() == {
+        "name": "Example",
+        "source_url": "https://example.test/data",
+        "attribution": "Example authors",
+        "resolution": "10 m",
+    }
+
+
 class TestCleanupResetsVerification:
     def test_get_data_after_full_wipe_reverifies(self, dataset: _FakeDataset) -> None:
         # Prime the cache: processed file is created and _verified becomes True.

@@ -1,8 +1,4 @@
-"""Rasterio helpers with transparent S3 support.
-
-This module provides utilities for opening, profiling, grouping, merging,
-and rewriting GeoTIFF files on local disk or S3-compatible object storage.
-"""
+"""Rasterio helpers for local and S3-backed files."""
 
 from __future__ import annotations
 
@@ -47,34 +43,35 @@ COG_PROFILE: dict[str, Any] = {
     "compress": "deflate",
     "blocksize": 512,
     "overviews": "IGNORE_EXISTING",
-    # AVERAGE skips NODATA pixels, unlike GDAL's default CUBIC
+    # AVERAGE skips NODATA pixels.
     "overview_resampling": "AVERAGE",
-    # YES resolves to standard predictor (predictor=2) for integer data type
-    # and floating-point predictor (predictor=3) for floating point data type
+    # Select the predictor from the data type.
     "predictor": "YES",
     "overview_predictor": "YES",
 }
-"""Creation profile for the GDAL ``COG`` driver, used by :func:`write_cog` and by
-callers rewriting existing files to COG via :func:`rewrite_tiff`."""
+"""Default GDAL ``COG`` creation profile."""
 
 _COG_CREATION_OPTIONS = (
     "blocksize",
+    "compress",
+    "interleave",
+    "level",
+    "max_z_error",
+    "max_z_error_overview",
     "overviews",
+    "overview_count",
+    "overview_quality",
     "overview_resampling",
     "overview_predictor",
     "overview_compress",
-    # GTiff rejects the COG driver's YES/NO/STANDARD
     "predictor",
+    "quality",
 )
-"""COG-driver creation options the GTiff driver rejects or does not know."""
 
 
 @contextmanager
 def _env_for_path(path: AnyPath) -> Generator[None]:
-    """Enter the appropriate rasterio environment for a path's storage backend.
-
-    Local paths get a plain ``Env``; S3 ``UPath`` instances get a credentialed
-    env via :func:`freezebase.s3.s3_env`.
+    """Enter a local or credentialed S3 rasterio environment.
 
     Raises
     ------
@@ -98,12 +95,7 @@ def _env_for_path(path: AnyPath) -> Generator[None]:
 
 
 def _to_vsi_uri(path: AnyPath) -> str:
-    """Convert a path to a GDAL VSI URI, using ``/vsis3/`` for S3.
-
-    ``rasterio.open`` and ``rasterio.merge.merge`` parse ``s3://`` URIs
-    themselves, but ``rasterio.shutil.copy`` passes its arguments to GDAL
-    verbatim and only understands the ``/vsis3/`` form, so its S3 operands must
-    go through this helper.
+    """Return a GDAL path, converting S3 paths to ``/vsis3/`` URIs.
 
     Raises
     ------
@@ -127,10 +119,7 @@ def _rasterio_open(
     mode: Literal["r", "r+", "w", "w+"] = "r",
     **kwargs,
 ) -> Generator[DatasetReader | DatasetWriter]:
-    """Yield a rasterio dataset, configuring a GDAL env for S3 if needed.
-
-    Internal generator backing the public :func:`rasterio_open` dispatcher.
-    """
+    """Yield a dataset in the appropriate rasterio environment."""
     path = UPath(path)
     with _env_for_path(path), rasterio.open(str(path), mode, **kwargs) as dataset:
         yield dataset
@@ -153,31 +142,21 @@ def rasterio_open(
     mode: Literal["r", "r+", "w", "w+"] = "r",
     **kwargs,
 ) -> AbstractContextManager[DatasetReader | DatasetWriter]:
-    """Open a rasterio dataset from a local path or an S3-backed UPath.
-
-    A drop-in replacement for ``rasterio.open`` that automatically injects
-    GDAL environment variables derived from a UPath's fsspec storage options,
-    enabling reads and writes against S3-compatible object stores without
-    manually managing credentials.
+    """Open a local or S3-backed rasterio dataset.
 
     Parameters
     ----------
     path : str | Path | UPath
-        Path to the raster file. A ``UPath`` with protocol ``s3`` triggers
-        credential extraction from its underlying fsspec filesystem. A plain
-        ``Path`` or ``str`` is treated as a local file.
+        Raster path. An S3 ``UPath`` supplies its storage options to GDAL.
     mode : {"r", "r+", "w", "w+"}, optional
         File mode passed directly to ``rasterio.open``. Defaults to ``"r"``.
     **kwargs : Any
-        Additional keyword arguments forwarded to ``rasterio.open``, such as
-        ``driver``, ``width``, ``height``, ``count``, ``dtype``, or ``crs``.
+        Additional arguments for ``rasterio.open``.
 
     Returns
     -------
-    AbstractContextManager[rasterio.DatasetReader]
-        When ``mode="r"``.
-    AbstractContextManager[rasterio.DatasetWriter]
-        When ``mode`` is ``"r+"``, ``"w"``, or ``"w+"``.
+    AbstractContextManager
+        Context manager yielding a dataset reader or writer.
 
     Raises
     ------
@@ -188,21 +167,7 @@ def rasterio_open(
 
 
 def build_rasterio_profile(*profiles: dict[str, Any] | None) -> dict[str, Any]:
-    """Build a rasterio profile by merging the provided profiles, starting from defaults.
-
-    Each argument is applied in order, so later profiles override earlier ones.
-
-    The built-in defaults are::
-
-        driver     = "GTiff"
-        tiled      = True
-        blockxsize = 512
-        blockysize = 512
-        interleave = "pixel"
-        compress   = "deflate"
-
-    The caller must supply ``dtype``, ``nodata``, ``count``,
-    ``width``, and ``height`` before passing the profile to ``rasterio.open``.
+    """Merge profiles over :data:`RASTERIO_PROFILE_DEFAULTS` in order.
 
     Parameters
     ----------
@@ -212,7 +177,7 @@ def build_rasterio_profile(*profiles: dict[str, Any] | None) -> dict[str, Any]:
     Returns
     -------
     dict[str, Any]
-        Merged profile starting from the defaults above.
+        Merged rasterio profile.
     """
     dst_profile = RASTERIO_PROFILE_DEFAULTS.copy()
     for profile in profiles:
@@ -230,28 +195,7 @@ def _inject_band_metadata(
     band_tags: Sequence[Mapping[str, str]] | None = None,
     units: list[str] | None = None,
 ) -> None:
-    """Inject descriptions, color interpretation, tags and units into a raster file.
-
-    Supports both VRT files (used as COG source) and GeoTIFF COGs. For COGs,
-    GDAL requires the IGNORE_COG_LAYOUT_BREAK open option to allow in-place
-    updates without losing the COG layout.
-
-    Parameters
-    ----------
-    dst_file : str | Path | UPath
-        Target file to update (VRT or GeoTIFF).
-    band_names : list[str] | None
-        Band descriptions to set, one per band.
-    color_interp : list[ColorInterp] | None
-        Color interpretation per band.
-    tags : Mapping[str, str] | None
-        Dataset-level tags, merged into the existing ones.
-    band_tags : Sequence[Mapping[str, str]] | None
-        Per-band tags, one mapping per band, each merged into that band's
-        existing tags.
-    units : list[str] | None
-        Band unit strings, one per band.
-    """
+    """Update raster metadata in place."""
     if all(x is None for x in (band_names, color_interp, tags, band_tags, units)):
         return
     with rasterio_open(dst_file, "r+", IGNORE_COG_LAYOUT_BREAK="YES") as ds:
@@ -282,14 +226,12 @@ def _apply_band_metadata(
     band_tags: Sequence[Mapping[str, str]] | None = None,
     units: list[str] | None = None,
 ) -> None:
-    """Write descriptions, color interpretation, tags and units onto an open dataset.
+    """Write metadata to an open dataset.
 
     Raises
     ------
     ValueError
-        If a per-band sequence does not hold one entry per band. A short one
-        leaves the trailing bands untouched, and nothing later reveals it: an
-        unset unit reads back as ``None``, exactly like one written empty.
+        If a per-band sequence length does not match the band count.
     """
     _check_band_lengths(
         ds.count,
@@ -314,23 +256,22 @@ def _apply_band_metadata(
 
 
 def get_utm_zone_string(projparams: Any) -> str:
-    """Extract zero-padded UTM zone identifier.
+    """Return a zero-padded UTM zone identifier.
 
     Parameters
     ----------
     projparams : Any
-        An object that can initialize a pyproj.CRS class instance,
-        e.g., a EPSG code or any object that implements `to_wkt()`.
+        Value accepted by ``pyproj.CRS``.
 
     Returns
     -------
     str
-        UTM zone identifier (e.g., '32N', '01S')
+        UTM zone such as ``"32N"`` or ``"01S"``.
 
     Raises
     ------
     ValueError
-        If UTM zone cannot be extracted.
+        If the CRS is invalid or has no UTM zone.
     """
     try:
         crs = CRS(projparams)
@@ -349,23 +290,22 @@ def get_utm_zone_string(projparams: Any) -> str:
 
 
 def get_epsg_string(projparams: Any) -> str:
-    """Extract CRS identifier string from CRS object.
+    """Return an ``EPSG:<code>`` identifier.
 
     Parameters
     ----------
     projparams : Any
-        An object that can initialize a pyproj.CRS class instance,
-        e.g., a EPSG code or any object that implements `to_wkt()`.
+        Value accepted by ``pyproj.CRS``.
 
     Returns
     -------
     str
-        'EPSG:' + EPSG code identifier (e.g., 'EPSG:4326')
+        Identifier such as ``"EPSG:4326"``.
 
     Raises
     ------
     ValueError
-        If EPSG code cannot be extracted.
+        If the CRS is invalid or has no EPSG code.
     """
     try:
         crs = CRS(projparams)
@@ -382,12 +322,12 @@ def get_epsg_string(projparams: Any) -> str:
 
 
 def utm_zone_to_crs(utm_zone: str) -> CRS:
-    """Create a CRS from an UTM zone string.
+    """Create a CRS from a UTM zone.
 
     Parameters
     ----------
-    utm_zone: str
-        UTM zone identifier (e.g., '32N', '01S')
+    utm_zone : str
+        UTM zone such as ``"32N"`` or ``"01S"``.
 
     Returns
     -------
@@ -412,32 +352,29 @@ def utm_zone_to_crs(utm_zone: str) -> CRS:
     if not 1 <= zone_number <= 60:  # noqa: PLR2004
         msg = f"UTM zone must be in [1, 60], got {zone_number} from {utm_zone!r}."
         raise ValueError(msg)
-    # Create UTM CRS: northern hemisphere uses EPSG:326xx, southern uses EPSG:327xx
     epsg_code = 32600 + zone_number if hemisphere == "N" else 32700 + zone_number
     return CRS.from_epsg(epsg_code)
 
 
 def group_tiffs_by_crs(src_tiffs: Sequence[AnyPath]) -> dict[str, list[UPath]]:
-    """Group GeoTIFF files by their coordinate reference system.
+    """Group GeoTIFFs by CRS.
 
     Parameters
     ----------
     src_tiffs : Sequence[str | Path | UPath]
-        Sequence of paths to GeoTIFF files to group.
+        GeoTIFF paths.
 
     Returns
     -------
     dict[str, list[UPath]]
-        Dictionary mapping CRS identifiers to lists of ``UPath`` instances.
-        UTM zones use format 'UTM<XX>[N|S]' (e.g., 'UTM32N', 'UTM01S').
-        Non-UTM projections use format 'EPSG<XXXX>' (e.g., 'EPSG4326').
+        Paths keyed by ``UTM<zone>`` or ``EPSG<code>``.
 
     Raises
     ------
     ValueError
-        If src_tiffs is empty.
+        If ``src_tiffs`` is empty.
     TypeError
-        If CRS cannot be read from any file.
+        If a file has no CRS.
     FileNotFoundError
         If any source file does not exist.
     """
@@ -450,12 +387,10 @@ def group_tiffs_by_crs(src_tiffs: Sequence[AnyPath]) -> dict[str, list[UPath]]:
     for src_tiff in src_tiffs:
         src_path = UPath(src_tiff)
 
-        # Validate file exists
         if not src_path.exists():
             msg = f"Source file not found: {src_path}"
             raise FileNotFoundError(msg)
 
-        # Read CRS
         with rasterio_open(src_path) as src:
             if src.crs is None:
                 msg = f"File has no CRS: {src_path}"
@@ -469,7 +404,6 @@ def group_tiffs_by_crs(src_tiffs: Sequence[AnyPath]) -> dict[str, list[UPath]]:
                 epsg_str = get_epsg_string(crs)
                 crs_str = epsg_str.replace(":", "")
 
-        # Add to group
         if crs_str not in groups:
             groups[crs_str] = []
         groups[crs_str].append(src_path)
@@ -488,38 +422,29 @@ def merge_tiffs(
     mem_limit_mb: int = 10_000,
     profile: dict[str, Any] | None = None,
 ) -> None:
-    """Merge multiple GeoTIFF files into a single file.
-
-    Uses rasterio.merge.merge() to combine overlapping rasters.
-    Band names are copied from the first source file.
+    """Merge GeoTIFFs, preserving band names from the first source.
 
     Parameters
     ----------
     src_files : Sequence[str | Path | UPath]
-        Sequence of source GeoTIFF files to merge. Must all have same CRS.
+        Source files, all in the same CRS.
     dst_file : str | Path | UPath
-        Path to output merged GeoTIFF.
+        Output file.
     method : str, default "first"
-        Method for handling overlapping pixels. Options:
-        - "first": Use value from first raster in list
-        - "last": Use value from last raster in list
-        - "min": Use minimum value
-        - "max": Use maximum value
+        Overlap method accepted by ``rasterio.merge.merge``.
     mem_limit_mb : int, default 10000
-        Memory limit in megabytes for merge operation. Controls how much
-        data is read into memory at once. Default is 10GB.
+        Merge memory limit in megabytes.
     profile : dict[str, Any] or None, optional
-        Custom rasterio profile settings. If None, uses deflate compression
-        with 512x512 tiling.
+        Output profile overrides.
 
     Raises
     ------
     ValueError
-        If src_files is empty, or the files do not all share a CRS.
+        If ``src_files`` is empty or contains different CRSs.
     FileNotFoundError
         If any source file does not exist.
     RuntimeError
-        If merge operation fails.
+        If merging fails.
     """
     if not src_files:
         msg = "src_files list cannot be empty"
@@ -528,7 +453,6 @@ def merge_tiffs(
     dst_file = UPath(dst_file)
     src_paths = [UPath(f) for f in src_files]
 
-    # Validate source files exist
     for src_path in src_paths:
         if not src_path.exists():
             msg = f"Source file not found: {src_path}"
@@ -536,8 +460,7 @@ def merge_tiffs(
 
     logger.info("Merging %d GeoTIFFs into '%s'", len(src_files), dst_file.name)
 
-    # Read the reference profile/descriptions and validate a common CRS. A
-    # mismatched CRS would make rasterio.merge silently misplace pixels.
+    # rasterio.merge does not reject mismatched CRSs.
     ref_crs = None
     src_profile: dict[str, Any] = {}
     descriptions: tuple[str | None, ...] = ()
@@ -554,8 +477,7 @@ def merge_tiffs(
                 )
                 raise ValueError(msg)
 
-    # Rasterio returns a tuple that may contain None entries. Only carry the
-    # descriptions forward when every band actually has one.
+    # Preserve descriptions only when every band has one.
     if descriptions and all(d is not None for d in descriptions):
         band_names: list[str] | None = [d for d in descriptions if d is not None]
     else:
@@ -563,8 +485,7 @@ def merge_tiffs(
 
     dst_profile = build_rasterio_profile(src_profile, profile)
 
-    # Prefer an S3 path (source or dst) so credentials are installed for the
-    # /vsis3/ read/write paths, honoring the module's transparent-S3 contract.
+    # Use an S3 operand to configure credentials when needed.
     env_path: AnyPath = dst_file if dst_file.protocol == "s3" else src_paths[0]
 
     try:
@@ -596,47 +517,30 @@ def rewrite_tiff(
     units: list[str] | None = None,
     move: bool = False,
 ) -> None:
-    """Rewrite a GeoTIFF, optionally to a different storage backend.
+    """Rewrite a GeoTIFF locally or on S3 while preserving metadata.
 
-    Useful for applying compression/tiling, renaming bands, or copying files
-    between local disk and S3, or between two different S3 backends (each side's
-    credentials are applied independently). Source-side band descriptions, color
-    interpretation, NODATA, and tags are preserved automatically.
-
-    The rewrite is always staged (a unique local sibling temp file, or an
-    in-memory image for S3 destinations) and only swapped into place after the
-    full copy and metadata injection succeed. A pre-existing destination is
-    therefore left untouched on any failure, and the source is only deleted
-    when ``move=True`` (and never when it fails).
+    The staged write leaves an existing destination untouched on failure.
 
     Parameters
     ----------
     src_file : str | Path | UPath
-        Source GeoTIFF (local or S3).
+        Source file.
     dst_file : str | Path | UPath
-        Destination GeoTIFF (local or S3). May be the same as ``src_file``,
-        in which case the file is rewritten in place via the staging file.
+        Destination file. May equal ``src_file`` for an in-place rewrite.
     profile : dict[str, Any] or None, optional
-        Custom rasterio profile settings. If None, uses deflate compression
-        with 512x512 tiling.
+        Output profile overrides.
     band_names : list[str] or None, optional
-        New band descriptions, one per band. If None, the source's existing
-        band descriptions are preserved.
+        Band descriptions. Defaults to the source descriptions.
     color_interp : list[ColorInterp] or None, optional
-        New per-band color interpretation. If None, the source's existing
-        color interpretation is preserved.
+        Color interpretation. Defaults to the source values.
     tags : Mapping[str, str] or None, optional
-        Dataset-level tags to merge into the ones carried over from the source.
+        Dataset tags to merge.
     band_tags : Sequence[Mapping[str, str]] or None, optional
-        Per-band tags, one mapping per band, merged into the ones carried over
-        from the source.
+        Per-band tags to merge.
     units : list[str] or None, optional
-        New band unit strings, one per band. If None, the source's existing
-        units are preserved.
+        Band units. Defaults to the source values.
     move : bool, default False
-        If ``True``, delete ``src_file`` after a successful rewrite to a
-        different path (a move). If ``False`` (the default), the source is
-        preserved (a copy). Ignored when ``src_file == dst_file``.
+        Delete the source after a successful rewrite to a different path.
 
     Raises
     ------
@@ -649,21 +553,15 @@ def rewrite_tiff(
 
     dst_profile = build_rasterio_profile(profile)
     driver = dst_profile.pop("driver", "GTiff")
-    # Strip rasterio open()-only keys that are not GTiff creation options.
-    # Otherwise, GDAL warns on unrecognised ones.
+    # Remove dataset metadata from the creation options.
     for _k in ("dtype", "nodata", "crs", "transform", "count", "width", "height"):
         dst_profile.pop(_k, None)
     if driver != "GTiff":
-        # RASTERIO_PROFILE_DEFAULTS carries GTiff-specific creation options
-        # (e.g. blockxsize/blockysize instead of the COG driver's BLOCKSIZE)
-        # that other drivers don't recognise; drop them so callers can target
-        # e.g. driver="COG" via `profile` without GDAL warning on every key.
+        # Remove GTiff-only defaults.
         for _k in ("tiled", "blockxsize", "blockysize", "interleave"):
             dst_profile.pop(_k, None)
 
-    # Each stage installs the source-read and destination-write credentials
-    # independently (see the stage helpers), so src and dst may live on
-    # different S3 backends.
+    # The stage helpers configure each backend independently.
     stage = _rewrite_via_memory if dst_file.protocol == "s3" else _rewrite_via_tempfile
     try:
         stage(
@@ -699,18 +597,7 @@ def _rewrite_via_memory(
     band_tags: Sequence[Mapping[str, str]] | None,
     units: list[str] | None,
 ) -> None:
-    """Stage a rewrite entirely in memory, then atomically PutObject to S3.
-
-    GDAL CreateCopy can't read and write the same file at once, and on S3 a
-    sibling temp object plus an fsspec rename hits stale-listing errors because
-    GDAL's own S3 writes never touch s3fs's directory cache. Staging in memory
-    and writing the key in one shot sidesteps both: a failure never touches an
-    existing destination object (PutObject is atomic per key).
-
-    The read and write are separate copies bridged by the in-memory image, so
-    each runs under its own credentialed env; ``src_file`` and ``dst_file`` may
-    therefore sit on different S3 backends.
-    """
+    """Stage in memory, then atomically write the S3 destination."""
     with MemoryFile() as memfile:
         with _env_for_path(src_file):
             rasterio.shutil.copy(_to_vsi_uri(src_file), memfile.name, driver="GTiff")
@@ -738,19 +625,7 @@ def _rewrite_via_tempfile(
     band_tags: Sequence[Mapping[str, str]] | None,
     units: list[str] | None,
 ) -> None:
-    """Stage a local rewrite to a unique sibling temp, then atomically replace.
-
-    The unique suffix avoids collisions between concurrent writers, and the
-    destination is only replaced after the copy and metadata injection both
-    succeed, so a pre-existing destination survives any failure. The
-    destination is always local here, so only the source read needs credentials.
-
-    Everything but color interpretation lives in the GDAL_METADATA TIFF tag,
-    which grows when written into a finished file and is relocated behind the
-    image data, costing the ``COG`` driver its header-first layout. So a
-    non-GTiff destination carrying any of it takes an extra hop through an
-    intermediate GTiff, and the driver copy writes the final layout around it.
-    """
+    """Stage beside a local destination, then atomically replace it."""
     work_dst = dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.tmp")
     needs_gtiff_stage = driver != "GTiff" and any(
         x is not None for x in (band_names, tags, band_tags, units)
@@ -778,7 +653,6 @@ def _rewrite_via_tempfile(
             units=units,
         )
         if work_stage is not None:
-            # Both ends are local, so no credentialed env is needed here.
             rasterio.shutil.copy(
                 _to_vsi_uri(work_stage),
                 _to_vsi_uri(work_dst),
@@ -807,21 +681,14 @@ def write_cog(
 ) -> None:
     """Write an in-memory array as a Cloud Optimized GeoTIFF.
 
-    Stages ``data`` in a ``rasterio.io.MemoryFile``, then copies it straight
-    to a COG at ``dst_file``.
-
     Parameters
     ----------
     data : numpy.ndarray
-        Array to write, shaped ``(height, width)`` for a single band or
-        ``(bands, height, width)`` for multiple.
+        Single- or multi-band array.
     dst_file : str | Path | UPath
         Destination COG (local or S3).
     profile : dict[str, Any]
-        Rasterio creation profile for the staging write, as for
-        ``rasterio.open(..., "w")``: must include ``dtype``, ``count``,
-        ``width``, ``height``, ``crs``, ``transform``, and ``nodata``. Merged
-        onto :data:`RASTERIO_PROFILE_DEFAULTS` via :func:`build_rasterio_profile`.
+        Raster metadata and native GDAL ``COG`` creation options.
     band_names : list[str] or None, optional
         Band descriptions, one per band.
     color_interp : list[ColorInterp] or None, optional
@@ -839,21 +706,24 @@ def write_cog(
         If the write fails.
     """
     dst_file = UPath(dst_file)
-    # On S3, write the key directly: PutObject is atomic per key, so a failed
-    # write leaves nothing behind, and there's no local rename needed (which
-    # would otherwise hit stale-listing errors in s3fs, since GDAL's own S3
-    # writes never touch its directory cache). Locally, stage via a sibling
-    # temp file and swap in with an atomic rename, so a resumed run can't
-    # mistake a partially-written file for a finished one.
+    # S3 PutObject is atomic; local writes use an atomic rename.
     is_s3 = dst_file.protocol == "s3"
     work_dst = dst_file if is_s3 else dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.tmp")
 
     mem_profile = build_rasterio_profile(profile)
-    mem_profile.pop("driver", None)  # staging file is always GTiff
-    # COG-driver-only options are rejected or ignored by GTiff, and the final
-    # COG creation options come from COG_PROFILE below regardless.
+    mem_profile.pop("driver", None)
+    # Keep the staging image lossless to avoid double quantisation.
     for key in _COG_CREATION_OPTIONS:
         mem_profile.pop(key, None)
+    mem_profile["compress"] = "deflate"
+
+    cog_profile = COG_PROFILE | {
+        key: profile[key] for key in _COG_CREATION_OPTIONS if key in profile
+    }
+    # LERC does not use predictors.
+    if str(cog_profile.get("compress", "")).lower().startswith("lerc"):
+        cog_profile.pop("predictor", None)
+        cog_profile.pop("overview_predictor", None)
 
     try:
         with MemoryFile() as memfile:
@@ -862,8 +732,7 @@ def write_cog(
                     mem_ds.write(data, 1)
                 else:
                     mem_ds.write(data)
-                # Set on the staging file, not on the finished COG: writing
-                # metadata into a COG afterwards would break its layout.
+                # Post-write metadata updates break COG layout.
                 _apply_band_metadata(
                     mem_ds,
                     band_names=band_names,
@@ -874,7 +743,7 @@ def write_cog(
                 )
 
             with _env_for_path(dst_file):
-                rasterio.shutil.copy(memfile.name, _to_vsi_uri(work_dst), **COG_PROFILE)
+                rasterio.shutil.copy(memfile.name, _to_vsi_uri(work_dst), **cog_profile)
 
         if not is_s3:
             work_dst.replace(dst_file)

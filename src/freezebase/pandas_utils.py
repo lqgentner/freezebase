@@ -1,4 +1,4 @@
-"""Utilities for pandas and geopandas."""
+"""Pandas and GeoPandas helpers."""
 
 from __future__ import annotations
 
@@ -20,45 +20,26 @@ def clean_names(
     df: pd.DataFrame | gpd.GeoDataFrame,
     case_type: str = "lower",
 ) -> pd.DataFrame | gpd.GeoDataFrame:
-    """
-    Clean DataFrame column names by normalizing whitespace and adjusting case.
+    """Normalize DataFrame column names.
 
     Parameters
     ----------
     df : pd.DataFrame | gpd.GeoDataFrame
-        The DataFrame whose column names to clean.
+        DataFrame to rename.
     case_type : str, optional
-        How to transform the case of column names. One of:
-
-        - ``"lower"``    : all characters lowercase (default)
-        - ``"upper"``    : all characters uppercase
-        - ``"snake"``    : CamelCase/camelCase to snake_case
-        - ``"preserve"`` : no case change, only spaces replaced
+        ``"lower"``, ``"upper"``, ``"snake"``, or ``"preserve"``.
 
     Returns
     -------
-    df : pd.DataFrame | gpd.GeoDataFrame
-        A new DataFrame with cleaned column names. The original is not mutated.
+    pd.DataFrame or gpd.GeoDataFrame
+        Renamed copy.
 
     Raises
     ------
     ValueError
-        If ``case_type`` is not one of the accepted values, or if two source
-        columns normalize to the same name (which would silently drop a column).
-
-    Examples
-    --------
-    >>> import pandas as pd
-    >>> df = pd.DataFrame({"Aloha": [1], "Bell Chart": [2], "CamelCase": [3]})
-    >>> clean_names(df)
-       aloha  bell_chart  camelcase
-    0      1           2          3
-    >>> clean_names(df, case_type="snake")
-       aloha  bell_chart  camel_case
-    0      1           2           3
+        If ``case_type`` is invalid or normalized names collide.
     """
-    # Validate up front so an invalid `case_type` fails even for an empty
-    # (zero-column) DataFrame, where `transform` would otherwise never run.
+    # Validate even when the DataFrame has no columns.
     if case_type not in _VALID_CASE_TYPES:
         msg = f"Unknown case_type: {case_type!r}. Valid options: {_VALID_CASE_TYPES}."
         raise ValueError(msg)
@@ -82,8 +63,7 @@ def clean_names(
                 return name
 
     new_names = [transform(col) for col in df.columns]
-    # Guard against normalization collisions, which pandas would resolve by
-    # silently keeping only the last duplicate column.
+    # pandas silently drops earlier duplicate names.
     seen: dict[str, object] = {}
     for original, new in zip(df.columns, new_names, strict=True):
         if new in seen:

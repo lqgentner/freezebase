@@ -27,27 +27,23 @@ def create_progress(
     columns: list[str | ProgressColumn] | None = None,
     **kwargs,
 ) -> Progress:
-    """
-    Create a rich progress bar with a custom column layout.
+    """Create a rich progress bar with a custom column layout.
 
     Parameters
     ----------
     show_progress : bool, default: True
-        Whether to display the progress bar. If False, the progress bar
-        is created but disabled.
+        Whether to display the progress bar.
     add_description : bool
-        Whether to prepend a text column with the task description to
-        the progress bar. Ignored when ``columns`` is provided.
+        Add a task-description column. Ignored with custom ``columns``.
     columns : list of str or ProgressColumn, optional
-        Override the default column layout. When set, the columns are
-        used as-is and ``add_description`` is ignored.
+        Custom column layout.
     **kwargs : Any
-        Additional keyword arguments passed to `rich.progress.Progress`.
+        Additional ``Progress`` arguments.
 
     Returns
     -------
     Progress
-        A configured rich Progress instance.
+        Configured progress manager.
     """
     if columns is None:
         columns = (
@@ -79,29 +75,24 @@ def track_progress(
     show_progress: bool = True,
     **progress_kwargs,
 ) -> Iterable[ProgressType]:
-    """
-    Track progress by iterating over a sequence.
-
-    Wraps `rich.progress.Progress.track` with the standard column layout
-    from `create_progress`.
+    """Yield items while tracking progress with the shared layout.
 
     Parameters
     ----------
     sequence : Iterable[ProgressType]
-        The iterable to track progress over.
+        Items to track.
     description : str, default: "Working..."
-        Label displayed alongside the progress bar.
+        Task label.
     total : float or None, default: None
-        Total number of steps. If None, the length of `sequence` is used
-        when available.
+        Total steps, inferred when possible.
     completed : int, default: 0
-        Number of steps already completed at the start.
+        Initially completed steps.
     update_period : float, default: 0.1
-        Minimum time in seconds between progress bar updates.
+        Minimum update interval in seconds.
     show_progress : bool, default: True
         Whether to display the progress bar.
     **progress_kwargs : Any
-        Additional keyword arguments passed to `rich.progress.Progress`.
+        Additional ``Progress`` arguments.
 
     Yields
     ------

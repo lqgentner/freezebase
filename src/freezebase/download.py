@@ -1,4 +1,4 @@
-"""HTTP download tooling: retry helpers and the HTTPDownloader."""
+"""HTTP downloads with retries and progress reporting."""
 
 from __future__ import annotations
 
@@ -38,33 +38,27 @@ DEFAULT_TIMEOUT = 30
 CHUNK_SIZE = 1024 * 1024  # 1 MiB
 REMOTE_BLOCK_SIZE = 64 * 1024 * 1024  # 64 MiB
 
-# Bound manual redirect following (mirrors the `requests` default).
 MAX_REDIRECTS = 30
 
 logger = logging.getLogger(__name__)
 
-# HTTP status codes considered transient and worth retrying.
 TRANSIENT_HTTP_STATUS_CODES = frozenset({408, 429, 502, 503, 504})
 
-# Redirect status codes that rewrite the request method (per RFC 7231 / browsers).
+# Redirects that may change POST to GET.
 _HTTP_MOVED_PERMANENTLY = 301
 _HTTP_FOUND = 302
 _HTTP_SEE_OTHER = 303
 
-# Control characters (C0 range plus DEL) are never valid in a saved filename.
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
 
-# Case-insensitive Windows reserved device names (a leading stem match is enough).
 _WINDOWS_RESERVED_NAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
     | {f"COM{i}" for i in range(1, 10)}
     | {f"LPT{i}" for i in range(1, 10)},
 )
 
-# Return type for retry_request
 WrappedFn = TypeVar("WrappedFn", bound=Callable[..., Any])
 
-# Byte-oriented progress bar layout for HTTP downloads.
 _DOWNLOAD_COLUMNS: list[str | ProgressColumn] = [
     TextColumn("{task.fields[filename]}"),
     BarColumn(),
@@ -85,7 +79,7 @@ def _is_transient_request_error(
     *,
     extra_status_codes: frozenset[int] = frozenset(),
 ) -> bool:
-    """Check whether an exception raised by `requests` is worth retrying."""
+    """Return whether a request error is transient."""
     if isinstance(exception, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
         return True
     if isinstance(exception, requests.exceptions.HTTPError):
@@ -120,17 +114,14 @@ def retry_request(
     Parameters
     ----------
     logger : logging.Logger
-        Logger instance used to log retry attempts before each sleep.
+        Retry logger.
     extra_status_codes : frozenset of int, optional
-        Additional HTTP status codes to treat as transient for this call site,
-        on top of the codes in ``TRANSIENT_HTTP_STATUS_CODES``. Use this rather
-        than widening ``TRANSIENT_HTTP_STATUS_CODES`` itself when a status code
-        (e.g. 500) is only known to be transient for one particular endpoint.
+        Additional transient status codes.
 
     Returns
     -------
     Callable[[WrappedFn], WrappedFn]
-        A tenacity retry decorator configured for HTTP request retries.
+        Configured retry decorator.
     """
     return tenacity.retry(
         reraise=True,
@@ -144,20 +135,12 @@ def retry_request(
 
 
 class HTTPDownloader:
-    """
-    Download manager for fetching files over HTTP/HTTPS.
+    """Stream HTTP downloads through a reusable session.
 
     Built upon `requests`. Inspired by `pooch.HTTPDownloader`.
-    Supports downloading with GET and POST requests.
-
-    Response bodies are always streamed to disk in chunks, so memory use stays
-    flat no matter how large the file is, and redirects are always followed by
-    the downloader itself, so `trusted_hosts` governs where credentials go.
-
-    Holds an open `requests.Session`, which keeps a connection to the server
-    alive between downloads. Call `close()` when done, or use the downloader as
-    a context manager. If neither happens, the session is closed once Python
-    discards the downloader.
+    Supports downloading with GET and POST requests. Manual redirects
+    prevent credentials from reaching untrusted hosts. Use as
+    a context manager or call :meth:`close` when finished.
     """
 
     def __init__(
@@ -169,30 +152,24 @@ class HTTPDownloader:
         timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
         progress: bool = True,
     ) -> None:
-        """
-        Initialize an HTTPDownloader instance.
+        """Initialize the downloader.
 
         Parameters
         ----------
         method : {"GET", "POST"}
             HTTP method used to request the file.
         auth : tuple[str, str] or instance of AuthBase subclass, optional
-            HTTP authentication object (default is None). For HTTP Basic Authentication,
-            provide `(user, pass)` tuple
+            Authentication object or ``(user, password)`` pair.
         trusted_hosts : str or iterable of str, optional
-            Hostnames for which auth should be preserved during redirects. If not specified,
-            auth is only sent to the original host.
+            Redirect hosts allowed to receive authentication.
         timeout : float or tuple[float, float]
-            Seconds to wait for the server, as a single value or a
-            `(connect, read)` pair.
+            Request timeout or ``(connect, read)`` timeouts.
         progress : bool
-            If True, show a progress bar during download.
-
+            Show download progress.
         """
         self.session = requests.Session()
         self.method = method
-        # Kept per-instance and passed per-request, never stored on the session, so
-        # dropping credentials for one hop does not affect later calls.
+        # Per-request auth can be dropped for an unsafe redirect.
         self._auth = auth
         if trusted_hosts is None:
             trusted_hosts = []
@@ -229,44 +206,32 @@ class HTTPDownloader:
         *,
         overwrite: bool = False,
     ) -> Path | UPath:
-        """
-        Download a file from a URL to a directory with optional progress bar.
-
-        Supports both local paths and remote paths (e.g. UPath for S3).
+        """Download a URL to a local or remote directory.
 
         Parameters
         ----------
         url : str
-            The URL of the file to download.
+            Source URL.
         save_dir : str, Path, or UPath
-            The directory to save the downloaded file. Can be a local path
-            or a remote UPath (e.g. S3).
+            Destination directory.
         filename : str, optional
-            The filename of the downloaded file.
-            If not provided, the filename will be inferred from the HTML header or URL.
-            Whether provided or inferred, the name is validated to be a single
-            path component confined to ``save_dir``; absolute paths, directory
-            separators, ``..``, control characters, and reserved device names
-            are rejected.
+            Output name, inferred from the response or URL when omitted.
         overwrite : bool, default False
-            If ``False`` (the default), raise ``FileExistsError`` when the
-            target already exists. If ``True``, replace it.
+            Replace an existing target.
 
         Returns
         -------
         Path or UPath
-            The path of the downloaded file.
+            Downloaded path.
 
         Raises
         ------
         ValueError
-            If the resolved filename is unsafe or escapes ``save_dir``.
+            If the filename is unsafe.
         FileExistsError
-            If the target exists and ``overwrite`` is ``False``.
-
+            If the target exists unless ``overwrite`` is true.
         """
-        # Ensures the streamed response is properly closed
-        # (`close()` only closes the session)
+        # Closing the session alone does not close this streamed response.
         with contextlib.closing(self._follow_redirects(url)) as response:
             response.raise_for_status()
 
@@ -300,15 +265,7 @@ class HTTPDownloader:
             )
 
     def _follow_redirects(self, url: str) -> requests.Response:
-        """Follow redirects manually, bounding depth and protecting credentials.
-
-        Credentials are sent only while the hop stays on a trusted host and on
-        an HTTPS connection; leaving a trusted host or downgrading to plaintext
-        drops them for the rest of the chain. Each intermediate streamed
-        response is closed before the next request, and the redirect method is
-        rewritten to match browser behavior (303, and 301/302 on POST, become
-        GET; 307/308 keep the method).
-        """
+        """Follow bounded redirects without leaking credentials."""
         auth = self._auth
         method: str = self.method
 
@@ -326,7 +283,6 @@ class HTTPDownloader:
 
             location = response.headers["Location"]
             prev_parsed = urlparse(response.url)
-            # Release the streamed connection before following the redirect.
             response.close()
 
             new_url = urljoin(response.url, location)
@@ -350,35 +306,29 @@ class HTTPDownloader:
         raise RuntimeError(msg)
 
     def close(self) -> None:
-        """Close the session and its connections to the server."""
+        """Close the session."""
         self.session.close()
 
     def __enter__(self) -> Self:
-        """Return self for use as a context manager."""
+        """Return this downloader."""
         return self
 
     def __exit__(self, *exc_info: object) -> None:
-        """Close the session on context exit."""
+        """Close the session."""
         self.close()
 
     def __del__(self) -> None:
-        """Close the session when Python discards the downloader.
-
-        Errors are ignored: this can run while the interpreter is shutting
-        down, or on a downloader whose `__init__` did not finish.
-        """
+        """Close the session, suppressing finalization errors."""
         with contextlib.suppress(Exception):
             self.close()
 
 
 def _is_downloadable_content(response: requests.Response) -> bool:
-    """Check if a file is downloadable."""
+    """Return whether a response contains downloadable content."""
     cd = response.headers.get("Content-Disposition")
     if cd:
-        # File is always downloadable if Content-Disposition exists
         return True
     content_type = response.headers.get("Content-Type", "").lower()
-    # Common downloadable MIME types
     downloadable_types = [
         "application/",
         "audio/",
@@ -391,7 +341,7 @@ def _is_downloadable_content(response: requests.Response) -> bool:
 
 
 def _get_filesize(response: requests.Response) -> float | None:
-    """Get the filesize in bytes."""
+    """Return the response size in bytes, if known."""
     total = response.headers.get("content-length")
     if total is None:
         return total
@@ -405,12 +355,7 @@ def _write_file[T: Path | UPath](
     show_progress: bool = True,
     overwrite: bool = False,
 ) -> T:
-    """
-    Stream a response body to a file with an optional rich progress bar.
-
-    Local destinations stream to a unique sibling ``.partial`` file and rename
-    on success. Remote destinations (e.g. ``UPath`` on S3) write directly
-    to the final path with an increased fsspec ``block_size``.
+    """Stream a response to a local or remote file.
 
     Raises
     ------
@@ -425,11 +370,8 @@ def _write_file[T: Path | UPath](
     progress = create_progress(show_progress=show_progress, columns=_DOWNLOAD_COLUMNS)
     total = _get_filesize(response)
 
-    # `UPath("/tmp/x")` is a Path subclass (PosixUPath), `UPath("s3://...")` is not,
-    # so isinstance(_, Path) separates local from remote.
+    # Only local UPaths inherit Path.
     if isinstance(filepath, Path):
-        # A unique suffix keeps concurrent writers to the same target from
-        # clobbering one another's partial file.
         partial_filepath = filepath.with_name(f"{filepath.name}.{token_hex(8)}.partial")
         try:
             with progress:
@@ -456,10 +398,7 @@ def _write_file[T: Path | UPath](
 
 
 def _rewrite_redirect_method(status_code: int, method: str) -> str:
-    """Return the method to use for a redirect, matching browser behavior.
-
-    A 303, and a 301/302 on a POST, becomes a GET; 307/308 keep the method.
-    """
+    """Apply browser-compatible redirect method rewriting."""
     becomes_get = status_code == _HTTP_SEE_OTHER or (
         status_code in (_HTTP_MOVED_PERMANENTLY, _HTTP_FOUND) and method == "POST"
     )
@@ -467,11 +406,7 @@ def _rewrite_redirect_method(status_code: int, method: str) -> str:
 
 
 def _sanitize_filename(filename: str, *, explicit: bool) -> str:
-    """Validate that ``filename`` is a safe, single path component.
-
-    Rejects absolute paths, directory separators, ``..``, control characters,
-    and Windows reserved device names, whether the name was supplied explicitly
-    or inferred from a server header or URL.
+    """Validate a filename as a safe path component.
 
     Raises
     ------
@@ -489,13 +424,9 @@ def _sanitize_filename(filename: str, *, explicit: bool) -> str:
         msg = f"Refusing {source} filename {filename!r}: contains a directory separator."
         raise ValueError(msg)
     if ":" in filename:
-        # Guards against Windows drive letters (``C:...``) and NTFS alternate
-        # data streams (``name:stream``).
+        # Reject drive letters and NTFS alternate streams.
         msg = f"Refusing {source} filename {filename!r}: contains ':'."
         raise ValueError(msg)
-    # The separator and ':' checks above already reject every name that
-    # ``posixpath``/``ntpath`` would call absolute or non-bare, so no further
-    # path-shape check can fire.
     stem = filename.split(".", 1)[0].upper()
     if stem in _WINDOWS_RESERVED_NAMES:
         msg = f"Refusing {source} filename {filename!r}: reserved device name."
@@ -504,11 +435,7 @@ def _sanitize_filename(filename: str, *, explicit: bool) -> str:
 
 
 def _resolve_within[T: Path | UPath](save_dir: T, filename: str) -> T:
-    """Join ``filename`` under ``save_dir`` and confirm it does not escape it.
-
-    ``filename`` is expected to already be a sanitized bare name; this is a
-    defense-in-depth check that also catches symlink-based escapes locally.
-    """
+    """Join a filename beneath a directory, rejecting local symlink escapes."""
     target = save_dir / filename
     if isinstance(save_dir, Path):
         resolved_dir = save_dir.resolve()
@@ -520,24 +447,16 @@ def _resolve_within[T: Path | UPath](save_dir: T, filename: str) -> T:
 
 
 def _extract_filename_from_cd(cd: str | None) -> str | None:
-    """
-    Extract the filename from the Content-Disposition HTML headers field.
-
-    Handles both RFC 5987 encoded filename* and plain filename parameters,
-    preferring filename* when both are present.
-    """
+    """Extract a filename from Content-Disposition, preferring ``filename*``."""
     if not cd:
         return None
 
-    # RFC 5987: filename*=charset'language'encoded-value (e.g. UTF-8''name.zip).
-    # The value is percent-encoded, so decode it before returning (the caller
-    # then validates it; percent-encoded traversal like %2e%2e%2f is caught there).
+    # RFC 5987: filename*=charset'language'encoded-value.
     rfc5987_match = re.search(r"filename\*=([^']*)'[^']*'([^;\s]+)", cd, re.IGNORECASE)
     if rfc5987_match:
         charset = rfc5987_match.group(1) or "utf-8"
         return unquote(rfc5987_match.group(2), encoding=charset, errors="replace")
 
-    # Plain filename= with optional quotes
     plain_match = re.search(r'filename="([^"]+)"|filename=([^;\s]+)', cd, re.IGNORECASE)
     if plain_match:
         return plain_match.group(1) or plain_match.group(2)
@@ -548,12 +467,11 @@ def _extract_filename_from_cd(cd: str | None) -> str | None:
 def _extract_filename_from_url(
     url: str | None,
 ) -> str | None:
-    """Extract the filename from an URL."""
+    """Extract a filename with an extension from a URL."""
     if not url:
         return None
     path = unquote(urlparse(url).path)
     filename = path.split("/")[-1]
-    # Only return if it has extension
     if "." not in filename:
         return None
     return filename

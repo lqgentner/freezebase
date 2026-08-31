@@ -734,3 +734,71 @@ class TestPerBandLengths:
             write_cog(self._data(), tmp_path / "out.tif", self.profile, units=["natural"])
 
         assert list(tmp_path.iterdir()) == []
+
+
+class TestCogCreationOptions:
+    """COG-driver settings are applied to the final copy."""
+
+    profile = {  # noqa: RUF012
+        "dtype": "float32",
+        "nodata": np.nan,
+        "count": 1,
+        "width": WIDTH,
+        "height": HEIGHT,
+        "crs": CRS.from_epsg(32632),
+        "transform": from_origin(500000, 5000000, 10, 10),
+    }
+
+    @staticmethod
+    def _data() -> np.ndarray:
+        rng = np.random.default_rng(0)
+        return rng.random((HEIGHT, WIDTH), dtype="float32")
+
+    def test_write_cog_honours_the_requested_codec(self, tmp_path: Path) -> None:
+        """The bug this whole change exists for: settings were silently dropped."""
+        dst = tmp_path / "lerc.tif"
+        write_cog(
+            self._data(), dst, {**self.profile, "compress": "lerc_zstd", "max_z_error": 1e-3}
+        )
+
+        with rasterio.open(dst) as src:
+            structure = src.tags(ns="IMAGE_STRUCTURE")
+        assert structure["COMPRESSION"] == "LERC_ZSTD"
+        assert float(structure["MAX_Z_ERROR"]) == pytest.approx(1e-3)
+
+    def test_write_cog_still_defaults_to_deflate(self, tmp_path: Path) -> None:
+        dst = tmp_path / "default.tif"
+        write_cog(self._data(), dst, self.profile)
+
+        with rasterio.open(dst) as src:
+            assert src.tags(ns="IMAGE_STRUCTURE")["COMPRESSION"] == "DEFLATE"
+
+    def test_write_cog_forwards_native_cog_options(self, tmp_path: Path) -> None:
+        dst = tmp_path / "custom.tif"
+        write_cog(self._data(), dst, {**self.profile, "blocksize": 128, "overviews": "NONE"})
+
+        with rasterio.open(dst) as src:
+            assert src.block_shapes == [(128, 128)]
+            assert src.overviews(1) == []
+
+    def test_write_cog_respects_a_lossy_bound(self, tmp_path: Path) -> None:
+        data = self._data()
+        dst = tmp_path / "bounded.tif"
+        write_cog(data, dst, {**self.profile, "compress": "lerc", "max_z_error": 1e-3})
+
+        with rasterio.open(dst) as src:
+            back = src.read(1)
+        # LERC's float32 reconstruction can land slightly over the nominal
+        # bound, so allow headroom rather than asserting an exact guarantee.
+        assert np.abs(back - data).max() <= 2e-3
+
+    def test_rewrite_tiff_accepts_gtiff_spelling(self, tmp_path: Path) -> None:
+        src = tmp_path / "src.tif"
+        write_cog(self._data(), src, self.profile)
+        dst = tmp_path / "dst.tif"
+        rewrite_tiff(src, dst, profile={"compress": "zstd", "zstd_level": 1, "predictor": 3})
+
+        with rasterio.open(dst) as out:
+            structure = out.tags(ns="IMAGE_STRUCTURE")
+        assert structure["COMPRESSION"] == "ZSTD"
+        assert structure["PREDICTOR"] == "3"
