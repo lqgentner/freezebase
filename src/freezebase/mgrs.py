@@ -1,4 +1,4 @@
-"""Provides MGRS grid square generation and manipulation in 100 km and 10 km resolution."""
+"""MGRS grid generation and manipulation."""
 
 from __future__ import annotations
 
@@ -77,21 +77,21 @@ def transform_shapely(
     crs_from: CRS,
     crs_to: CRS,
 ) -> GeoArray | BaseGeometry:
-    """Transform a shapely geometry using a pyproj Transformer.
+    """Transform Shapely geometries between CRSs.
 
     Parameters
     ----------
     geom : BaseGeometry | GeoArray
-        The geometry or array of geometries to transform.
+        Geometry or geometry array.
     crs_from : CRS
-        Source coordinate reference system.
+        Source CRS.
     crs_to : CRS
-        Target coordinate reference system.
+        Target CRS.
 
     Returns
     -------
     BaseGeometry | GeoArray
-        The transformed geometry or array of geometries.
+        Transformed geometry or array.
     """
     transformer = Transformer.from_crs(crs_from=crs_from, crs_to=crs_to, always_xy=True)
     return shapely.transform(geom, transformer.transform, interleaved=False)  # type: ignore[type-var, arg-type]
@@ -119,11 +119,9 @@ _NORTHERN_EXCEPTION_ZONES = {
 
 
 def utms_to_epsgs(zone: ArrayLike, hemisphere: ArrayLike) -> NDArray[np.integer]:
-    """Convert UTM zones and hemispheres to numeric EPSG codes.
+    """Convert UTM zones and hemispheres to EPSG codes.
 
-    Accepts scalars, lists, or arrays. ``zone`` and ``hemisphere`` are
-    broadcast against each other with NumPy, so a scalar hemisphere pairs
-    with an array of zones and vice versa.
+    Inputs follow NumPy broadcasting rules.
 
     Returns
     -------
@@ -145,12 +143,12 @@ def utms_to_epsgs(zone: ArrayLike, hemisphere: ArrayLike) -> NDArray[np.integer]
 
 
 def utm_to_crs(zone: int, hemisphere: Hemisphere) -> CRS:
-    """Convert a numeric UTM zone and hemisphere to a pyproj.CRS.
+    """Return the CRS for a UTM zone and hemisphere.
 
     Returns
     -------
     CRS
-        The ``pyproj.CRS`` for the UTM zone.
+        UTM CRS.
 
     Raises
     ------
@@ -164,9 +162,7 @@ def utm_to_crs(zone: int, hemisphere: Hemisphere) -> CRS:
     return CRS.from_epsg(epsg)
 
 
-# MGRS grammar: 1-2 digit zone, one band letter (C-X, excluding I/O), a
-# two-letter 100 km square id (columns A-Z excl. I/O, rows A-V excl. I/O), and
-# an even number of location digits (2 per precision level; 2 digits = 10 km).
+# Zone, band, 100 km square, then paired precision digits.
 _MGRS_RE = re.compile(
     r"^(?P<zone>\d{1,2})(?P<band>[C-HJ-NP-X])(?P<square>[A-HJ-NP-Z]{2})(?P<digits>\d*)$",
     re.IGNORECASE,
@@ -188,18 +184,17 @@ def _parse_mgrs(mgrs_code: str) -> re.Match[str]:
 
 
 def mgrs_to_crs(mgrs_code: str) -> CRS:
-    """Derive the UTM CRS from an MGRS grid reference string.
+    """Return the UTM CRS for an MGRS reference.
 
     Parameters
     ----------
     mgrs_code : str
-        An MGRS grid reference (e.g. ``"32TMT64"``). Single-digit zones such as
-        ``"4QFJ15"`` are accepted.
+        MGRS reference such as ``"32TMT64"``.
 
     Returns
     -------
     CRS
-        The ``pyproj.CRS`` for the UTM zone.
+        UTM CRS.
 
     Raises
     ------
@@ -215,18 +210,18 @@ def mgrs_to_crs(mgrs_code: str) -> CRS:
 
 
 class MGRSGeoBox(GeoBox):
-    """A 10x10 km MGRS grid square backed by ``odc.geo.GeoBox``.
+    """A 10 x 10 km MGRS square backed by ``odc.geo.GeoBox``.
 
     Parameters
     ----------
     mgrs_code : str
-        MGRS grid reference (e.g. ``"32TMT64"``).
+        MGRS reference.
     shape : SomeShape
-        Raster dimensions ``(height, width)`` in pixels.
+        Raster dimensions.
     affine : Affine
-        Affine transformation from pixel to CRS coordinates.
+        Pixel-to-CRS transform.
     crs : CRS
-        The coordinate reference system of the cell.
+        Cell CRS.
     """
 
     def __init__(
@@ -241,19 +236,19 @@ class MGRSGeoBox(GeoBox):
 
     @classmethod
     def from_mgrs(cls, mgrs_code: str, resolution: float = 10.0) -> Self:
-        """Create a grid square from an MGRS reference string.
+        """Create a grid square from a 10 km MGRS reference.
 
         Parameters
         ----------
         mgrs_code : str
-            MGRS grid reference (e.g. ``"32TMT64"``).
+            MGRS reference.
         resolution : float
-            Pixel resolution in metres. Default is 10.0.
+            Pixel size in metres.
 
         Returns
         -------
         MGRSGeoBox
-            The grid square as a GeoBox.
+            Grid square.
 
         Raises
         ------
@@ -292,12 +287,7 @@ class MGRSGeoBox(GeoBox):
 
 
 class UTMZones:
-    """Generate all 120 UTM zones (60 north + 60 south) in WGS84.
-
-    Handles the Norway (zone 31V/32V) and Svalbard (band X)
-    exceptions where UTM zone boundaries deviate from the
-    standard 6° longitudinal width.
-    """
+    """All UTM zones in WGS84, including Norway and Svalbard exceptions."""
 
     def __init__(self) -> None:
         self.gdf = self._build_zones()
@@ -320,13 +310,7 @@ class UTMZones:
         return matches.iloc[0].geometry
 
     def find_intersecting(self, geometry: GeoArray | GeoSeries | BaseGeometry) -> gpd.GeoDataFrame:
-        """Return UTM zones that intersect the given geometry.
-
-        Accepts a single scalar geometry or an array/series of geometries.
-        For a scalar query, ``sindex.query`` returns a 1-D array of positional
-        matches; for a bulk query it returns a 2-D ``(input_idx, tree_idx)``
-        array whose second row holds the matches.
-        """
+        """Return UTM zones intersecting one or more geometries."""
         result = self.gdf.sindex.query(geometry, predicate="intersects")
         hits = result[1] if result.ndim == 2 else result  # noqa: PLR2004
         mask = pd.Series(data=False, index=self.gdf.index)
@@ -371,21 +355,21 @@ class UTMZones:
 
     @classmethod
     def _build_north_exception(cls, zone: int, west: float, east: float) -> BaseGeometry:
-        """Build geometry for a northern UTM zone with Norway/Svalbard exceptions.
+        """Build a northern zone with Norway and Svalbard exceptions.
 
         Parameters
         ----------
         zone : int
-            UTM zone number (must be in 31-37).
+            UTM zone in the range 31-37.
         west : float
-            Standard western boundary of the zone in degrees longitude.
+            Standard western longitude.
         east : float
-            Standard eastern boundary of the zone in degrees longitude.
+            Standard eastern longitude.
 
         Returns
         -------
         Polygon
-            Merged zone geometry in WGS84.
+            Zone geometry in WGS84.
         """
         parts = [box(west, 0, east, 56)]
 
@@ -420,47 +404,22 @@ _MGRS_PRECISION_10KM = 1
 
 
 class MGRSGrid:
-    """The 10 km MGRS grid squares covering an area of interest.
+    """The 10 km MGRS squares intersecting an area of interest.
 
-    A grid *specification* rather than a dataset: it stores no pixels, only the
-    rule that maps each MGRS reference to exactly one CRS, affine transform, and
-    array shape. Resampling two sources onto the same grid square makes them
-    co-registered by construction.
-
-    Squares are 10 x 10 km and tile their UTM zone without overlap, so unlike the
-    Sentinel-2 tiling each location is stored once. Squares from *neighbouring*
-    UTM zones can still overlap near a zone boundary, since each zone's grid is
-    built independently.
-
-    Indexing with an integer yields an :class:`MGRSGeoBox`; slicing yields a new
-    ``MGRSGrid``. Iterating yields every grid square in turn.
+    Adjacent UTM zones may overlap because each zone is gridded independently.
 
     Parameters
     ----------
     filter_geometry : GeoSeries | GeoArray | BaseGeometry
-        Area of interest in WGS84 (EPSG:4326). Every grid square intersecting it
-        is included, whole. Accepts a single shapely geometry, an array of
-        geometries, a ``GeoSeries``, or a ``GeoDataFrame``.
+        Area of interest in WGS84. Intersecting squares are included whole.
     resolution : float, default 10.0
-        Pixel size in metres for the ``MGRSGeoBox`` instances this grid yields.
-        Must divide 10 km evenly, so a square is a whole number of pixels
-        (10.0 m gives 1000 x 1000). Does not affect which squares are selected.
+        Pixel size in metres. Must divide 10 km evenly.
 
     Raises
     ------
     ValueError
         If ``filter_geometry`` carries a CRS other than WGS84.
 
-    See Also
-    --------
-    MGRSGeoBox.from_mgrs : Build a single grid square from its MGRS reference.
-
-    Examples
-    --------
-    >>> from shapely import box
-    >>> grid = MGRSGrid(box(8.4, 47.3, 8.6, 47.5))  # Zürich
-    >>> grid[0].mgrs_code  # doctest: +SKIP
-    '32TMT97'
     """
 
     def __init__(
@@ -501,7 +460,7 @@ class MGRSGrid:
             geoms = geometry
         else:
             geoms = np.asarray(geometry, dtype=object)
-        # set empty geometries to None to maintain indexing
+        # STRtree ignores None but not empty geometries.
         non_empty = geoms.copy()
         non_empty[shapely.is_empty(non_empty)] = None
         return shapely.STRtree(non_empty)
@@ -537,14 +496,12 @@ class MGRSGrid:
             hemisphere: Hemisphere = zone_row["hemisphere"]
             self._materialize_zone(zone, hemisphere)
 
-        # Add Identifier
         mgrs_codes = self._compute_mgrs_codes(
             self.eastings,
             self.northings,
             zones=self.zones,
             hemispheres=self.hemispheres,
         )
-        # Sort
         idxs = np.argsort(mgrs_codes)
         self.mgrs_codes = mgrs_codes[idxs]
         self.eastings = self.eastings[idxs]
@@ -556,9 +513,7 @@ class MGRSGrid:
     def _materialize_zone(self, zone: int, hemisphere: Hemisphere) -> None:
         utm_crs = utm_to_crs(zone, hemisphere)
         zone_geom_wgs = self.utm_zones.get_zone_geometry(zone, hemisphere)
-        # Stage 1: Coarse 100 km cells
         coarse_x, coarse_y = self._build_coarse_coords(zone, hemisphere)
-        # Only keep intersecting geometries
         coarse_boxes_utm = shapely.box(
             coarse_x,
             coarse_y,
@@ -572,9 +527,7 @@ class MGRSGrid:
         coarse_x = coarse_x[mask]
         coarse_y = coarse_y[mask]
 
-        # Stage 2: Subdivide coarse hits into 10 km cells
         fine_x, fine_y = self._subdivide_coarse_coords(coarse_x, coarse_y)
-        # Only keep intersecting geometries
         fine_boxes_utm = shapely.box(
             fine_x,
             fine_y,
@@ -598,14 +551,14 @@ class MGRSGrid:
         zone: int,
         hemisphere: Hemisphere,
     ) -> tuple[NDArray[np.int32], NDArray[np.int32]]:
-        """Build a 100 km-spaced MGRS grid in local UTM coordinates.
+        """Build 100 km-spaced coordinates in local UTM space.
 
         Parameters
         ----------
         zone : int
-            UTM zone number (1-60).
+            UTM zone.
         hemisphere : Hemisphere
-            ``'N'`` for north or ``'S'`` for south.
+            UTM hemisphere.
 
         Returns
         -------
@@ -637,7 +590,7 @@ class MGRSGrid:
         eastings: NDArray[np.int32],
         northings: NDArray[np.int32],
     ) -> tuple[NDArray[np.int32], NDArray[np.int32]]:
-        """Subdivide the 100 km-spaced grid into a 10 km grid using the template.
+        """Subdivide 100 km coordinates into a 10 km grid.
 
         Returns
         -------
@@ -673,14 +626,14 @@ class MGRSGrid:
         zones : NDArray[np.uint8]
             UTM zone numbers.
         hemispheres : NDArray[np.str_]
-            Hemisphere letters ('N' or 'S').
+            Hemisphere letters.
         precision : int
-            MGRS precision level (0 = 100 km, 1 = 10 km).
+            MGRS precision level.
 
         Returns
         -------
         NDArray[np.str_]
-            Array of MGRS reference strings.
+            MGRS references.
         """
         self.utm_to_mgrs = np.vectorize(
             mgrs.MGRS().UTMToMGRS,
@@ -699,15 +652,12 @@ class MGRSGrid:
     def to_geodataframe(
         self,
     ) -> gpd.GeoDataFrame:
-        """Build a GeoDataFrame of the grid squares in WGS84.
+        """Return the grid squares in WGS84.
 
         Returns
         -------
         gpd.GeoDataFrame
-            One row per grid square, in WGS84, with columns ``mgrs_code``,
-            ``zone``, ``hemisphere``, ``easting``, ``northing``, ``epsg``, and
-            ``geometry``. The ``epsg`` column holds more than one value when the
-            grid spans a UTM zone boundary.
+            One row per square with its MGRS and UTM metadata.
         """
         return gpd.GeoDataFrame(
             {
@@ -745,12 +695,12 @@ class MGRSGrid:
         return self._entry_to_geobox(index)
 
     def __iter__(self) -> Iterator[MGRSGeoBox]:
-        """Iterate over all grid squares as MGRSGeoBox instances."""
+        """Iterate over grid squares."""
         for idx in range(len(self)):
             yield self._entry_to_geobox(idx)
 
     def _entry_to_geobox(self, index: int) -> MGRSGeoBox:
-        """Convert an entry by index to an MGRSGeoBox."""
+        """Convert one entry to an MGRSGeoBox."""
         resolution = self.resolution
         mgrs_code = str(self.mgrs_codes[index])
         zone = self.zones[index]

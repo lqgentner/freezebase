@@ -1,4 +1,4 @@
-"""Creation of GDAL Virtual Datasets (VRTs) for compositing and mosaicking rasters."""
+"""GDAL Virtual Dataset creation."""
 
 from __future__ import annotations
 
@@ -32,7 +32,6 @@ _GDAL_DTYPE_NAMES = {
     "float64": "Float64",
 }
 
-# Tolerances for float comparisons of pixel size and grid alignment.
 _PIXEL_SIZE_TOL = 1e-6
 _ALIGNMENT_TOL = 1e-3
 
@@ -62,18 +61,14 @@ def _read_grid_meta(path: AnyPath) -> _GridMeta:
 
 
 def _write_vrt(root: ET.Element, dst: AnyPath) -> None:
-    """Serialize a VRT element tree and write it to ``dst``.
-
-    Text and attribute values are escaped by ``ElementTree``, so filenames and
-    WKT strings containing XML-special characters cannot break the document.
-    """
+    """Serialize a VRT element tree."""
     ET.indent(root)
     xml = ET.tostring(root, encoding="unicode")
     UPath(dst).write_text(xml)
 
 
 def _add_simple_source(band: ET.Element, source_name: str, *, source_band: int = 1) -> None:
-    """Append a ``<SimpleSource>`` referencing ``source_name`` by relative path."""
+    """Append a relative SimpleSource."""
     source = ET.SubElement(band, "SimpleSource")
     filename = ET.SubElement(source, "SourceFilename", relativeToVRT="1")
     filename.text = source_name
@@ -86,17 +81,16 @@ def create_decibel_vrt(
     *,
     from_intensity: bool = True,
 ) -> None:
-    """Create a VRT file that applies a decibel conversion pixel function.
+    """Create a VRT applying a decibel conversion.
 
     Parameters
     ----------
     src_path : str | Path | UPath
-        Path to the source raster file (linear scale).
+        Linear-scale source raster.
     output_vrt : str | Path | UPath
-        Path where the output VRT file will be written.
+        Output VRT.
     from_intensity : bool, optional
-        If True, uses a factor of 10 (intensity: 10*log10).
-        If False, uses a factor of 20 (amplitude: 20*log10).
+        Use ``10*log10`` for intensity; otherwise use ``20*log10``.
     """
     src_path = UPath(src_path)
     meta = _read_grid_meta(src_path)
@@ -137,30 +131,23 @@ def create_rgb_vrt(
 ) -> None:
     """Create a 3-band RGB VRT from VV and VH rasters.
 
-    The input scale can be linear or decibel.
-
-    Band assignments:
-
-    - Linear scale: Red=VV, Green=VH, Blue=VV/VH.
-    - Decibel scale: Red=VV, Green=VH, Blue=VV-VH.
+    Blue is VV/VH for linear inputs and VV-VH for decibel inputs.
 
     Parameters
     ----------
     vv_path : str | Path | UPath
-        Path to the VV polarization raster.
+        VV raster.
     vh_path : str | Path | UPath
-        Path to the VH polarization raster.
+        VH raster.
     output_vrt : str | Path | UPath
-        Path where the output VRT file will be written.
+        Output VRT.
     decibel_scale : bool, optional
-        Whether the input rasters are in decibel scale. Selects the band
-        expressions and descriptions accordingly.
+        Whether inputs use decibel scale.
 
     Raises
     ------
     ValueError
-        If the VV and VH rasters do not share the same dimensions, CRS, and
-        geotransform (a mismatch would silently misalign the composited bands).
+        If the inputs have different grids.
     """
     vv_path, vh_path = UPath(vv_path), UPath(vh_path)
     vv = _read_grid_meta(vv_path)
@@ -263,7 +250,7 @@ def _read_tile_info(path: UPath) -> _TileInfo:
 
 
 def _nodata_equal(a: float | None, b: float | None) -> bool:
-    """Compare two NODATA values, treating ``None==None`` and ``nan==nan`` as equal."""
+    """Compare NODATA values, including None and NaN."""
     if a is None or b is None:
         return a is b
     if math.isnan(a) and math.isnan(b):
@@ -272,15 +259,12 @@ def _nodata_equal(a: float | None, b: float | None) -> bool:
 
 
 def _validate_mosaic_tiles(tiles: list[_TileInfo], dst_parent: str) -> None:
-    """Validate that tiles form a consistent, axis-aligned, single-band mosaic.
+    """Validate tiles for an axis-aligned, single-band mosaic.
 
     Raises
     ------
     ValueError
-        If the tiles disagree on CRS, pixel size, dtype, nodata, or band
-        count; are rotated/sheared; are not aligned to a common pixel grid;
-        use an unsupported (e.g. complex) dtype; or do not all live in the same
-        directory as the destination VRT.
+        If tile grids, data types, NODATA, bands, or directories are incompatible.
     """
     ref = tiles[0]
 
@@ -296,7 +280,7 @@ def _validate_mosaic_tiles(tiles: list[_TileInfo], dst_parent: str) -> None:
 
 
 def _validate_tile(t: _TileInfo, ref: _TileInfo, dst_parent: str) -> None:
-    """Validate a single tile against the reference tile and destination directory."""
+    """Validate one tile against the mosaic reference."""
     if t.parent != dst_parent:
         msg = (
             f"Tile '{t.name}' is in '{t.parent}', but tiles must live in the same "
@@ -330,7 +314,7 @@ def _validate_tile(t: _TileInfo, ref: _TileInfo, dst_parent: str) -> None:
 
 
 def _assert_grid_aligned(tiles: list[_TileInfo], minx: float, maxy: float) -> None:
-    """Ensure every tile's origin lands on the mosaic pixel grid."""
+    """Reject tile origins outside the mosaic pixel grid."""
     px, py = tiles[0].px, tiles[0].py
     for t in tiles:
         col = (t.bounds.left - minx) / px
@@ -344,26 +328,19 @@ def _assert_grid_aligned(tiles: list[_TileInfo], minx: float, maxy: float) -> No
 
 
 def build_vrt_mosaic(files: Sequence[AnyPath], dst_vrt: AnyPath) -> None:
-    """Mosaic same-resolution, single-band tiles into a VRT.
-
-    Tiles are placed within the mosaic by their own bounds, and referenced by
-    bare filename (``relativeToVRT``), so ``files`` must all share the same
-    CRS, pixel size, dtype, NODATA and band count, be axis-aligned to a common
-    pixel grid, and live in the same directory as ``dst_vrt`` -- the mosaic and
-    its tiles then stay valid together if the directory is moved.
+    """Mosaic aligned, single-band tiles into a relocatable VRT.
 
     Parameters
     ----------
     files : Sequence[str | Path | UPath]
-        Source tile files, all in the same directory as ``dst_vrt``.
+        Source tiles in the destination directory.
     dst_vrt : str | Path | UPath
-        Output VRT path.
+        Output VRT.
 
     Raises
     ------
     ValueError
-        If ``files`` is empty, or the tiles are inconsistent (see
-        :func:`_validate_mosaic_tiles`) or not grid-aligned.
+        If inputs are empty or incompatible.
     """
     if not files:
         msg = "files must not be empty"

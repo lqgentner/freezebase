@@ -16,12 +16,7 @@ from freezebase.vectools import save_and_read_parquet
 
 logger = logging.getLogger(__name__)
 
-# In-process locks keyed by resolved path, so aliases of the same file share a
-# lock. A WeakValueDictionary self-cleans: while a thread holds a lock it keeps
-# a strong reference (so contenders share the live lock), and once idle the
-# entry is collected rather than accumulating forever. This coordinates threads
-# only; concurrent *processes* rely on the atomic writes in `_prepare`/`_download`
-# (the same approach pooch takes) rather than a cross-process lock.
+# Weak locks coordinate aliases within one process; atomic writes cover processes.
 _path_locks: weakref.WeakValueDictionary[Path, threading.Lock] = weakref.WeakValueDictionary()
 _path_locks_mutex = threading.Lock()
 
@@ -48,20 +43,15 @@ class DatasetMetadata:
     version: str | None = None
     description: str | None = None
     doi: str | None = None
-    # Optional known-good SHA-256 of the raw download. When set, the raw file is
-    # verified against it after download and before use (the pooch model); a
-    # mismatch raises rather than silently trusting a corrupt or wrong file.
+    # Optional checksum for the raw download.
     sha256: str | None = None
-    # Catch-all for additional fields (specific to subclass)
     additional_fields: dict[str, str] = field(default_factory=dict)
 
     def to_display_dict(self) -> dict[str, str]:
-        """Get all fields for display purposes."""
-        # Standard fields
+        """Return populated metadata fields for display."""
         standard = asdict(self)
-        standard.pop("additional_fields")  # Remove the additional_fields dict
+        standard.pop("additional_fields")
 
-        # Add additional fields
         for k, v in self.additional_fields.items():
             standard[k] = v
 
@@ -69,18 +59,15 @@ class DatasetMetadata:
 
 
 class GeoVectorData(ABC):
-    """Abstract class for datasets containing geospatial vector data."""
+    """Base class for cached geospatial vector datasets."""
 
     def __init__(self, cache_dir: str | Path | None = None) -> None:
-        """
-        Initialize the dataset.
+        """Initialize the dataset.
 
         Parameters
         ----------
         cache_dir : str or Path or None, default: None
-            The root directory where the dataset is stored. Defaults to the 'FREEZEBASE_CACHE'
-            environment variable or the system cache directory (in that order).
-
+            Cache root. See :func:`freezebase.utils.get_cache_dir`.
         """
         self.cache_dir = get_cache_dir(cache_dir)
         self._verified: bool = False
@@ -88,40 +75,30 @@ class GeoVectorData(ABC):
     @property
     @abstractmethod
     def metadata(self) -> DatasetMetadata:
-        """Metadata container for dataset attribution and licensing."""
+        """Return dataset metadata."""
 
     @property
     @abstractmethod
     def raw_path(self) -> Path:
-        """Path to the raw downloaded data."""
+        """Return the raw data path."""
 
     @property
     @abstractmethod
     def processed_path(self) -> Path:
-        """Path to the processed data."""
+        """Return the processed data path."""
 
     def _prepare(self) -> None:
-        """
-        Process the raw data and save as GeoParquet.
-
-        Overwrite this method to implement additional processing steps.
-        """
+        """Convert the raw data to GeoParquet."""
         logger.info(
             "Processing data and saving '%s' to '%s'.",
             self.processed_path.name,
             self.processed_path.parent,
         )
-        # Open downloaded file
         data = gpd.read_file(self.raw_path)
-        # Save as GeoParquet
         save_and_read_parquet(data, self.processed_path)
 
     def _download(self) -> None:
-        """
-        Download the dataset.
-
-        Overwrite this method to implement custom downloading logic.
-        """
+        """Download the raw dataset."""
         url = self.metadata.source_url
         save_dir = self.raw_path.parent
         filename = self.raw_path.name
@@ -136,22 +113,11 @@ class GeoVectorData(ABC):
         return self._load_data()
 
     def cleanup(self, *, raw: bool = True, processed: bool = False) -> None:
-        """
-        Remove cached dataset files, keeping the processed data by default.
-
-        By default removes only the raw download to free cache space while
-        keeping the processed GeoParquet. Pass ``processed=True`` to also remove
-        the processed data (e.g. to wipe the dataset entirely), or
-        ``raw=False, processed=True`` to remove only the processed data.
-
-        Overwrite this method if the raw or processed paths are directories
-        (e.g., an extracted ZIP) instead of single files.
-        """
+        """Remove selected raw and processed cache files."""
 
         def _remove_file_and_cleanup_dir(path: Path) -> None:
             if path.exists():
                 path.unlink()
-                # Remove directory if empty
                 if not any(path.parent.iterdir()):
                     path.parent.rmdir()
 
@@ -159,32 +125,23 @@ class GeoVectorData(ABC):
             _remove_file_and_cleanup_dir(self.raw_path)
         if processed:
             _remove_file_and_cleanup_dir(self.processed_path)
-            # Removing the processed file invalidates the cached verification;
-            # otherwise a later `get_data()` would skip re-verification and try
-            # to read a file that no longer exists.
             self._verified = False
 
     def _load_data(self) -> gpd.GeoDataFrame:
-        """Return the GeoDataFrame."""
+        """Load the processed data."""
         if self.processed_path.suffix == ".parquet":
-            # Read GeoParquet
             gdf = gpd.read_parquet(self.processed_path)
         else:
-            # Assume Shapefile or GeoPackage
             gdf = gpd.read_file(self.processed_path)
         return gdf
 
     def _verify(self, *, download: bool) -> None:
-        """
-        Verify the integrity of the dataset.
-
-        Download and prepare the dataset if specified by the user.
-        """
+        """Ensure processed data exists and the raw checksum is valid."""
         if self.processed_path.exists():
             self._verified = True
             return
         with _get_path_lock(self.processed_path):
-            # Re-check: another thread may have finished while we waited for the lock
+            # Another thread may have completed while this one waited.
             if self.processed_path.exists():
                 self._verified = True
                 return
@@ -201,11 +158,7 @@ class GeoVectorData(ABC):
             self._verified = True
 
     def _verify_raw_checksum(self) -> None:
-        """Verify the raw file against ``metadata.sha256`` when one is provided.
-
-        A no-op when no expected hash is configured. On mismatch, raises
-        ``ValueError`` so a corrupt or wrong download is never silently used.
-        """
+        """Verify the configured raw-file checksum."""
         expected = self.metadata.sha256
         if not expected:
             return
@@ -219,7 +172,7 @@ class GeoVectorData(ABC):
             raise ValueError(msg)
 
     def __repr__(self) -> str:
-        """Return the technical string representation."""
+        """Return a string representation."""
         return (
             self.__class__.__name__
             + "("
@@ -228,12 +181,11 @@ class GeoVectorData(ABC):
         )
 
     def _repr_html_(self) -> str:
-        """Return the HTML representation for Jupyter notebooks."""
+        """Return a Jupyter HTML representation."""
         meta_dict = self.metadata.to_display_dict()
         df_metadata = pd.DataFrame.from_dict(meta_dict, orient="index", columns=["Value"])
         table_html = df_metadata.to_html(header=False, justify="left", render_links=True)
 
-        # Wrap header and table in one container with fit-content width
         return f"""
         <div class='data-container'>
             <div class='data-header'>{type(self).__module__}.{type(self).__name__}</div>

@@ -1,4 +1,4 @@
-"""Provides vector geometry related tools."""
+"""Vector geometry helpers."""
 
 from pathlib import Path
 from secrets import token_hex
@@ -17,31 +17,21 @@ from shapely.geometry.base import BaseGeometry
 
 
 def save_and_read_parquet(gdf: gpd.GeoDataFrame, out_path: str | Path) -> gpd.GeoDataFrame:
-    """
-    Save a GeoDataFrame as a GeoParquet file and read it back for verification.
+    """Atomically save a GeoDataFrame as GeoParquet and read it back.
 
     Parameters
     ----------
     gdf : gpd.GeoDataFrame
-        The GeoDataFrame to be saved.
+        Data to save.
     out_path : str or Path
-        The file path where the GeoParquet file will be saved.
+        Output path.
 
     Returns
     -------
     gpd.GeoDataFrame
-        The GeoDataFrame read back from the saved GeoParquet file.
-
-    Notes
-    -----
-    The function ensures that the output directory exists before saving.
-    It uses the 'pyarrow' engine for writing the Parquet file. The write is
-    staged to a unique sibling temp file and atomically moved into place, so a
-    crash mid-write cannot leave a truncated file at ``out_path``.
-
+        Saved data read from disk.
     """
     out_path = Path(out_path)
-    # Make sure the location exists
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = out_path.with_name(f".{out_path.name}.{token_hex(8)}.tmp")
     try:
@@ -54,18 +44,17 @@ def save_and_read_parquet(gdf: gpd.GeoDataFrame, out_path: str | Path) -> gpd.Ge
 
 
 def drop_z_if_zero(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """
-    Remove the Z coordinate from all geometries in a GeoDataFrame if all Z coordinates are zero.
+    """Drop the Z axis when every Z coordinate is zero.
 
     Parameters
     ----------
     gdf : geopandas.GeoDataFrame
-        GeoDataFrame containing geometries with potential Z coordinates.
+        Geometries to inspect.
 
     Returns
     -------
     geopandas.GeoDataFrame
-        GeoDataFrame with Z coordinates removed if they are all zero.
+        Copied GeoDataFrame, possibly forced to 2D.
 
     Raises
     ------
@@ -82,18 +71,17 @@ def drop_z_if_zero(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
 
 def is_z_axis_zero(gdf: gpd.GeoDataFrame) -> bool:
-    """
-    Check if the Z axis in a GeoDataFrame is always zero.
+    """Return whether every Z coordinate is zero.
 
     Parameters
     ----------
     gdf : geopandas.GeoDataFrame
-        GeoDataFrame containing geometries with potential Z coordinates.
+        Geometries to inspect.
 
     Returns
     -------
     bool
-        True if all Z values are zero, False otherwise.
+        Whether all Z values are zero.
 
     Raises
     ------
@@ -108,18 +96,17 @@ def is_z_axis_zero(gdf: gpd.GeoDataFrame) -> bool:
 
 
 def _extract_z_values(geom: BaseGeometry) -> list[float]:
-    """
-    Extract all Z values from a shapely geometry.
+    """Return all Z values from a geometry.
 
     Parameters
     ----------
     geom : shapely.geometry.base.BaseGeometry
-        Geometry with Z coordinates.
+        Geometry to inspect.
 
     Returns
     -------
     list[float]
-        List of Z values.
+        Z values.
 
     Raises
     ------
@@ -164,11 +151,7 @@ def _polygon_z_values(geom: Polygon) -> list[float]:
 
 
 def _collection_z_values(geom: GeometryCollection) -> list[float]:
-    """Extract Z from collection members that carry it.
-
-    A collection may mix 2D and 3D members; skipping the members without Z
-    keeps a 2D sibling from aborting the whole traversal.
-    """
+    """Extract Z values from 3D collection members."""
     z: list[float] = []
     for sub_geom in geom.geoms:
         if sub_geom.is_empty or not sub_geom.has_z:
@@ -178,19 +161,17 @@ def _collection_z_values(geom: GeometryCollection) -> list[float]:
 
 
 def simplify_multipolygons(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """
-    Convert single-polygon MultiPolygons to Polygons.
+    """Convert single-part MultiPolygons to Polygons.
 
     Parameters
     ----------
     gdf : geopandas.GeoDataFrame
-        GeoDataFrame containing geometries.
+        Geometries to simplify.
 
     Returns
     -------
     geopandas.GeoDataFrame
-        GeoDataFrame with single-polygon MultiPolygons converted to Polygons.
-
+        Simplified copy.
     """
     gdf_copy = gdf.copy()
     gdf_copy.geometry = [
