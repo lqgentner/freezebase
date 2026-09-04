@@ -70,9 +70,9 @@ def bucket_root() -> UPath:
     """Return a UPath rooted at the test bucket, creating it if needed."""
     root = make_s3_upath(
         f"s3://{_BUCKET}",
-        key=_KEY,  # type: ignore[arg-type]
-        secret=_SECRET,  # type: ignore[arg-type]
-        endpoint_url=_ENDPOINT,  # type: ignore[arg-type]
+        key=_KEY,
+        secret=_SECRET,
+        endpoint_url=_ENDPOINT,
     )
     if not root.exists():
         root.mkdir(parents=True, exist_ok=True)
@@ -120,7 +120,7 @@ def s3_profile_key(
     root = make_s3_upath(
         str(bucket_root),
         profile=_AWS_PROFILE,
-        endpoint_url=_ENDPOINT,  # type: ignore[arg-type]
+        endpoint_url=_ENDPOINT,
     )
     path = root / f"{uuid.uuid4().hex}.tif"
     fs = path.fs

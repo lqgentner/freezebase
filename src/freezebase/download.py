@@ -130,6 +130,9 @@ def retry_request(
         retry=tenacity.retry_if_exception(
             partial(_is_transient_request_error, extra_status_codes=extra_status_codes),
         ),
+        # tenacity's LoggerProtocol demands a `log()` taking arbitrary keywords,
+        # which `logging.Logger.log` does not; it only ever gets called positionally.
+        # pyrefly: ignore [bad-argument-type]
         before_sleep=tenacity.before_sleep_log(logger, logging.INFO),
     )
 

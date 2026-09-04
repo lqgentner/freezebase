@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from typing import Any, assert_type
 
 import numpy as np
 from pyproj import CRS
@@ -537,6 +538,7 @@ class TestWriteCog:
 
         digest = write_cog(data, dst, profile)
 
+        assert_type(digest, None)
         assert digest is None
 
     def test_checksum_matches_the_written_bytes(self, tmp_path: Path) -> None:
@@ -554,7 +556,7 @@ class TestWriteCog:
 
         digest = write_cog(data, dst, profile, band_names=["VH"], checksum=True)
 
-        assert digest is not None
+        assert_type(digest, str)
         assert digest.startswith("1220")
         assert digest == "1220" + hashlib.sha256(dst.read_bytes()).hexdigest()
         assert_is_cog(dst)
@@ -767,7 +769,7 @@ class TestPerBandLengths:
     def test_write_cog_rejects_a_short_sequence(
         self,
         tmp_path: Path,
-        kwargs: dict,
+        kwargs: dict[str, Any],
         expected: str,
     ) -> None:
         with pytest.raises(RuntimeError, match=f"{expected} must hold one entry per band"):
