@@ -12,8 +12,13 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 - `write_cog` takes a `checksum` keyword. When `True`, it returns the SHA-256
   of the written bytes as a multihash (`"1220"` + hex) instead of `None`.
-- `subprocess_s3_env`, moved from `glace_catalog.gdal_s3`, builds the S3
-  environment variables a child process needs to open `/vsis3/` paths.
+- `subprocess_s3_env` builds the S3 environment variables a child process needs
+  to open `/vsis3/` paths.
+- `create_warped_vrt` reprojects a raster onto a fixed target grid, and
+  `create_rgba_vrt` colour-maps a raster into a 4-band VRT via per-band lookup
+  tables.
+- `build_vrt_mosaic` takes a `bounds` keyword to fix the mosaic extent, and no
+  longer requires tiles to live beside the output VRT.
 
 ## [0.6.1] - 2026-08-31
 

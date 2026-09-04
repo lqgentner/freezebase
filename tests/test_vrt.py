@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -10,7 +11,14 @@ import pytest
 import rasterio
 from rasterio.transform import Affine, from_origin
 
-from freezebase.vrt import _nodata_equal, build_vrt_mosaic, create_decibel_vrt, create_rgb_vrt
+from freezebase.vrt import (
+    _nodata_equal,
+    build_vrt_mosaic,
+    create_decibel_vrt,
+    create_rgb_vrt,
+    create_rgba_vrt,
+    create_warped_vrt,
+)
 
 WIDTH, HEIGHT = 6, 4
 
@@ -308,16 +316,44 @@ class TestBuildVrtMosaic:
         with pytest.raises(ValueError, match="dtype"):
             build_vrt_mosaic([tile_a, tile_b], tmp_path / "mosaic.vrt")
 
-    def test_rejects_tile_outside_vrt_directory(self, tmp_path: Path) -> None:
+    def test_tile_outside_vrt_directory_is_referenced_absolutely(self, tmp_path: Path) -> None:
         other = tmp_path / "other"
         other.mkdir()
         tile_a = tmp_path / "a.tif"
         tile_b = other / "b.tif"
         make_tiff(tile_a, fill=1.0)
         make_tiff(tile_b, origin=(500000 + WIDTH * 10, 5200000), fill=2.0)
+        vrt_path = tmp_path / "mosaic.vrt"
 
-        with pytest.raises(ValueError, match="same"):
-            build_vrt_mosaic([tile_a, tile_b], tmp_path / "mosaic.vrt")
+        build_vrt_mosaic([tile_a, tile_b], vrt_path)
+
+        root = ET.parse(vrt_path).getroot()  # noqa: S314 -- parsing our own just-written fixture
+        sources = root.findall("VRTRasterBand/ComplexSource/SourceFilename")
+        assert [(s.text, s.get("relativeToVRT")) for s in sources] == [
+            ("a.tif", "1"),
+            (str(tile_b), "0"),
+        ]
+        with rasterio.open(vrt_path) as src:
+            assert src.width == 2 * WIDTH
+
+    def test_bounds_override_the_source_union(self, tmp_path: Path) -> None:
+        tile = tmp_path / "a.tif"
+        make_tiff(tile, origin=(500000, 5200000), fill=1.0)
+        vrt_path = tmp_path / "mosaic.vrt"
+
+        # One tile wider and one taller than the source, on the same pixel grid.
+        build_vrt_mosaic(
+            [tile],
+            vrt_path,
+            bounds=(500000, 5200000 - 2 * HEIGHT * 10, 500000 + 2 * WIDTH * 10, 5200000),
+        )
+
+        with rasterio.open(vrt_path) as src:
+            assert (src.width, src.height) == (2 * WIDTH, 2 * HEIGHT)
+            data = src.read(1)
+        # The extra area is nodata, not a repeat of the source.
+        assert np.array_equal(data[:HEIGHT, :WIDTH], np.full((HEIGHT, WIDTH), 1.0, "float32"))
+        assert np.isnan(data[HEIGHT:, :]).all()
 
     def test_rejects_off_grid_tile(self, tmp_path: Path) -> None:
         tile_a = tmp_path / "a.tif"
@@ -418,3 +454,107 @@ class TestNodataEqual:
     def test_plain_values_compare_by_value(self) -> None:
         assert _nodata_equal(0.0, 0.0)
         assert not _nodata_equal(0.0, -9999.0)
+
+
+class TestWarpedVrt:
+    def test_reprojects_onto_the_requested_grid(self, tmp_path: Path) -> None:
+        src = tmp_path / "utm.tif"
+        make_tiff(src, fill=1.0)
+        vrt_path = tmp_path / "warped.vrt"
+
+        create_warped_vrt(src, vrt_path, crs="EPSG:3857", resolution=20.0)
+
+        with rasterio.open(vrt_path) as ds:
+            assert ds.crs.to_epsg() == 3857
+            assert ds.transform.a == pytest.approx(20.0)
+            assert ds.transform.e == pytest.approx(-20.0)
+            # Snapped outward, so the origin sits on the resolution grid.
+            assert ds.transform.c % 20.0 == pytest.approx(0.0)
+
+    def test_bounds_fix_the_extent_exactly(self, tmp_path: Path) -> None:
+        src = tmp_path / "utm.tif"
+        make_tiff(src, fill=1.0)
+        vrt_path = tmp_path / "warped.vrt"
+        bounds = (800000.0, 5800000.0, 800000.0 + 40 * 20.0, 5800000.0 + 30 * 20.0)
+
+        create_warped_vrt(src, vrt_path, crs="EPSG:3857", resolution=20.0, bounds=bounds)
+
+        with rasterio.open(vrt_path) as ds:
+            assert (ds.width, ds.height) == (40, 30)
+            assert ds.bounds.left == pytest.approx(bounds[0])
+            assert ds.bounds.top == pytest.approx(bounds[3])
+
+    def test_reopens_from_another_directory(self, tmp_path: Path) -> None:
+        src = tmp_path / "utm.tif"
+        make_tiff(src)
+        vrt_path = tmp_path / "warped.vrt"
+        create_warped_vrt(src, vrt_path, crs="EPSG:3857", resolution=20.0)
+        with rasterio.open(vrt_path) as ds:
+            expected = ds.read(1)
+
+        # The source is serialised absolutely, so the cwd cannot matter.
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        cwd = Path.cwd()
+        os.chdir(elsewhere)
+        try:
+            with rasterio.open(vrt_path) as ds:
+                assert np.array_equal(ds.read(1), expected, equal_nan=True)
+        finally:
+            os.chdir(cwd)
+
+    def test_rejects_non_positive_resolution(self, tmp_path: Path) -> None:
+        src = tmp_path / "utm.tif"
+        make_tiff(src)
+
+        with pytest.raises(ValueError, match="resolution"):
+            create_warped_vrt(src, tmp_path / "warped.vrt", crs="EPSG:3857", resolution=0.0)
+
+
+class TestRgbaVrt:
+    @staticmethod
+    def ramp_luts() -> list[list[tuple[float, int]]]:
+        """Return a 0-1 greyscale ramp, as three identical lookup tables."""
+        return [[(0.0, 0), (1.0, 255)] for _ in range(3)]
+
+    def test_maps_values_through_the_lut(self, tmp_path: Path) -> None:
+        src = tmp_path / "src.tif"
+        make_tiff(src, fill=0.5)
+        vrt_path = tmp_path / "rgba.vrt"
+
+        create_rgba_vrt(src, vrt_path, luts=self.ramp_luts())
+
+        with rasterio.open(vrt_path) as ds:
+            assert ds.count == 4
+            assert ds.dtypes[0] == "uint8"
+            data = ds.read()
+        assert np.all(data[:3] == 128)
+
+    def test_nodata_is_transparent(self, tmp_path: Path) -> None:
+        src = tmp_path / "src.tif"
+        make_tiff(src, fill=float("nan"))
+        vrt_path = tmp_path / "rgba.vrt"
+
+        create_rgba_vrt(src, vrt_path, luts=self.ramp_luts())
+
+        with rasterio.open(vrt_path) as ds:
+            data = ds.read()
+        # Skipped NODATA keeps the bands' zero initialisation, alpha included.
+        assert np.all(data == 0)
+
+    def test_data_is_opaque(self, tmp_path: Path) -> None:
+        src = tmp_path / "src.tif"
+        make_tiff(src, fill=0.25)
+        vrt_path = tmp_path / "rgba.vrt"
+
+        create_rgba_vrt(src, vrt_path, luts=self.ramp_luts())
+
+        with rasterio.open(vrt_path) as ds:
+            assert np.all(ds.read(4) == 255)
+
+    def test_rejects_wrong_band_count(self, tmp_path: Path) -> None:
+        src = tmp_path / "src.tif"
+        make_tiff(src)
+
+        with pytest.raises(ValueError, match="entries"):
+            create_rgba_vrt(src, tmp_path / "rgba.vrt", luts=[[(0.0, 0), (1.0, 255)]])
