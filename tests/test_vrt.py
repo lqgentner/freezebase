@@ -336,9 +336,7 @@ class TestBuildVrtMosaic:
         with rasterio.open(vrt_path) as src:
             assert src.width == 2 * WIDTH
 
-    def test_relative_source_outside_vrt_directory_resolves_absolute(
-        self, tmp_path: Path
-    ) -> None:
+    def test_relative_source_outside_vrt_directory_resolves_absolute(self, tmp_path: Path) -> None:
         other = tmp_path / "other"
         other.mkdir()
         make_tiff(tmp_path / "a.tif", fill=1.0)
@@ -355,7 +353,9 @@ class TestBuildVrtMosaic:
         vrt_path = tmp_path / "mosaic.vrt"
         root = ET.parse(vrt_path).getroot()  # noqa: S314 -- parsing our own just-written fixture
         sources = root.findall("VRTRasterBand/ComplexSource/SourceFilename")
-        assert Path(sources[1].text).is_absolute()
+        text = sources[1].text
+        assert text is not None
+        assert Path(text).is_absolute()
 
         elsewhere = tmp_path / "elsewhere"
         elsewhere.mkdir()

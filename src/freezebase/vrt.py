@@ -350,8 +350,7 @@ def _assert_extent_aligned(
     w, h = (right - left) / px, (top - bottom) / py
     if abs(w - round(w)) > _ALIGNMENT_TOL or abs(h - round(h)) > _ALIGNMENT_TOL:
         msg = (
-            f"bounds ({left}, {bottom}, {right}, {top}) is not a whole number of "
-            f"{px}x{py} pixels."
+            f"bounds ({left}, {bottom}, {right}, {top}) is not a whole number of {px}x{py} pixels."
         )
         raise ValueError(msg)
 
