@@ -22,6 +22,7 @@ from freezebase.s3 import (
     clear_aws_session_cache,
     make_s3_upath,
     s3_env,
+    subprocess_s3_env,
 )
 
 if TYPE_CHECKING:
@@ -272,6 +273,39 @@ class TestS3Env:
         with s3_env(p):
             pass
         assert captured_session["aws_unsigned"] is False
+
+
+class TestSubprocessS3Env:
+    def test_local_path_yields_empty_mapping(self, tmp_path: Path) -> None:
+        assert subprocess_s3_env(UPath(tmp_path / "f.tif")) == {}
+
+    def test_profile_only(self) -> None:
+        p = make_s3_upath("s3://b/k", profile="research")
+        assert subprocess_s3_env(p) == {"AWS_PROFILE": "research"}
+
+    def test_https_endpoint_options(self) -> None:
+        p = make_s3_upath("s3://b/k", key="a", secret="b", endpoint_url="https://ceph.example.org")
+        env = subprocess_s3_env(p)
+        assert env["AWS_S3_ENDPOINT"] == "ceph.example.org"  # scheme stripped
+        assert env["AWS_VIRTUAL_HOSTING"] == "FALSE"
+        assert "AWS_HTTPS" not in env
+        assert "AWS_PROFILE" not in env
+
+    def test_http_endpoint_flags_plaintext(self) -> None:
+        p = make_s3_upath("s3://b/k", key="a", secret="b", endpoint_url="http://minio:9000")
+        env = subprocess_s3_env(p)
+        assert env["AWS_S3_ENDPOINT"] == "minio:9000"
+        assert env["AWS_HTTPS"] == "NO"
+
+    def test_profile_and_endpoint_combine(self) -> None:
+        p = make_s3_upath("s3://b/k", profile="research", endpoint_url="https://ceph.example.org")
+        env = subprocess_s3_env(p)
+        assert env["AWS_PROFILE"] == "research"
+        assert env["AWS_S3_ENDPOINT"] == "ceph.example.org"
+
+    def test_no_profile_or_endpoint_yields_empty_mapping(self) -> None:
+        p = make_s3_upath("s3://b/k", key="a", secret="b")
+        assert subprocess_s3_env(p) == {}
 
 
 @pytest.fixture

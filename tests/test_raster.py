@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -520,6 +521,65 @@ class TestWriteCog:
             assert ds.descriptions == ("VV", "VH")
             assert (ds.read(1) == 1.0).all()
             assert (ds.read(2) == 2.0).all()
+
+    def test_checksum_defaults_to_none(self, tmp_path: Path) -> None:
+        dst = tmp_path / "out.tif"
+        data = np.full((HEIGHT, WIDTH), 3.0, dtype=np.float32)
+        profile = {
+            "dtype": "float32",
+            "count": 1,
+            "width": WIDTH,
+            "height": HEIGHT,
+            "crs": "EPSG:32632",
+            "transform": from_origin(500000, 5200000, 10, 10),
+            "nodata": np.nan,
+        }
+
+        digest = write_cog(data, dst, profile)
+
+        assert digest is None
+
+    def test_checksum_matches_the_written_bytes(self, tmp_path: Path) -> None:
+        dst = tmp_path / "out.tif"
+        data = np.full((HEIGHT, WIDTH), 3.0, dtype=np.float32)
+        profile = {
+            "dtype": "float32",
+            "count": 1,
+            "width": WIDTH,
+            "height": HEIGHT,
+            "crs": "EPSG:32632",
+            "transform": from_origin(500000, 5200000, 10, 10),
+            "nodata": np.nan,
+        }
+
+        digest = write_cog(data, dst, profile, band_names=["VH"], checksum=True)
+
+        assert digest is not None
+        assert digest.startswith("1220")
+        assert digest == "1220" + hashlib.sha256(dst.read_bytes()).hexdigest()
+        assert_is_cog(dst)
+        with rasterio.open(dst) as ds:
+            assert ds.descriptions == ("VH",)
+            assert (ds.read(1) == 3.0).all()
+
+    def test_checksum_still_writes_atomically_on_failure(self, tmp_path: Path) -> None:
+        dst = tmp_path / "out.tif"
+        data = np.full((HEIGHT, WIDTH), 3.0, dtype=np.float32)
+        profile = {
+            "dtype": "float32",
+            "count": 1,
+            "width": WIDTH,
+            "height": HEIGHT,
+            "crs": "EPSG:32632",
+            "transform": from_origin(500000, 5200000, 10, 10),
+            "nodata": np.nan,
+        }
+
+        with pytest.raises(RuntimeError):
+            write_cog(data, dst, {**profile, "dtype": "not-a-real-dtype"}, checksum=True)
+
+        assert not dst.exists()
+        assert not (tmp_path / f".{dst.name}.tmp").exists()
 
 
 class TestMetadataInjection:

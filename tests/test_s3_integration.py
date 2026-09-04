@@ -38,6 +38,7 @@ from freezebase.raster import (
     write_cog,
 )
 from freezebase.s3 import make_s3_upath
+from freezebase.vrt import create_warped_vrt
 
 _ENDPOINT = os.getenv("FREEZEBASE_TEST_S3_ENDPOINT")
 _KEY = os.getenv("FREEZEBASE_TEST_S3_KEY")
@@ -188,6 +189,21 @@ class TestRewriteTiffS3:
         with rasterio_open(s3_key2) as ds:
             assert ds.descriptions == ("VH",)
             assert np.array_equal(ds.read(1), data)
+
+
+class TestCreateWarpedVrtS3:
+    def test_local_source_to_s3_destination(self, tmp_path: Path, s3_key: UPath) -> None:
+        # The write needs s3_key's own credentialed env; entering only the
+        # local source's (uncredentialed) env would leave the /vsis3/ write
+        # unauthenticated.
+        src = tmp_path / "src.tif"
+        write_cog(np.full((HEIGHT, WIDTH), 1.0, dtype=np.float32), src, _RASTER_PROFILE)
+
+        create_warped_vrt(src, s3_key, crs="EPSG:3857", resolution=20.0)
+
+        assert s3_key.exists()
+        with rasterio_open(s3_key) as ds:
+            assert ds.crs.to_epsg() == 3857
 
 
 class TestListingsCache:

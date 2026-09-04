@@ -44,6 +44,15 @@ code blocks in Markdown and Quarto files. Docstrings on public functions need `P
 **Types.** The package ships a `py.typed` marker, so its annotations are part of the public
 contract. `mypy` must pass on `src/freezebase` and `tests` before a change lands.
 
+::: {.callout-important}
+## Run all three checks, not just tests
+
+A passing `pytest` run does not mean a change is done. `ruff format`, `ruff check`, and
+`mypy` catch things tests cannot — an unformatted diff or a wrong annotation fails CI even
+when every test is green. Run all three after every change, including a change made only
+to fix a previous check's failure.
+:::
+
 ## S3 integration tests
 
 The credentialed S3 read/write paths cannot be exercised by unit tests — they need a real

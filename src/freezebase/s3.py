@@ -223,3 +223,37 @@ def s3_env(path: UPath) -> Generator[None]:
 
     with rasterio.Env(session=session, **options):
         yield
+
+
+def subprocess_s3_env(path: UPath) -> dict[str, str]:
+    """Build the S3 settings a child process needs, as environment variables.
+
+    :func:`s3_env` only configures this process; GDAL in a child instead
+    honours ``AWS_PROFILE`` against ``~/.aws/credentials``, so no access key
+    needs to pass through the environment.
+
+    Parameters
+    ----------
+    path : UPath
+        S3 path created by :func:`make_s3_upath`, whose storage options carry
+        the profile and endpoint. A non-S3 path yields an empty mapping.
+
+    Returns
+    -------
+    dict of str to str
+        Variables to merge into the child's environment.
+    """
+    if path.protocol != "s3":
+        return {}
+    so = path.storage_options
+    env: dict[str, str] = {}
+    if profile := so.get("profile"):
+        env["AWS_PROFILE"] = str(profile)
+    if endpoint_url := so.get("endpoint_url"):
+        endpoint = str(endpoint_url)
+        # GDAL < 3.11 expects the endpoint without a scheme, as in s3_env.
+        env["AWS_S3_ENDPOINT"] = endpoint.removeprefix("https://").removeprefix("http://")
+        env["AWS_VIRTUAL_HOSTING"] = "FALSE"
+        if endpoint.startswith("http://"):
+            env["AWS_HTTPS"] = "NO"
+    return env

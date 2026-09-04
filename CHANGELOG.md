@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the project is pre-1.0 (`0.x`), minor releases may contain breaking changes.
 
+## [0.7.0] - 2026-09-04
+
+### Added
+
+- `write_cog` takes a `checksum` keyword. When `True`, it returns the SHA-256
+  of the written bytes as a multihash (`"1220"` + hex) instead of `None`.
+- `subprocess_s3_env` builds the S3 environment variables a child process needs
+  to open `/vsis3/` paths.
+- `create_warped_vrt` reprojects a raster onto a fixed target grid, and
+  `create_rgba_vrt` colour-maps a raster into a 4-band VRT via per-band lookup
+  tables.
+- `build_vrt_mosaic` takes a `bounds` keyword to fix the mosaic extent, and no
+  longer requires tiles to live beside the output VRT.
+
 ## [0.6.1] - 2026-08-31
 
 ### Fixed
