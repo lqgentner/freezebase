@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager, contextmanager
+import hashlib
 import logging
 from pathlib import Path
 from secrets import token_hex
@@ -50,6 +51,9 @@ COG_PROFILE: dict[str, Any] = {
     "overview_predictor": "YES",
 }
 """Default GDAL ``COG`` creation profile."""
+
+_SHA256_MULTIHASH_PREFIX = "1220"
+"""Multihash function+length header for a raw SHA-256 digest, per ``file:checksum``."""
 
 _COG_CREATION_OPTIONS = (
     "blocksize",
@@ -678,7 +682,8 @@ def write_cog(
     tags: Mapping[str, str] | None = None,
     band_tags: Sequence[Mapping[str, str]] | None = None,
     units: list[str] | None = None,
-) -> None:
+    checksum: bool = False,
+) -> str | None:
     """Write an in-memory array as a Cloud Optimized GeoTIFF.
 
     Parameters
@@ -699,6 +704,15 @@ def write_cog(
         Per-band tags, one mapping per band.
     units : list[str] or None, optional
         Band unit strings, one per band.
+    checksum : bool, default False
+        Encode the COG into memory and hash those exact bytes before
+        uploading, instead of streaming the encode straight to ``dst_file``.
+
+    Returns
+    -------
+    str or None
+        The SHA-256 digest as a multihash (``"1220"`` + hex), or ``None`` when
+        ``checksum`` is ``False``.
 
     Raises
     ------
@@ -725,6 +739,7 @@ def write_cog(
         cog_profile.pop("predictor", None)
         cog_profile.pop("overview_predictor", None)
 
+    digest: str | None = None
     try:
         with MemoryFile() as memfile:
             with memfile.open(driver="GTiff", **mem_profile) as mem_ds:
@@ -742,8 +757,17 @@ def write_cog(
                     units=units,
                 )
 
-            with _env_for_path(dst_file):
-                rasterio.shutil.copy(memfile.name, _to_vsi_uri(work_dst), **cog_profile)
+            if checksum:
+                # /vsis3/ streams straight to the destination without holding
+                # the bytes, so buffer into a second MemoryFile to hash them.
+                with MemoryFile() as cog_memfile:
+                    rasterio.shutil.copy(memfile.name, cog_memfile.name, **cog_profile)
+                    buf = bytes(cog_memfile.getbuffer())
+                digest = _SHA256_MULTIHASH_PREFIX + hashlib.sha256(buf).hexdigest()
+                work_dst.write_bytes(buf)
+            else:
+                with _env_for_path(dst_file):
+                    rasterio.shutil.copy(memfile.name, _to_vsi_uri(work_dst), **cog_profile)
 
         if not is_s3:
             work_dst.replace(dst_file)
@@ -754,3 +778,4 @@ def write_cog(
         raise RuntimeError(msg) from e
 
     logger.debug("Wrote COG to '%s'", dst_file.name)
+    return digest
