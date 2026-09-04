@@ -82,7 +82,9 @@ def _source_ref(src: AnyPath, dst_vrt: AnyPath) -> tuple[str, str]:
     anything else is referenced by an absolute GDAL path, so the VRT can read
     tiles it does not sit next to.
     """
-    src, dst_vrt = UPath(src), UPath(dst_vrt)
+    # Resolved so a relative input can't masquerade as adjacent, or leak
+    # unresolved into the "absolute" branch.
+    src, dst_vrt = UPath(src).resolve(), UPath(dst_vrt).resolve()
     if src.protocol == dst_vrt.protocol and str(src.parent) == str(dst_vrt.parent):
         return src.name, "1"
     return _to_vsi_uri(src), "0"
@@ -335,6 +337,25 @@ def _validate_tile(t: _TileInfo, ref: _TileInfo) -> None:
         raise ValueError(msg)
 
 
+def _assert_extent_aligned(
+    px: float,
+    py: float,
+    *,
+    left: float,
+    bottom: float,
+    right: float,
+    top: float,
+) -> None:
+    """Reject an extent whose width or height is not a whole number of pixels."""
+    w, h = (right - left) / px, (top - bottom) / py
+    if abs(w - round(w)) > _ALIGNMENT_TOL or abs(h - round(h)) > _ALIGNMENT_TOL:
+        msg = (
+            f"bounds ({left}, {bottom}, {right}, {top}) is not a whole number of "
+            f"{px}x{py} pixels."
+        )
+        raise ValueError(msg)
+
+
 def _assert_grid_aligned(tiles: list[_TileInfo], minx: float, maxy: float) -> None:
     """Reject tile origins outside the mosaic pixel grid."""
     px, py = tiles[0].px, tiles[0].py
@@ -393,6 +414,7 @@ def build_vrt_mosaic(
         miny = min(t.bounds.bottom for t in tiles)
     else:
         minx, miny, maxx, maxy = (float(v) for v in bounds)
+        _assert_extent_aligned(px, py, left=minx, bottom=miny, right=maxx, top=maxy)
     _assert_grid_aligned(tiles, minx, maxy)
     mosaic_w = round((maxx - minx) / px)
     mosaic_h = round((maxy - miny) / py)
@@ -488,7 +510,8 @@ def create_warped_vrt(
     Raises
     ------
     ValueError
-        If ``resolution`` is not positive.
+        If ``resolution`` is not positive, or if ``bounds`` is given and does
+        not lie on the ``resolution`` grid.
     """
     if resolution <= 0:
         msg = f"resolution must be positive, got {resolution}."
@@ -501,6 +524,9 @@ def create_warped_vrt(
             left, bottom, right, top = _snap_out(extent, resolution) if snap else extent
         else:
             left, bottom, right, top = (float(v) for v in bounds)
+            _assert_extent_aligned(
+                resolution, resolution, left=left, bottom=bottom, right=right, top=top
+            )
         width = round((right - left) / resolution)
         height = round((top - bottom) / resolution)
         transform = Affine(resolution, 0.0, left, 0.0, -resolution, top)
@@ -512,7 +538,6 @@ def create_warped_vrt(
             extra["src_nodata"] = src.nodata
             extra["nodata"] = nodata
         with (
-            _env_for_path(src_path),
             WarpedVRT(
                 src,
                 crs=crs,
@@ -522,6 +547,8 @@ def create_warped_vrt(
                 resampling=resampling,
                 **extra,
             ) as vrt,
+            # The source is already open; only the write needs its own env.
+            _env_for_path(output_vrt),
         ):
             # Written with the source as an absolute path, so it reopens anywhere.
             rasterio.shutil.copy(vrt, _to_vsi_uri(output_vrt), driver="VRT")
@@ -588,7 +615,7 @@ def create_rgba_vrt(
     src_path, output_vrt = UPath(src_path), UPath(output_vrt)
     meta = _read_grid_meta(src_path)
     with rasterio_open(src_path) as ds:
-        nodata = ds.nodatavals[src_bands[0] - 1]
+        nodatavals = ds.nodatavals
 
     root = ET.Element(
         "VRTDataset",
@@ -608,10 +635,10 @@ def create_rgba_vrt(
         filename = ET.SubElement(source, "SourceFilename", relativeToVRT=relative)
         filename.text = text
         is_alpha = index == len(colors) - 1
-        ET.SubElement(source, "SourceBand").text = str(
-            src_bands[0] if is_alpha else src_bands[index]
-        )
+        src_band = src_bands[0] if is_alpha else src_bands[index]
+        ET.SubElement(source, "SourceBand").text = str(src_band)
         _add_lut(source, ((0.0, 255), (1.0, 255)) if is_alpha else luts[index])
+        nodata = nodatavals[src_band - 1]
         if nodata is not None:
             ET.SubElement(source, "NODATA").text = str(nodata)
 

@@ -336,6 +336,36 @@ class TestBuildVrtMosaic:
         with rasterio.open(vrt_path) as src:
             assert src.width == 2 * WIDTH
 
+    def test_relative_source_outside_vrt_directory_resolves_absolute(
+        self, tmp_path: Path
+    ) -> None:
+        other = tmp_path / "other"
+        other.mkdir()
+        make_tiff(tmp_path / "a.tif", fill=1.0)
+        make_tiff(other / "b.tif", origin=(500000 + WIDTH * 10, 5200000), fill=2.0)
+        cwd = Path.cwd()
+        os.chdir(tmp_path)
+        try:
+            # Relative and outside the VRT's directory: a naive absolute-path
+            # branch would leave this relative, tying the VRT to the cwd.
+            build_vrt_mosaic(["a.tif", "other/b.tif"], "mosaic.vrt")
+        finally:
+            os.chdir(cwd)
+
+        vrt_path = tmp_path / "mosaic.vrt"
+        root = ET.parse(vrt_path).getroot()  # noqa: S314 -- parsing our own just-written fixture
+        sources = root.findall("VRTRasterBand/ComplexSource/SourceFilename")
+        assert Path(sources[1].text).is_absolute()
+
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        os.chdir(elsewhere)
+        try:
+            with rasterio.open(vrt_path) as src:
+                assert src.width == 2 * WIDTH
+        finally:
+            os.chdir(cwd)
+
     def test_bounds_override_the_source_union(self, tmp_path: Path) -> None:
         tile = tmp_path / "a.tif"
         make_tiff(tile, origin=(500000, 5200000), fill=1.0)
@@ -354,6 +384,18 @@ class TestBuildVrtMosaic:
         # The extra area is nodata, not a repeat of the source.
         assert np.array_equal(data[:HEIGHT, :WIDTH], np.full((HEIGHT, WIDTH), 1.0, "float32"))
         assert np.isnan(data[HEIGHT:, :]).all()
+
+    def test_rejects_bounds_off_the_pixel_grid(self, tmp_path: Path) -> None:
+        tile = tmp_path / "a.tif"
+        make_tiff(tile, origin=(500000, 5200000), fill=1.0)
+
+        # 6.5 pixels wide at a 10-unit resolution: not a whole pixel count.
+        with pytest.raises(ValueError, match="whole number"):
+            build_vrt_mosaic(
+                [tile],
+                tmp_path / "mosaic.vrt",
+                bounds=(500000, 5200000 - HEIGHT * 10, 500000 + 65, 5200000),
+            )
 
     def test_rejects_off_grid_tile(self, tmp_path: Path) -> None:
         tile_a = tmp_path / "a.tif"
@@ -510,6 +552,17 @@ class TestWarpedVrt:
         with pytest.raises(ValueError, match="resolution"):
             create_warped_vrt(src, tmp_path / "warped.vrt", crs="EPSG:3857", resolution=0.0)
 
+    def test_rejects_bounds_off_the_resolution_grid(self, tmp_path: Path) -> None:
+        src = tmp_path / "utm.tif"
+        make_tiff(src)
+        # 20.5 units wide at a 20-unit resolution: not a whole pixel count.
+        bounds = (800000.0, 5800000.0, 800000.0 + 20.5, 5800000.0 + 40.0)
+
+        with pytest.raises(ValueError, match="whole number"):
+            create_warped_vrt(
+                src, tmp_path / "warped.vrt", crs="EPSG:3857", resolution=20.0, bounds=bounds
+            )
+
 
 class TestRgbaVrt:
     @staticmethod
@@ -551,6 +604,51 @@ class TestRgbaVrt:
 
         with rasterio.open(vrt_path) as ds:
             assert np.all(ds.read(4) == 255)
+
+    def test_uses_each_selected_bands_own_nodata(self, tmp_path: Path) -> None:
+        # Three-band source where each band's fill value equals its own NODATA
+        # -- declared per band in a hand-built VRT, since GTiff cannot vary
+        # NODATA across bands.
+        src = tmp_path / "src.tif"
+        fills = (1.0, 2.0, 3.0)
+        with rasterio.open(
+            src,
+            "w",
+            driver="GTiff",
+            width=WIDTH,
+            height=HEIGHT,
+            count=3,
+            dtype="float32",
+            crs="EPSG:32632",
+            transform=from_origin(500000, 5200000, 10, 10),
+        ) as dst:
+            for band, value in enumerate(fills, start=1):
+                dst.write(np.full((HEIGHT, WIDTH), value, dtype="float32"), band)
+
+        root = ET.Element("VRTDataset", rasterXSize=str(WIDTH), rasterYSize=str(HEIGHT))
+        with rasterio.open(src) as ds:
+            ET.SubElement(root, "SRS").text = ds.crs.to_wkt()
+            ET.SubElement(root, "GeoTransform").text = ", ".join(
+                str(v) for v in ds.transform.to_gdal()
+            )
+        for band, value in enumerate(fills, start=1):
+            vband = ET.SubElement(root, "VRTRasterBand", dataType="Float32", band=str(band))
+            ET.SubElement(vband, "NoDataValue").text = str(value)
+            source = ET.SubElement(vband, "SimpleSource")
+            ET.SubElement(source, "SourceFilename", relativeToVRT="1").text = src.name
+            ET.SubElement(source, "SourceBand").text = str(band)
+        ET.indent(root)
+        multiband_vrt = tmp_path / "multiband.vrt"
+        multiband_vrt.write_text(ET.tostring(root, encoding="unicode"))
+
+        vrt_path = tmp_path / "rgba.vrt"
+        create_rgba_vrt(multiband_vrt, vrt_path, luts=self.ramp_luts(), src_bands=(1, 2, 3))
+
+        with rasterio.open(vrt_path) as ds:
+            data = ds.read()
+        # Each source band's fill equals its own NODATA; a per-band lookup
+        # skips every one of them, keeping the R/G/B zero initialisation.
+        assert np.all(data[:3] == 0)
 
     def test_rejects_wrong_band_count(self, tmp_path: Path) -> None:
         src = tmp_path / "src.tif"
