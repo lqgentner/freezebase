@@ -58,7 +58,9 @@ class TestUtmToCrs:
 
     def test_rejects_invalid_hemisphere(self) -> None:
         with pytest.raises(ValueError, match="Hemisphere"):
-            utm_to_crs(32, "X")  # type: ignore[arg-type]
+            # Deliberately invalid hemisphere.
+            # pyrefly: ignore [bad-argument-type]
+            utm_to_crs(32, "X")
 
     def test_rejects_invalid_zone(self) -> None:
         with pytest.raises(ValueError, match="UTM zone"):
@@ -92,7 +94,9 @@ class TestUTMZoneGenerator:
 
     def test_get_zone_geometry_rejects_invalid_hemisphere(self) -> None:
         with pytest.raises(ValueError, match="Hemisphere"):
-            UTMZones().get_zone_geometry(32, "X")  # type: ignore[arg-type]
+            # Deliberately invalid hemisphere.
+            # pyrefly: ignore [bad-argument-type]
+            UTMZones().get_zone_geometry(32, "X")
 
     def test_find_intersecting_scalar_geometry(self) -> None:
         # Previously raised IndexError for a scalar geometry query.
@@ -298,10 +302,14 @@ class TestMGRSGridFilterGeometryInput:
 
     def test_accepts_geodataframe(self) -> None:
         gdf = gpd.GeoDataFrame({"geometry": [ZURICH_AOI]}, crs="EPSG:4326")
-        assert len(MGRSGrid(gdf)) == self.EXPECTED  # type: ignore[arg-type]
+        # Accepted at runtime, but outside the annotated `filter_geometry` union.
+        # pyrefly: ignore [bad-argument-type]
+        assert len(MGRSGrid(gdf)) == self.EXPECTED
 
     def test_accepts_plain_list(self) -> None:
-        assert len(MGRSGrid([ZURICH_AOI])) == self.EXPECTED  # type: ignore[arg-type]
+        # Accepted at runtime, but outside the annotated `filter_geometry` union.
+        # pyrefly: ignore [bad-argument-type]
+        assert len(MGRSGrid([ZURICH_AOI])) == self.EXPECTED
 
     def test_rejects_projected_crs(self) -> None:
         # A projected AOI would be read as degrees and select the wrong squares.

@@ -25,7 +25,7 @@ updates:
       # pyproject.toml change.
       dev-dependencies:
         patterns:
-          - "mypy"
+          - "pyrefly"
           - "pandas-stubs"
           - "pytest"
           - "pytest-cov"

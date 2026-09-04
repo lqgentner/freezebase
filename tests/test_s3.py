@@ -376,12 +376,12 @@ class TestAwsSessionCache:
     )
     def test_differing_configurations_get_distinct_sessions(
         self,
-        other: dict[str, object],
+        other: dict[str, Any],
         aws_profiles: tuple[str, str],
     ) -> None:
         profile, _ = aws_profiles
         base = make_s3_upath("s3://b/k", profile=profile)
-        assert aws_session(base) is not aws_session(make_s3_upath("s3://b/k", **other))  # type: ignore[arg-type]
+        assert aws_session(base) is not aws_session(make_s3_upath("s3://b/k", **other))
 
     def test_clear_cache_forces_rebuild(self) -> None:
         p = make_s3_upath("s3://b/k", key="AK", secret="SK")

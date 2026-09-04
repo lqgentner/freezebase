@@ -5,7 +5,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Self, override
 
 import geopandas as gpd
 import pytest
@@ -38,6 +38,7 @@ class _FakeDataset(GeoVectorData):
     sha256: str | None = None
 
     @property
+    @override
     def metadata(self) -> DatasetMetadata:
         return DatasetMetadata(
             name="fake",
@@ -47,10 +48,12 @@ class _FakeDataset(GeoVectorData):
         )
 
     @property
+    @override
     def raw_path(self) -> Path:
         return self.cache_dir / "raw.geojson"
 
     @property
+    @override
     def processed_path(self) -> Path:
         return self.cache_dir / "processed.parquet"
 
@@ -64,11 +67,13 @@ class _RecordingDataset(_FakeDataset):
         self.prepares: list[str] = []
         self._delay = delay
 
+    @override
     def _download(self) -> None:
         self.downloads.append(threading.current_thread().name)
         self.raw_path.parent.mkdir(parents=True, exist_ok=True)
         _sample_gdf().to_file(self.raw_path, driver="GeoJSON")
 
+    @override
     def _prepare(self) -> None:
         self.prepares.append(threading.current_thread().name)
         time.sleep(self._delay)
@@ -103,22 +108,22 @@ class TestCleanupResetsVerification:
         # Prime the cache: processed file is created and _verified becomes True.
         dataset.get_data()
         assert dataset.processed_path.exists()
-        assert dataset._verified is True
+        assert dataset._verified
 
         # Removing the processed file must invalidate the cached verification,
         # otherwise a later get_data() would try to read a deleted file.
         dataset.cleanup(raw=True, processed=True)
-        assert dataset._verified is False
+        assert not dataset._verified
 
         with pytest.raises(FileNotFoundError):
             dataset.get_data(download=False)
 
     def test_remove_processed_only_resets_flag(self, dataset: _FakeDataset) -> None:
         dataset.get_data()
-        assert dataset._verified is True
+        assert dataset._verified
 
         dataset.cleanup(raw=False, processed=True)
-        assert dataset._verified is False
+        assert not dataset._verified
         # The raw file survives, so a re-verify can re-prepare without download.
         assert dataset.raw_path.exists()
         regated = dataset.get_data(download=False)
@@ -153,7 +158,7 @@ class TestCleanupDefaults:
         assert not dataset.raw_path.exists()
         assert dataset.processed_path.exists()
         # Processed data is still valid, so verification stays primed.
-        assert dataset._verified is True
+        assert dataset._verified
         assert len(dataset.get_data(download=False)) == 1
 
 

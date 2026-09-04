@@ -121,7 +121,7 @@ def _to_vsi_uri(path: AnyPath) -> str:
 def _rasterio_open(
     path: AnyPath,
     mode: Literal["r", "r+", "w", "w+"] = "r",
-    **kwargs,
+    **kwargs: Any,
 ) -> Generator[DatasetReader | DatasetWriter]:
     """Yield a dataset in the appropriate rasterio environment."""
     path = UPath(path)
@@ -133,18 +133,18 @@ def _rasterio_open(
 def rasterio_open(
     path: AnyPath,
     mode: Literal["r"] = ...,
-    **kwargs,
+    **kwargs: Any,
 ) -> AbstractContextManager[DatasetReader]: ...
 @overload
 def rasterio_open(
     path: AnyPath,
     mode: Literal["r+", "w", "w+"],
-    **kwargs,
+    **kwargs: Any,
 ) -> AbstractContextManager[DatasetWriter]: ...
 def rasterio_open(
     path: AnyPath,
     mode: Literal["r", "r+", "w", "w+"] = "r",
-    **kwargs,
+    **kwargs: Any,
 ) -> AbstractContextManager[DatasetReader | DatasetWriter]:
     """Open a local or S3-backed rasterio dataset.
 
@@ -672,6 +672,45 @@ def _rewrite_via_tempfile(
             work_stage.unlink(missing_ok=True)
 
 
+@overload
+def write_cog(
+    data: np.ndarray,
+    dst_file: AnyPath,
+    profile: dict[str, Any],
+    *,
+    band_names: list[str] | None = ...,
+    color_interp: list[ColorInterp] | None = ...,
+    tags: Mapping[str, str] | None = ...,
+    band_tags: Sequence[Mapping[str, str]] | None = ...,
+    units: list[str] | None = ...,
+    checksum: Literal[False] = ...,
+) -> None: ...
+@overload
+def write_cog(
+    data: np.ndarray,
+    dst_file: AnyPath,
+    profile: dict[str, Any],
+    *,
+    band_names: list[str] | None = ...,
+    color_interp: list[ColorInterp] | None = ...,
+    tags: Mapping[str, str] | None = ...,
+    band_tags: Sequence[Mapping[str, str]] | None = ...,
+    units: list[str] | None = ...,
+    checksum: Literal[True],
+) -> str: ...
+@overload
+def write_cog(
+    data: np.ndarray,
+    dst_file: AnyPath,
+    profile: dict[str, Any],
+    *,
+    band_names: list[str] | None = ...,
+    color_interp: list[ColorInterp] | None = ...,
+    tags: Mapping[str, str] | None = ...,
+    band_tags: Sequence[Mapping[str, str]] | None = ...,
+    units: list[str] | None = ...,
+    checksum: bool,
+) -> str | None: ...
 def write_cog(
     data: np.ndarray,
     dst_file: AnyPath,
@@ -711,8 +750,8 @@ def write_cog(
     Returns
     -------
     str or None
-        The SHA-256 digest as a multihash (``"1220"`` + hex), or ``None`` when
-        ``checksum`` is ``False``.
+        The SHA-256 digest as a multihash (``"1220"`` + hex) when ``checksum``
+        is ``True``, otherwise ``None``.
 
     Raises
     ------

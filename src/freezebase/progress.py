@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from rich.progress import (
     BarColumn,
@@ -25,7 +25,7 @@ def create_progress(
     show_progress: bool = True,
     add_description: bool = True,
     columns: list[str | ProgressColumn] | None = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> Progress:
     """Create a rich progress bar with a custom column layout.
 
@@ -73,7 +73,7 @@ def track_progress(
     completed: int = 0,
     update_period: float = 0.1,
     show_progress: bool = True,
-    **progress_kwargs,
+    **progress_kwargs: Any,
 ) -> Iterable[ProgressType]:
     """Yield items while tracking progress with the shared layout.
 

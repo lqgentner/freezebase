@@ -49,18 +49,18 @@ def clean_names(
         name = re.sub(r"([a-z\d])([A-Z])", r"\1_\2", name)
         return name.lower()
 
-    def transform(name: str) -> str:
-        name = str(name).strip()
-        name = re.sub(r"\s+", "_", name)
+    # Column labels are not necessarily strings.
+    def transform(name: object) -> str:
+        text = re.sub(r"\s+", "_", str(name).strip())
         match case_type:
             case "lower":
-                return name.lower()
+                return text.lower()
             case "upper":
-                return name.upper()
+                return text.upper()
             case "snake":
-                return to_snake(name)
+                return to_snake(text)
             case _:  # "preserve"
-                return name
+                return text
 
     new_names = [transform(col) for col in df.columns]
     # pandas silently drops earlier duplicate names.

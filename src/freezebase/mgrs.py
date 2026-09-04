@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from copy import copy
 import re
-from typing import TYPE_CHECKING, Any, overload
+from typing import TYPE_CHECKING, Any, cast, overload, override
 
 from affine import Affine
 import geopandas as gpd
@@ -94,7 +94,10 @@ def transform_shapely(
         Transformed geometry or array.
     """
     transformer = Transformer.from_crs(crs_from=crs_from, crs_to=crs_to, always_xy=True)
-    return shapely.transform(geom, transformer.transform, interleaved=False)  # type: ignore[type-var, arg-type]
+    # `interleaved=False` selects the (x, y) -> (x, y) transformer overload, which
+    # shapely's stubs do not model.
+    # pyrefly: ignore [no-matching-overload]
+    return shapely.transform(geom, transformer.transform, interleaved=False)
 
 
 _SOUTHERN_BANDS: frozenset[str] = frozenset("CDEFGHJKLM")
@@ -158,7 +161,7 @@ def utm_to_crs(zone: int, hemisphere: Hemisphere) -> CRS:
     _validate_zone(zone)
     _validate_hemisphere(hemisphere)
     base = 32700 if hemisphere == "S" else 32600
-    epsg = base + int(zone)
+    epsg = base + zone
     return CRS.from_epsg(epsg)
 
 
@@ -273,7 +276,9 @@ class MGRSGeoBox(GeoBox):
 
         converter = mgrs.MGRS()
         zone, hemisphere, easting, northing = converter.MGRSToUTM(mgrs_code)
-        crs = utm_to_crs(zone, hemisphere)
+        # ``mgrs`` types the hemisphere as a plain ``str``; only 'N'/'S' occur,
+        # and ``utm_to_crs`` rejects anything else at runtime.
+        crs = utm_to_crs(zone, cast("Hemisphere", hemisphere))
 
         n_pixels = int(_10KM_SIZE / resolution)
         nw_northing = northing + _10KM_SIZE
@@ -281,6 +286,7 @@ class MGRSGeoBox(GeoBox):
 
         return cls(mgrs_code, (n_pixels, n_pixels), affine, crs)
 
+    @override
     def __repr__(self) -> str:
         """Return a string representation of the MGRSGeoBox."""
         return f"MGRSGeoBox({self.mgrs_code!r})"
@@ -703,7 +709,8 @@ class MGRSGrid:
         """Convert one entry to an MGRSGeoBox."""
         resolution = self.resolution
         mgrs_code = str(self.mgrs_codes[index])
-        zone = self.zones[index]
+        # `zones` holds numpy scalars; `utm_to_crs` is annotated for plain ints.
+        zone = int(self.zones[index])
         hemisphere = self.hemispheres[index]
         crs = utm_to_crs(zone, hemisphere)
         n_pixels = int(_10KM_SIZE / resolution)

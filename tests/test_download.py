@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import gc
 import io
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Any, Self, override
 from unittest.mock import MagicMock
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -77,7 +77,7 @@ class FakeSession:
             self.closed.append(url)
             original_close()
 
-        resp.close = _close  # type: ignore[method-assign]
+        resp.close = _close
         return resp
 
 
@@ -94,6 +94,7 @@ class _ScriptedAdapter(BaseAdapter):
         self._responses = responses
         self.calls: list[requests.PreparedRequest] = []
 
+    @override
     def send(
         self,
         request: requests.PreparedRequest,
@@ -107,19 +108,22 @@ class _ScriptedAdapter(BaseAdapter):
         resp.raw = io.BytesIO(b"payload")  # reset the stream for re-reads
         return resp
 
+    @override
     def close(self) -> None:
         pass
 
 
-def make_downloader(session: FakeSession, **kwargs: object) -> HTTPDownloader:
-    dl = HTTPDownloader(progress=False, **kwargs)  # type: ignore[arg-type]
-    dl.session = session  # type: ignore[assignment]
+def make_downloader(session: FakeSession, **kwargs: Any) -> HTTPDownloader:
+    dl = HTTPDownloader(progress=False, **kwargs)
+    # FakeSession stands in for requests.Session without subclassing it.
+    # pyrefly: ignore [bad-assignment]
+    dl.session = session
     return dl
 
 
 def _adapter_downloader(
     target: str,
-    **kwargs: object,
+    **kwargs: Any,
 ) -> tuple[_ScriptedAdapter, HTTPDownloader]:
     """Build a downloader whose transport serves `HOST/a` -> `target` via a 302."""
     adapter = _ScriptedAdapter(
@@ -135,7 +139,7 @@ def _adapter_downloader(
             ),
         },
     )
-    dl = HTTPDownloader(progress=False, **kwargs)  # type: ignore[arg-type]
+    dl = HTTPDownloader(progress=False, **kwargs)
     dl.session.mount("http://", adapter)
     dl.session.mount("https://", adapter)
     return adapter, dl
@@ -377,7 +381,9 @@ class TestRemoteDestination:
         resp = make_response()
         target = _RecordingRemoteFile("real.zip")
 
-        _write_file(resp, target, show_progress=False)  # type: ignore[type-var]
+        # The double stands in for a UPath destination.
+        # pyrefly: ignore [bad-specialization]
+        _write_file(resp, target, show_progress=False)
 
         assert target.open_kwargs == {"block_size": REMOTE_BLOCK_SIZE}
         assert b"".join(target.chunks) == b"payload"
@@ -388,7 +394,9 @@ class TestRemoteDestination:
         target.exists_value = True
 
         with pytest.raises(FileExistsError, match="Target already exists"):
-            _write_file(resp, target, show_progress=False)  # type: ignore[type-var]
+            # The double stands in for a UPath destination.
+            # pyrefly: ignore [bad-specialization]
+            _write_file(resp, target, show_progress=False)
 
         assert target.chunks == []
 

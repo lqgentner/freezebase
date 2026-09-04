@@ -33,7 +33,9 @@ class TestCreateProgress:
     def test_explicit_columns_are_used_verbatim(self) -> None:
         columns: list[str | TextColumn] = [TextColumn("{task.description}"), "•"]
 
-        progress = create_progress(columns=columns, add_description=True)  # type: ignore[arg-type]
+        # `list[str | TextColumn]` is invariant, so it is not a `list[str | ProgressColumn]`.
+        # pyrefly: ignore [bad-argument-type]
+        progress = create_progress(columns=columns, add_description=True)
 
         # `add_description` is documented as ignored when `columns` is given.
         assert len(progress.columns) == len(columns)

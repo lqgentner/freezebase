@@ -27,7 +27,7 @@ These are the same four commands CI runs, so a clean run locally means a clean r
 ```bash
 uv run pytest
 uv run ruff format && uv run ruff check --fix
-uv run mypy src/freezebase tests
+uv run pyrefly check
 ```
 
 A few things worth knowing about each.
@@ -42,13 +42,14 @@ code blocks in Markdown and Quarto files. Docstrings on public functions need `P
 `Returns`, and `Raises` sections; the linter enforces it.
 
 **Types.** The package ships a `py.typed` marker, so its annotations are part of the public
-contract. `mypy` must pass on `src/freezebase` and `tests` before a change lands.
+contract. `pyrefly` runs under its `strict` preset and must pass on `src/freezebase` and
+`tests` before a change lands.
 
 ::: {.callout-important}
 ## Run all three checks, not just tests
 
 A passing `pytest` run does not mean a change is done. `ruff format`, `ruff check`, and
-`mypy` catch things tests cannot — an unformatted diff or a wrong annotation fails CI even
+`pyrefly` catch things tests cannot — an unformatted diff or a wrong annotation fails CI even
 when every test is green. Run all three after every change, including a change made only
 to fix a previous check's failure.
 :::
