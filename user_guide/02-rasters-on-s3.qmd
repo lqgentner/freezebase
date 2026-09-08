@@ -77,6 +77,43 @@ The profile name—not its credentials—is stored on the path and inherited by
 child paths. s3fs and Rasterio independently load that same profile when they
 access the object store.
 
+The endpoint may also live in the profile itself. botocore reads an
+`endpoint_url` key from a profile's section of the AWS config file, and a path
+built from the profile alone sends s3fs and Rasterio to that endpoint:
+
+```ini
+# ~/.aws/config
+[profile ceph-research]
+region = eu-central-1
+endpoint_url = https://objects.example.org
+```
+
+```python
+ceph_path = make_s3_upath("s3://ceph-bucket/data", profile="ceph-research")
+```
+
+An explicit `endpoint_url` argument still wins over the profile's.
+`resolve_endpoint_url(path)` returns whichever applies.
+
+## Settings from the environment
+
+An application usually takes the profile and endpoint from its own environment
+variables rather than hard-coding them. `S3Settings` reads them under a prefix
+of your choosing and resolves a configured value into a `Path` or a `UPath`:
+
+```python
+from freezebase.settings import S3Settings
+
+# Reads MYAPP_S3_PROFILE, MYAPP_S3_ENDPOINT_URL, and the two
+# MYAPP_S3_*_CHECKSUM_* policies for S3-compatible gateways.
+s3 = S3Settings.from_env("MYAPP_S3_")
+data_dir = s3.resolve_path("s3://my-bucket/data")   # a UPath
+scratch = s3.resolve_path("~/scratch")               # a Path
+```
+
+Only the profile is required for an `s3://` value; the endpoint may come from
+the profile's config section as above.
+
 Selecting a profile explicitly also makes boto skip its environment-variable
 credential provider. A profiled path is therefore never signed by whatever
 `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` happens to be set in the shell.

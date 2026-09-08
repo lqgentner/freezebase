@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 import requests
+from upath import UPath
 
 from freezebase.download import _is_transient_request_error
 from freezebase.utils import (
@@ -212,6 +213,14 @@ class TestFileSha256:
         path = tmp_path / "empty.bin"
         path.write_bytes(b"")
         assert file_sha256(path) == hashlib.sha256(b"").hexdigest()
+
+    def test_remote_path_is_streamed(self) -> None:
+        # A UPath on any fsspec filesystem is read in chunks, not held whole.
+        data = b"freezebase" * 300_000
+        path = UPath("memory://file-sha256/blob.bin")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        assert file_sha256(path, chunk_size=1 << 16) == hashlib.sha256(data).hexdigest()
 
 
 def test_format_valid_options() -> None:

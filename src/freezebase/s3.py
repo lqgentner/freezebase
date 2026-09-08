@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any
+from pathlib import Path, PurePosixPath
+from secrets import token_hex
+from typing import TYPE_CHECKING, Any, cast
 
-from botocore.exceptions import ClientError
+from botocore.configprovider import ConfiguredEndpointProvider
+from botocore.exceptions import ClientError, ProfileNotFound
+import botocore.session
 import rasterio
 from rasterio.session import AWSSession
 from s3fs.core import set_custom_error_handler
@@ -46,6 +50,48 @@ GDAL_S3_OPTIONS: Mapping[str, str] = {
 
 # These client kwargs bypass the credentials visible to s3_env.
 CLIENT_CREDENTIAL_KEYS = ("aws_access_key_id", "aws_secret_access_key", "aws_session_token")
+
+DEFAULT_CONTENT_TYPE = "application/octet-stream"
+
+# Content type per suffix, as an object should be served to a browser or a
+# client. A bucket serves what the upload declared, and `mimetypes` knows none
+# of the cloud-native suffixes, so without this a COG downloads instead of
+# opening by range request and a README saves instead of rendering.
+CONTENT_TYPES: Mapping[str, str] = {
+    ".json": "application/json",
+    ".geojson": "application/geo+json",
+    ".md": "text/markdown",
+    ".parquet": "application/vnd.apache.parquet",
+    ".tif": "image/tiff; application=geotiff; profile=cloud-optimized",
+    ".tiff": "image/tiff; application=geotiff; profile=cloud-optimized",
+    ".pmtiles": "application/vnd.pmtiles",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".svg": "image/svg+xml",
+    ".yaml": "application/yaml",
+    ".yml": "application/yaml",
+    ".csv": "text/csv",
+    ".txt": "text/plain",
+    ".html": "text/html",
+}
+
+
+def content_type_for(path: str | Path | UPath) -> str:
+    """Return the content type an object should be served as, by its suffix.
+
+    Parameters
+    ----------
+    path : str, Path, or UPath
+        Object name or path. Only the suffix is read, case-insensitively.
+
+    Returns
+    -------
+    str
+        A media type from :data:`CONTENT_TYPES`, or ``application/octet-stream``
+        for an unlisted suffix rather than a guess.
+    """
+    return CONTENT_TYPES.get(PurePosixPath(str(path)).suffix.lower(), DEFAULT_CONTENT_TYPE)
 
 
 def _retry_transient_s3_errors(exc: Exception) -> bool:
@@ -216,13 +262,73 @@ def s3_env(path: UPath) -> Generator[None]:
     path : UPath
         S3 path created by :func:`make_s3_upath`.
     """
-    so = path.storage_options
     session = aws_session(path)
 
-    options = {**GDAL_S3_OPTIONS, **_endpoint_options(so.get("endpoint_url"))}
+    options = {**GDAL_S3_OPTIONS, **_endpoint_options(resolve_endpoint_url(path))}
 
     with rasterio.Env(session=session, **options):
         yield
+
+
+def configured_endpoint_url(profile: str | None = None) -> str | None:
+    """Return the S3 endpoint the AWS configuration sets for a profile, if any.
+
+    The same lookup botocore performs when a client is created without an
+    explicit endpoint: ``AWS_ENDPOINT_URL_S3``, then ``AWS_ENDPOINT_URL``, then
+    the ``services`` section and the ``endpoint_url`` key of the profile in the
+    shared config file.
+
+    Parameters
+    ----------
+    profile : str, optional
+        Named AWS profile. ``None`` reads the default profile.
+
+    Returns
+    -------
+    str or None
+        The configured endpoint, or ``None`` when nothing sets one or the
+        profile does not exist.
+    """
+    session = botocore.session.Session(profile=profile)
+    try:
+        scoped = session.get_scoped_config()
+    except ProfileNotFound:
+        return None
+    provider = ConfiguredEndpointProvider(
+        full_config=session.full_config,
+        scoped_config=scoped,
+        client_name="s3",
+    )
+    endpoint = provider.provide()
+    return str(endpoint) if endpoint else None
+
+
+def resolve_endpoint_url(path: UPath) -> str | None:
+    """Return the endpoint an S3 path's requests go to.
+
+    An ``endpoint_url`` in the path's storage options wins. Without one, the
+    path's profile is looked up with :func:`configured_endpoint_url`, so a
+    profile whose config section carries ``endpoint_url`` points GDAL at the
+    same gateway s3fs already talks to.
+
+    Parameters
+    ----------
+    path : UPath
+        S3 path created by :func:`make_s3_upath`.
+
+    Returns
+    -------
+    str or None
+        The endpoint, or ``None`` for plain AWS.
+    """
+    so = path.storage_options
+    if endpoint_url := so.get("endpoint_url"):
+        return str(endpoint_url)
+    profile = so.get("profile")
+    if profile is None and so.get("key") is not None:
+        # Explicit credentials: nothing in the shared config applies.
+        return None
+    return configured_endpoint_url(str(profile) if profile else None)
 
 
 def _endpoint_options(endpoint_url: object) -> dict[str, str]:
@@ -266,5 +372,79 @@ def subprocess_s3_env(path: UPath) -> dict[str, str]:
     env: dict[str, str] = dict(GDAL_S3_OPTIONS)
     if profile := so.get("profile"):
         env["AWS_PROFILE"] = str(profile)
-    env.update(_endpoint_options(so.get("endpoint_url")))
+    env.update(_endpoint_options(resolve_endpoint_url(path)))
     return env
+
+
+def list_object_sizes(directory: str | Path | UPath, *, recursive: bool = False) -> dict[str, int]:
+    """List a prefix as ``{relative path: size}`` from one listing call.
+
+    One listing replaces one remote open per object, which is what makes
+    checking tens of thousands of objects affordable. Only the size is taken:
+    an ETag is the MD5 for a single-part upload and something else for a
+    multipart one, so keying on it would constrain how every writer uploads.
+
+    Parameters
+    ----------
+    directory : str, Path, or UPath
+        Prefix to list. Any fsspec-backed path works, including a local one.
+    recursive : bool, default False
+        Include everything below the prefix, keyed by its path relative to the
+        prefix with ``/`` separators. The default lists the prefix's direct
+        entries by name.
+
+    Returns
+    -------
+    dict of str to int
+        Relative path to size in bytes. Empty when the prefix does not exist.
+    """
+    root = UPath(directory)
+    prefix = str(root.path).rstrip("/") + "/"
+    if not root.fs.exists(str(root.path)):
+        return {}
+    if recursive:
+        # `detail=True` makes fsspec return `{path: info}`; its signature
+        # declares only the `detail=False` list, so the mapping is named here.
+        found = cast(
+            "dict[str, dict[str, Any]]",
+            root.fs.find(str(root.path), detail=True),
+        )
+        infos = list(found.values())
+    else:
+        infos = cast("list[dict[str, Any]]", root.fs.ls(str(root.path), detail=True))
+    entries: dict[str, int] = {}
+    for info in infos:
+        if info.get("type") == "directory":
+            continue
+        name = str(info["name"])
+        if not name.startswith(prefix):
+            continue
+        entries[name[len(prefix) :]] = int(info.get("size") or info.get("Size") or 0)
+    return entries
+
+
+def atomic_write_text(path: str | Path | UPath, text: str) -> None:
+    """Write a text file so that a reader never sees it half-written.
+
+    On S3 a ``PutObject`` is atomic on its own. On a local filesystem the text
+    goes to a sibling temporary file that is renamed over the target, and the
+    temporary file is removed if the write fails.
+
+    Parameters
+    ----------
+    path : str, Path, or UPath
+        Destination.
+    text : str
+        Content to write.
+    """
+    target = UPath(path)
+    if target.protocol == "s3":
+        target.write_text(text)
+        return
+    partial = target.with_name(f"{target.name}.{token_hex(8)}.partial")
+    try:
+        partial.write_text(text)
+        partial.replace(target)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise

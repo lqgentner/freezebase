@@ -8,6 +8,28 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## Unreleased
 
+### Added
+
+- `freezebase.settings.S3Settings` reads a profile, an optional endpoint and
+  the two botocore checksum policies from prefixed environment variables
+  (`S3Settings.from_env("MYAPP_S3_")`), and `resolve_path` turns a local path
+  or an `s3://` URI into a `Path` or a configured `UPath`. It replaces the
+  copies of this class downstream packages carried. `pydantic-settings` joins
+  the `s3` extra.
+- `s3_env` and `subprocess_s3_env` now point GDAL at the endpoint the path's
+  AWS profile configures when the path carries no explicit `endpoint_url`, so
+  a profile whose config section sets `endpoint_url` works the same for
+  rasterio as it already did for s3fs. `configured_endpoint_url(profile)`
+  performs botocore's lookup on its own, and `resolve_endpoint_url(path)`
+  returns the endpoint a path's requests go to.
+- `list_object_sizes(directory, recursive=...)` lists a prefix as
+  `{relative path: size}` from one listing call, on any fsspec filesystem.
+- `atomic_write_text(path, text)` writes through a renamed sibling on a local
+  filesystem and as one `PutObject` on S3.
+- `CONTENT_TYPES` and `content_type_for(path)` give the media type a
+  cloud-native geospatial object should be served as, by suffix.
+- `file_sha256` accepts a `UPath` and streams a remote file in chunks.
+
 ### Fixed
 
 - `subprocess_s3_env` now hands the child the same GDAL reader configuration

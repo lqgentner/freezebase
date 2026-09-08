@@ -16,14 +16,21 @@ from rasterio.env import getenv
 from upath import UPath
 
 from freezebase.s3 import (
+    CONTENT_TYPES,
+    DEFAULT_CONTENT_TYPE,
     GDAL_HTTP_MAX_RETRY,
     GDAL_HTTP_RETRY_CODES,
     GDAL_S3_OPTIONS,
     TRANSIENT_S3_ERROR_CODES,
     _retry_transient_s3_errors,
+    atomic_write_text,
     aws_session,
     clear_aws_session_cache,
+    configured_endpoint_url,
+    content_type_for,
+    list_object_sizes,
     make_s3_upath,
+    resolve_endpoint_url,
     s3_env,
     subprocess_s3_env,
 )
@@ -31,6 +38,20 @@ from freezebase.s3 import (
 if TYPE_CHECKING:
     from collections.abc import Generator
     from pathlib import Path
+
+
+@pytest.fixture(autouse=True)
+def _isolated_aws_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the developer's own AWS configuration out of every test.
+
+    `resolve_endpoint_url` consults the shared config file and the
+    `AWS_ENDPOINT_URL*` variables for a profile-only path, so a real profile or
+    a shell-wide endpoint would otherwise leak into the expectations here.
+    """
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "no-config"))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "no-credentials"))
+    for name in ("AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3", "AWS_PROFILE"):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -230,6 +251,20 @@ class TestS3Env:
         assert "AWS_S3_ENDPOINT" not in env
         assert "AWS_VIRTUAL_HOSTING" not in env
 
+    def test_profile_endpoint_reaches_gdal(
+        self,
+        captured_session: dict[str, object],
+        profile_with_endpoint: str,
+    ) -> None:
+        # Previously only an explicit endpoint_url reached GDAL, so a
+        # profile-only path sent /vsis3/ to AWS while s3fs talked to the gateway.
+        p = make_s3_upath("s3://b/k", profile=profile_with_endpoint)
+        with s3_env(p):
+            env = getenv()
+        assert env["AWS_S3_ENDPOINT"] == "gateway.example.org"
+        assert env["AWS_VIRTUAL_HOSTING"] == "FALSE"
+        assert captured_session["profile_name"] == profile_with_endpoint
+
     def test_session_receives_region_and_credentials(
         self,
         captured_session: dict[str, object],
@@ -285,6 +320,13 @@ class TestSubprocessS3Env:
     def test_profile_only(self) -> None:
         p = make_s3_upath("s3://b/k", profile="research")
         assert subprocess_s3_env(p) == {**GDAL_S3_OPTIONS, "AWS_PROFILE": "research"}
+
+    def test_profile_endpoint_reaches_the_child(self, profile_with_endpoint: str) -> None:
+        p = make_s3_upath("s3://b/k", profile=profile_with_endpoint)
+        env = subprocess_s3_env(p)
+        assert env["AWS_PROFILE"] == profile_with_endpoint
+        assert env["AWS_S3_ENDPOINT"] == "gateway.example.org"
+        assert env["AWS_VIRTUAL_HOSTING"] == "FALSE"
 
     def test_child_gets_the_reader_options_s3_env_applies(self) -> None:
         # Previously the child listed the directory of every object it opened:
@@ -403,3 +445,170 @@ class TestAwsSessionCache:
         before = aws_session(p)
         clear_aws_session_cache()
         assert aws_session(p) is not before
+
+
+@pytest.fixture
+def profile_with_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Write a shared config file whose one profile carries an ``endpoint_url``."""
+    config = tmp_path / "config"
+    config.write_text(
+        "[profile gateway]\nregion = eu-central-1\nendpoint_url = https://gateway.example.org\n",
+    )
+    credentials = tmp_path / "credentials"
+    credentials.write_text(
+        "[gateway]\naws_access_key_id = AKIAGATEWAY\naws_secret_access_key = s3cret\n",
+    )
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(credentials))
+    return "gateway"
+
+
+class TestConfiguredEndpointUrl:
+    def test_profile_section_endpoint(self, profile_with_endpoint: str) -> None:
+        assert configured_endpoint_url(profile_with_endpoint) == "https://gateway.example.org"
+
+    def test_missing_profile_is_none(self) -> None:
+        assert configured_endpoint_url("no-such-profile") is None
+
+    def test_nothing_configured_is_none(self, profile_with_endpoint: str) -> None:
+        del profile_with_endpoint
+        assert configured_endpoint_url() is None
+
+    def test_service_variable_wins(
+        self,
+        profile_with_endpoint: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://minio:9000")
+        assert configured_endpoint_url(profile_with_endpoint) == "http://minio:9000"
+
+
+class TestResolveEndpointUrl:
+    def test_explicit_endpoint_wins(self, profile_with_endpoint: str) -> None:
+        p = make_s3_upath(
+            "s3://b/k",
+            profile=profile_with_endpoint,
+            endpoint_url="https://ceph.example.org",
+        )
+        assert resolve_endpoint_url(p) == "https://ceph.example.org"
+
+    def test_profile_endpoint_is_the_fallback(self, profile_with_endpoint: str) -> None:
+        p = make_s3_upath("s3://b/k", profile=profile_with_endpoint)
+        assert resolve_endpoint_url(p) == "https://gateway.example.org"
+
+    def test_explicit_credentials_do_not_consult_the_config(
+        self,
+        profile_with_endpoint: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        del profile_with_endpoint
+        monkeypatch.setenv("AWS_ENDPOINT_URL", "http://minio:9000")
+        p = make_s3_upath("s3://b/k", key="a", secret="b")
+        assert resolve_endpoint_url(p) is None
+
+    def test_plain_aws_is_none(self) -> None:
+        assert resolve_endpoint_url(make_s3_upath("s3://b/k", profile="research")) is None
+
+
+class TestListObjectSizes:
+    @pytest.fixture
+    def tree(self, tmp_path: Path) -> Path:
+        (tmp_path / "tiles" / "2024").mkdir(parents=True)
+        (tmp_path / "catalog.json").write_bytes(b"x" * 12)
+        (tmp_path / "tiles" / "collection.json").write_bytes(b"x" * 7)
+        (tmp_path / "tiles" / "2024" / "a.tif").write_bytes(b"x" * 100)
+        return tmp_path
+
+    def test_direct_entries_by_name(self, tree: Path) -> None:
+        assert list_object_sizes(tree) == {"catalog.json": 12}
+
+    def test_recursive_entries_by_relative_path(self, tree: Path) -> None:
+        assert list_object_sizes(tree, recursive=True) == {
+            "catalog.json": 12,
+            "tiles/collection.json": 7,
+            "tiles/2024/a.tif": 100,
+        }
+
+    def test_subtree_is_relative_to_itself(self, tree: Path) -> None:
+        assert list_object_sizes(tree / "tiles", recursive=True) == {
+            "collection.json": 7,
+            "2024/a.tif": 100,
+        }
+
+    def test_missing_prefix_is_empty(self, tree: Path) -> None:
+        assert list_object_sizes(tree / "nothing", recursive=True) == {}
+
+    def test_memory_filesystem(self) -> None:
+        root = UPath("memory://list-object-sizes")
+        (root / "a").mkdir(parents=True, exist_ok=True)
+        (root / "a" / "b.parquet").write_bytes(b"x" * 5)
+        (root / "c.json").write_bytes(b"x" * 2)
+        assert list_object_sizes(root) == {"c.json": 2}
+        assert list_object_sizes(root, recursive=True) == {"a/b.parquet": 5, "c.json": 2}
+
+
+class TestAtomicWriteText:
+    def test_writes_and_leaves_no_partial(self, tmp_path: Path) -> None:
+        target = tmp_path / "state.json"
+        atomic_write_text(target, "{}")
+        assert target.read_text() == "{}"
+        assert [p.name for p in tmp_path.iterdir()] == ["state.json"]
+
+    def test_replaces_existing(self, tmp_path: Path) -> None:
+        target = tmp_path / "state.json"
+        target.write_text("old")
+        atomic_write_text(target, "new")
+        assert target.read_text() == "new"
+
+    def test_failed_write_removes_the_partial(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "state.json"
+
+        def boom(self: UPath, text: str, **kwargs: object) -> int:
+            del self, text, kwargs
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr(type(UPath(target)), "write_text", boom)
+        with pytest.raises(OSError, match="disk full"):
+            atomic_write_text(target, "{}")
+        assert list(tmp_path.iterdir()) == []
+
+    def test_s3_is_one_put(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        written: dict[str, str] = {}
+        p = make_s3_upath("s3://b/state.json", profile="research")
+
+        def record(self: UPath, text: str, **kwargs: object) -> int:
+            del kwargs
+            written[str(self)] = text
+            return len(text)
+
+        monkeypatch.setattr(type(p), "write_text", record)
+        atomic_write_text(p, "{}")
+        assert written == {"s3://b/state.json": "{}"}
+
+
+class TestContentTypeFor:
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("tiles/2024/item.json", "application/json"),
+            ("README.md", "text/markdown"),
+            ("items.parquet", "application/vnd.apache.parquet"),
+            ("coh12_vv.tif", "image/tiff; application=geotiff; profile=cloud-optimized"),
+            ("COH12_VV.TIF", "image/tiff; application=geotiff; profile=cloud-optimized"),
+            ("coh12_rgb.pmtiles", "application/vnd.pmtiles"),
+            ("wordmark.svg", "image/svg+xml"),
+            ("LICENSE", DEFAULT_CONTENT_TYPE),
+            ("archive.zip", DEFAULT_CONTENT_TYPE),
+        ],
+    )
+    def test_by_suffix(self, name: str, expected: str) -> None:
+        assert content_type_for(name) == expected
+
+    def test_accepts_paths(self, tmp_path: Path) -> None:
+        assert content_type_for(tmp_path / "x.png") == "image/png"
+        assert content_type_for(UPath("s3://b/x.parquet")) == CONTENT_TYPES[".parquet"]

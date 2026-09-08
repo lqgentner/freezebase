@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from platformdirs import user_cache_dir
+from upath import UPath
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -189,13 +190,13 @@ def get_credentials_from_env(username_key: str, password_key: str) -> tuple[str,
 _HASH_CHUNK_SIZE = 1024 * 1024  # 1 MiB
 
 
-def file_sha256(path: str | Path, *, chunk_size: int = _HASH_CHUNK_SIZE) -> str:
-    """Return a file's SHA-256 hex digest.
+def file_sha256(path: str | Path | UPath, *, chunk_size: int = _HASH_CHUNK_SIZE) -> str:
+    """Return a file's SHA-256 hex digest, read in chunks.
 
     Parameters
     ----------
-    path : str or Path
-        File to hash.
+    path : str, Path, or UPath
+        File to hash. A remote path is streamed, never held in memory whole.
     chunk_size : int, optional
         Bytes read per iteration.
 
@@ -205,7 +206,7 @@ def file_sha256(path: str | Path, *, chunk_size: int = _HASH_CHUNK_SIZE) -> str:
         The lowercase hexadecimal SHA-256 digest.
     """
     digest = hashlib.sha256()
-    with Path(path).open("rb") as f:
+    with UPath(path).open("rb") as f:
         for chunk in iter(lambda: f.read(chunk_size), b""):
             digest.update(chunk)
     return digest.hexdigest()
