@@ -63,7 +63,9 @@ s3 = [
     "fsspec>=2026.2.0",
     "boto3>=1.36",
     # `freezebase.settings` reads the connection settings from the environment.
-    "pydantic-settings>=2.6",
+    # 2.0 is the first pydantic-2 release; it already takes the `_env_prefix`
+    # override `S3Settings.from_env` relies on, and it installs on 3.12.
+    "pydantic-settings>=2.0",
 ]
 
 [project.urls]

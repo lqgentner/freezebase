@@ -155,8 +155,9 @@ def aws_session(path: UPath) -> AWSSession:
 
 
 def clear_aws_session_cache() -> None:
-    """Clear cached AWS sessions."""
+    """Clear cached AWS sessions and configured endpoints."""
     _aws_session.cache_clear()
+    configured_endpoint_url.cache_clear()
 
 
 def make_s3_upath(
@@ -270,13 +271,21 @@ def s3_env(path: UPath) -> Generator[None]:
         yield
 
 
+@lru_cache(maxsize=32)
 def configured_endpoint_url(profile: str | None = None) -> str | None:
     """Return the S3 endpoint the AWS configuration sets for a profile, if any.
 
-    The same lookup botocore performs when a client is created without an
-    explicit endpoint: ``AWS_ENDPOINT_URL_S3``, then ``AWS_ENDPOINT_URL``, then
-    the ``services`` section and the ``endpoint_url`` key of the profile in the
-    shared config file.
+    The lookup botocore performs when a client is created without an explicit
+    endpoint: ``AWS_ENDPOINT_URL_S3``, then ``AWS_ENDPOINT_URL``, then the
+    ``services`` section and the ``endpoint_url`` key of the profile in the
+    shared config file, all of them ignored when
+    ``AWS_IGNORE_CONFIGURED_ENDPOINT_URLS`` or the profile's
+    ``ignore_configured_endpoint_urls`` says so.
+
+    Reading the configuration files is not free, and :func:`s3_env` runs once
+    per raster opened, so the result is cached per profile alongside
+    :func:`aws_session`. Call :func:`clear_aws_session_cache` after changing
+    the configuration files or the endpoint variables during a process.
 
     Parameters
     ----------
@@ -294,6 +303,8 @@ def configured_endpoint_url(profile: str | None = None) -> str | None:
         scoped = session.get_scoped_config()
     except ProfileNotFound:
         return None
+    if session.get_config_variable("ignore_configured_endpoint_urls"):
+        return None
     provider = ConfiguredEndpointProvider(
         full_config=session.full_config,
         scoped_config=scoped,
@@ -307,9 +318,11 @@ def resolve_endpoint_url(path: UPath) -> str | None:
     """Return the endpoint an S3 path's requests go to.
 
     An ``endpoint_url`` in the path's storage options wins. Without one, the
-    path's profile is looked up with :func:`configured_endpoint_url`, so a
-    profile whose config section carries ``endpoint_url`` points GDAL at the
-    same gateway s3fs already talks to.
+    path's profile, or the default profile for a path with explicit
+    credentials, is looked up with :func:`configured_endpoint_url`, which is
+    what s3fs's own client resolves to. A profile whose config section
+    carries ``endpoint_url`` therefore points GDAL at the same gateway s3fs
+    already talks to.
 
     Parameters
     ----------
@@ -325,9 +338,6 @@ def resolve_endpoint_url(path: UPath) -> str | None:
     if endpoint_url := so.get("endpoint_url"):
         return str(endpoint_url)
     profile = so.get("profile")
-    if profile is None and so.get("key") is not None:
-        # Explicit credentials: nothing in the shared config applies.
-        return None
     return configured_endpoint_url(str(profile) if profile else None)
 
 
@@ -417,18 +427,24 @@ def list_object_sizes(directory: str | Path | UPath, *, recursive: bool = False)
         if info.get("type") == "directory":
             continue
         name = str(info["name"])
-        if not name.startswith(prefix):
+        # A zero-byte "folder marker" key ends in a slash and lists as a file.
+        if not name.startswith(prefix) or name.endswith("/"):
             continue
         entries[name[len(prefix) :]] = int(info.get("size") or info.get("Size") or 0)
     return entries
 
 
+LOCAL_PROTOCOLS = frozenset({"", "file", "local"})
+"""The fsspec protocols that name the local filesystem."""
+
+
 def atomic_write_text(path: str | Path | UPath, text: str) -> None:
     """Write a text file so that a reader never sees it half-written.
 
-    On S3 a ``PutObject`` is atomic on its own. On a local filesystem the text
-    goes to a sibling temporary file that is renamed over the target, and the
-    temporary file is removed if the write fails.
+    On an object store one put is atomic on its own, so the text is written
+    directly. On the local filesystem the text goes to a sibling temporary
+    file that is renamed over the target, and the temporary file is removed
+    if the write fails.
 
     Parameters
     ----------
@@ -438,7 +454,7 @@ def atomic_write_text(path: str | Path | UPath, text: str) -> None:
         Content to write.
     """
     target = UPath(path)
-    if target.protocol == "s3":
+    if target.protocol not in LOCAL_PROTOCOLS:
         target.write_text(text)
         return
     partial = target.with_name(f"{target.name}.{token_hex(8)}.partial")

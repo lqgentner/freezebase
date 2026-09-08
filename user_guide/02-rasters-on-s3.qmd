@@ -107,8 +107,8 @@ from freezebase.settings import S3Settings
 # Reads MYAPP_S3_PROFILE, MYAPP_S3_ENDPOINT_URL, and the two
 # MYAPP_S3_*_CHECKSUM_* policies for S3-compatible gateways.
 s3 = S3Settings.from_env("MYAPP_S3_")
-data_dir = s3.resolve_path("s3://my-bucket/data")   # a UPath
-scratch = s3.resolve_path("~/scratch")               # a Path
+data_dir = s3.resolve_path("s3://my-bucket/data")  # a UPath
+scratch = s3.resolve_path("~/scratch")  # a Path
 ```
 
 Only the profile is required for an `s3://` value; the endpoint may come from

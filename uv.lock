@@ -998,7 +998,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.3" },
     { name = "platformdirs", specifier = ">=3.0" },
     { name = "pyarrow", specifier = ">=17.0" },
-    { name = "pydantic-settings", marker = "extra == 's3'", specifier = ">=2.6" },
+    { name = "pydantic-settings", marker = "extra == 's3'", specifier = ">=2.0" },
     { name = "pyproj", specifier = ">=3.6.1" },
     { name = "rasterio", specifier = ">=1.5.0" },
     { name = "requests", specifier = ">=2.28" },

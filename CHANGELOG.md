@@ -16,22 +16,29 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   or an `s3://` URI into a `Path` or a configured `UPath`. It replaces the
   copies of this class downstream packages carried. `pydantic-settings` joins
   the `s3` extra.
-- `s3_env` and `subprocess_s3_env` now point GDAL at the endpoint the path's
-  AWS profile configures when the path carries no explicit `endpoint_url`, so
-  a profile whose config section sets `endpoint_url` works the same for
-  rasterio as it already did for s3fs. `configured_endpoint_url(profile)`
-  performs botocore's lookup on its own, and `resolve_endpoint_url(path)`
-  returns the endpoint a path's requests go to.
+- `configured_endpoint_url(profile)` performs botocore's own configured
+  endpoint lookup (`AWS_ENDPOINT_URL_S3`, `AWS_ENDPOINT_URL`, the `services`
+  section, the profile's `endpoint_url`, honouring
+  `ignore_configured_endpoint_urls`), cached per profile and cleared by
+  `clear_aws_session_cache`. `resolve_endpoint_url(path)` returns the endpoint
+  a path's requests go to: its explicit `endpoint_url`, else the configured
+  one.
 - `list_object_sizes(directory, recursive=...)` lists a prefix as
-  `{relative path: size}` from one listing call, on any fsspec filesystem.
-- `atomic_write_text(path, text)` writes through a renamed sibling on a local
-  filesystem and as one `PutObject` on S3.
+  `{relative path: size}` from one listing call, on any fsspec filesystem,
+  skipping zero-byte folder-marker keys.
+- `atomic_write_text(path, text)` writes through a renamed sibling on the
+  local filesystem and as one put on an object store.
 - `CONTENT_TYPES` and `content_type_for(path)` give the media type a
   cloud-native geospatial object should be served as, by suffix.
 - `file_sha256` accepts a `UPath` and streams a remote file in chunks.
 
 ### Fixed
 
+- `s3_env` and `subprocess_s3_env` point GDAL at the endpoint the path's AWS
+  configuration sets when the path carries no explicit `endpoint_url`. Before,
+  a path built from a profile whose config section sets `endpoint_url` sent
+  s3fs to that gateway and GDAL to AWS; the same held for `AWS_ENDPOINT_URL`
+  with explicit credentials.
 - `subprocess_s3_env` now hands the child the same GDAL reader configuration
   `s3_env` applies in-process (`GDAL_DISABLE_READDIR_ON_OPEN=EMPTY_DIR` and the
   HTTP retry settings). Before, a child process listed the directory of every

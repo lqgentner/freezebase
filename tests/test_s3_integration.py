@@ -37,7 +37,14 @@ from freezebase.raster import (
     rewrite_tiff,
     write_cog,
 )
-from freezebase.s3 import make_s3_upath
+from freezebase.s3 import (
+    atomic_write_text,
+    clear_aws_session_cache,
+    configured_endpoint_url,
+    list_object_sizes,
+    make_s3_upath,
+    resolve_endpoint_url,
+)
 from freezebase.vrt import create_warped_vrt
 
 _ENDPOINT = os.getenv("FREEZEBASE_TEST_S3_ENDPOINT")
@@ -246,3 +253,62 @@ class TestListingsCache:
         finally:
             for name in ("AAA_one.tif", "BBB_two.tif"):
                 (bucket_root / parent / name).unlink(missing_ok=True)
+
+
+class TestListObjectSizes:
+    def test_recursive_listing_skips_folder_markers(self, bucket_root: UPath) -> None:
+        prefix = bucket_root / uuid.uuid4().hex
+        (prefix / "catalog.json").write_bytes(b"x" * 12)
+        (prefix / "tiles" / "a.tif").write_bytes(b"x" * 100)
+        # The marker an object browser or `mkdir` leaves behind.
+        (prefix / "tiles" / "2024" / "").fs.touch(f"{prefix.path}/tiles/2024/")
+        try:
+            assert list_object_sizes(prefix) == {"catalog.json": 12}
+            assert list_object_sizes(prefix, recursive=True) == {
+                "catalog.json": 12,
+                "tiles/a.tif": 100,
+            }
+            assert list_object_sizes(prefix / "missing", recursive=True) == {}
+        finally:
+            prefix.fs.rm(prefix.path, recursive=True)
+
+
+class TestAtomicWriteText:
+    def test_one_put(self, bucket_root: UPath) -> None:
+        target = bucket_root / f"{uuid.uuid4().hex}.json"
+        try:
+            atomic_write_text(target, "{}")
+            assert target.read_text() == "{}"
+            assert list_object_sizes(bucket_root).get(target.name) == 2
+        finally:
+            target.unlink(missing_ok=True)
+
+
+class TestConfiguredEndpoint:
+    def test_profile_endpoint_matches_the_client_s3fs_builds(
+        self,
+        bucket_root: UPath,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A profile-only path reaches the gateway, and GDAL is told the same one."""
+        credentials = tmp_path / "credentials"
+        credentials.write_text(
+            f"[{_AWS_PROFILE}]\naws_access_key_id = {_KEY}\naws_secret_access_key = {_SECRET}\n",
+        )
+        config = tmp_path / "config"
+        config.write_text(f"[profile {_AWS_PROFILE}]\nendpoint_url = {_ENDPOINT}\n")
+        monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(credentials))
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        clear_aws_session_cache()
+        root = make_s3_upath(str(bucket_root), profile=_AWS_PROFILE)
+        target = root / f"{uuid.uuid4().hex}.json"
+        try:
+            target.write_text("{}")  # signed against the profile's endpoint
+            assert target.read_text() == "{}"
+            assert configured_endpoint_url(_AWS_PROFILE) == _ENDPOINT
+            assert resolve_endpoint_url(root) == _ENDPOINT
+        finally:
+            target.unlink(missing_ok=True)
+            root.fs.clear_instance_cache()
+            clear_aws_session_cache()

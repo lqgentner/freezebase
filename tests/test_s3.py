@@ -482,6 +482,40 @@ class TestConfiguredEndpointUrl:
         monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://minio:9000")
         assert configured_endpoint_url(profile_with_endpoint) == "http://minio:9000"
 
+    def test_ignore_variable_disables_the_lookup(
+        self,
+        profile_with_endpoint: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # What a client built by botocore does with the same setting.
+        monkeypatch.setenv("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS", "true")
+        assert configured_endpoint_url(profile_with_endpoint) is None
+
+    def test_profile_ignore_key_disables_the_lookup(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = tmp_path / "config"
+        config.write_text(
+            "[profile gateway]\n"
+            "endpoint_url = https://gateway.example.org\n"
+            "ignore_configured_endpoint_urls = true\n",
+        )
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+        assert configured_endpoint_url("gateway") is None
+
+    def test_result_is_cached_until_cleared(
+        self,
+        profile_with_endpoint: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        assert configured_endpoint_url(profile_with_endpoint) == "https://gateway.example.org"
+        monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://minio:9000")
+        assert configured_endpoint_url(profile_with_endpoint) == "https://gateway.example.org"
+        clear_aws_session_cache()
+        assert configured_endpoint_url(profile_with_endpoint) == "http://minio:9000"
+
 
 class TestResolveEndpointUrl:
     def test_explicit_endpoint_wins(self, profile_with_endpoint: str) -> None:
@@ -496,15 +530,15 @@ class TestResolveEndpointUrl:
         p = make_s3_upath("s3://b/k", profile=profile_with_endpoint)
         assert resolve_endpoint_url(p) == "https://gateway.example.org"
 
-    def test_explicit_credentials_do_not_consult_the_config(
+    def test_explicit_credentials_still_honour_the_endpoint_variable(
         self,
-        profile_with_endpoint: str,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        del profile_with_endpoint
+        # botocore applies AWS_ENDPOINT_URL to a client whatever its
+        # credentials, and so does the client s3fs builds for this path.
         monkeypatch.setenv("AWS_ENDPOINT_URL", "http://minio:9000")
         p = make_s3_upath("s3://b/k", key="a", secret="b")
-        assert resolve_endpoint_url(p) is None
+        assert resolve_endpoint_url(p) == "http://minio:9000"
 
     def test_plain_aws_is_none(self) -> None:
         assert resolve_endpoint_url(make_s3_upath("s3://b/k", profile="research")) is None
@@ -546,6 +580,27 @@ class TestListObjectSizes:
         assert list_object_sizes(root) == {"c.json": 2}
         assert list_object_sizes(root, recursive=True) == {"a/b.parquet": 5, "c.json": 2}
 
+    def test_folder_marker_keys_are_not_objects(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # An object store lists a zero-byte "tiles/2024/" marker as a file.
+        root = UPath("memory://folder-markers")
+        entries: list[dict[str, object]] = [
+            {"name": f"{root.path}/tiles/2024/", "size": 0, "type": "file"},
+            {"name": f"{root.path}/tiles/a.tif", "size": 3, "type": "file"},
+            {"name": f"{root.path}/tiles", "size": 0, "type": "directory"},
+        ]
+
+        def exists(*args: object, **kwargs: object) -> bool:
+            del args, kwargs
+            return True
+
+        def ls(*args: object, **kwargs: object) -> list[dict[str, object]]:
+            del args, kwargs
+            return entries
+
+        monkeypatch.setattr(type(root.fs), "exists", exists)
+        monkeypatch.setattr(type(root.fs), "ls", ls)
+        assert list_object_sizes(root) == {"tiles/a.tif": 3}
+
 
 class TestAtomicWriteText:
     def test_writes_and_leaves_no_partial(self, tmp_path: Path) -> None:
@@ -576,6 +631,14 @@ class TestAtomicWriteText:
         with pytest.raises(OSError, match="disk full"):
             atomic_write_text(target, "{}")
         assert list(tmp_path.iterdir()) == []
+
+    def test_other_object_stores_write_directly(self) -> None:
+        # Nothing but the local filesystem has a rename; a put is atomic.
+        target = UPath("memory://atomic-write/state.json")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(target, "{}")
+        assert target.read_text() == "{}"
+        assert [p.name for p in target.parent.iterdir()] == ["state.json"]
 
     def test_s3_is_one_put(self, monkeypatch: pytest.MonkeyPatch) -> None:
         written: dict[str, str] = {}
