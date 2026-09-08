@@ -571,16 +571,19 @@ class TestListObjectSizes:
     def tree(self, tmp_path: Path) -> Path:
         (tmp_path / "tiles" / "2024").mkdir(parents=True)
         (tmp_path / "catalog.json").write_bytes(b"x" * 12)
+        # An empty file is an object of size zero, not a folder marker.
+        (tmp_path / "empty.txt").write_bytes(b"")
         (tmp_path / "tiles" / "collection.json").write_bytes(b"x" * 7)
         (tmp_path / "tiles" / "2024" / "a.tif").write_bytes(b"x" * 100)
         return tmp_path
 
     def test_direct_entries_by_name(self, tree: Path) -> None:
-        assert list_object_sizes(tree) == {"catalog.json": 12}
+        assert list_object_sizes(tree) == {"catalog.json": 12, "empty.txt": 0}
 
     def test_recursive_entries_by_relative_path(self, tree: Path) -> None:
         assert list_object_sizes(tree, recursive=True) == {
             "catalog.json": 12,
+            "empty.txt": 0,
             "tiles/collection.json": 7,
             "tiles/2024/a.tif": 100,
         }
@@ -591,8 +594,11 @@ class TestListObjectSizes:
             "2024/a.tif": 100,
         }
 
-    def test_missing_prefix_is_empty(self, tree: Path) -> None:
-        assert list_object_sizes(tree / "nothing", recursive=True) == {}
+    @pytest.mark.parametrize("recursive", [False, True])
+    def test_missing_prefix_is_empty(self, tree: Path, recursive: bool) -> None:
+        # A direct listing of a missing directory raises where a recursive
+        # search returns nothing; both come back empty.
+        assert list_object_sizes(tree / "nothing", recursive=recursive) == {}
 
     def test_memory_filesystem(self) -> None:
         root = UPath("memory://list-object-sizes")
@@ -611,6 +617,8 @@ class TestListObjectSizes:
             {"name": f"{root.path}/tiles", "size": 0, "type": "directory"},
             # A key ending in a slash that holds bytes is an object, not a marker.
             {"name": f"{root.path}/odd/", "size": 4, "type": "file"},
+            # A listing that hands back something outside the prefix is dropped.
+            {"name": "/elsewhere/b.tif", "size": 9, "type": "file"},
         ]
 
         def exists(*args: object, **kwargs: object) -> bool:
