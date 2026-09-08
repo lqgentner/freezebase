@@ -22,10 +22,11 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   `ignore_configured_endpoint_urls`), cached per profile and cleared by
   `clear_aws_session_cache`. `resolve_endpoint_url(path)` returns the endpoint
   a path's requests go to: its explicit `endpoint_url`, else the configured
-  one.
+  one, which is what an `endpoint_url` inside `client_kwargs` resolves to as
+  well.
 - `list_object_sizes(directory, recursive=...)` lists a prefix as
   `{relative path: size}` from one listing call, on any fsspec filesystem,
-  skipping zero-byte folder-marker keys.
+  skipping zero-byte folder-marker keys. A missing prefix lists as empty.
 - `atomic_write_text(path, text)` writes through a renamed sibling on the
   local filesystem and as one put on an object store.
 - `CONTENT_TYPES` and `content_type_for(path)` give the media type a

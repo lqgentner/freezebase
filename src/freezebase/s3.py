@@ -317,8 +317,9 @@ def configured_endpoint_url(profile: str | None = None) -> str | None:
 def resolve_endpoint_url(path: UPath) -> str | None:
     """Return the endpoint an S3 path's requests go to.
 
-    An ``endpoint_url`` in the path's storage options wins. Without one, the
-    path's profile, or the default profile for a path with explicit
+    An ``endpoint_url`` in the path's storage options wins, then one inside
+    its ``client_kwargs``, the same precedence s3fs applies. Without either,
+    the path's profile, or the default profile for a path with explicit
     credentials, is looked up with :func:`configured_endpoint_url`, which is
     what s3fs's own client resolves to. A profile whose config section
     carries ``endpoint_url`` therefore points GDAL at the same gateway s3fs
@@ -336,6 +337,8 @@ def resolve_endpoint_url(path: UPath) -> str | None:
     """
     so = path.storage_options
     if endpoint_url := so.get("endpoint_url"):
+        return str(endpoint_url)
+    if endpoint_url := (so.get("client_kwargs") or {}).get("endpoint_url"):
         return str(endpoint_url)
     profile = so.get("profile")
     return configured_endpoint_url(str(profile) if profile else None)
@@ -410,27 +413,34 @@ def list_object_sizes(directory: str | Path | UPath, *, recursive: bool = False)
     """
     root = UPath(directory)
     prefix = str(root.path).rstrip("/") + "/"
-    if not root.fs.exists(str(root.path)):
+    # No existence check first: on S3 that is a HeadObject and a listing of
+    # its own. A missing prefix is the listing's own error, or an empty one.
+    try:
+        if recursive:
+            # `detail=True` makes fsspec return `{path: info}`; its signature
+            # declares only the `detail=False` list, so the mapping is named.
+            found = cast(
+                "dict[str, dict[str, Any]]",
+                root.fs.find(str(root.path), detail=True),
+            )
+            infos = list(found.values())
+        else:
+            infos = cast("list[dict[str, Any]]", root.fs.ls(str(root.path), detail=True))
+    except FileNotFoundError:
         return {}
-    if recursive:
-        # `detail=True` makes fsspec return `{path: info}`; its signature
-        # declares only the `detail=False` list, so the mapping is named here.
-        found = cast(
-            "dict[str, dict[str, Any]]",
-            root.fs.find(str(root.path), detail=True),
-        )
-        infos = list(found.values())
-    else:
-        infos = cast("list[dict[str, Any]]", root.fs.ls(str(root.path), detail=True))
     entries: dict[str, int] = {}
     for info in infos:
         if info.get("type") == "directory":
             continue
         name = str(info["name"])
-        # A zero-byte "folder marker" key ends in a slash and lists as a file.
-        if not name.startswith(prefix) or name.endswith("/"):
+        if not name.startswith(prefix):
             continue
-        entries[name[len(prefix) :]] = int(info.get("size") or info.get("Size") or 0)
+        size = int(info.get("size") or info.get("Size") or 0)
+        # A zero-byte "folder marker" key ends in a slash and lists as a file;
+        # a key that ends in a slash but holds bytes is an object.
+        if size == 0 and name.endswith("/"):
+            continue
+        entries[name[len(prefix) :]] = size
     return entries
 
 

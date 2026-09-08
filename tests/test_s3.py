@@ -526,6 +526,28 @@ class TestResolveEndpointUrl:
         )
         assert resolve_endpoint_url(p) == "https://ceph.example.org"
 
+    def test_endpoint_inside_client_kwargs_is_seen(self, profile_with_endpoint: str) -> None:
+        # make_s3_upath passes a caller's client_kwargs through untouched, and
+        # s3fs honours an endpoint given there.
+        p = make_s3_upath(
+            "s3://b/k",
+            profile=profile_with_endpoint,
+            client_kwargs={"endpoint_url": "https://client.example.org"},
+        )
+        assert p.storage_options["endpoint_url"] is None
+        assert resolve_endpoint_url(p) == "https://client.example.org"
+
+    def test_top_level_endpoint_beats_client_kwargs(self) -> None:
+        # The precedence s3fs documents for its own endpoint_url argument.
+        p = make_s3_upath(
+            "s3://b/k",
+            key="a",
+            secret="b",
+            endpoint_url="https://top.example.org",
+            client_kwargs={"endpoint_url": "https://client.example.org"},
+        )
+        assert resolve_endpoint_url(p) == "https://top.example.org"
+
     def test_profile_endpoint_is_the_fallback(self, profile_with_endpoint: str) -> None:
         p = make_s3_upath("s3://b/k", profile=profile_with_endpoint)
         assert resolve_endpoint_url(p) == "https://gateway.example.org"
@@ -587,6 +609,8 @@ class TestListObjectSizes:
             {"name": f"{root.path}/tiles/2024/", "size": 0, "type": "file"},
             {"name": f"{root.path}/tiles/a.tif", "size": 3, "type": "file"},
             {"name": f"{root.path}/tiles", "size": 0, "type": "directory"},
+            # A key ending in a slash that holds bytes is an object, not a marker.
+            {"name": f"{root.path}/odd/", "size": 4, "type": "file"},
         ]
 
         def exists(*args: object, **kwargs: object) -> bool:
@@ -599,7 +623,26 @@ class TestListObjectSizes:
 
         monkeypatch.setattr(type(root.fs), "exists", exists)
         monkeypatch.setattr(type(root.fs), "ls", ls)
-        assert list_object_sizes(root) == {"tiles/a.tif": 3}
+        assert list_object_sizes(root) == {"tiles/a.tif": 3, "odd/": 4}
+
+    def test_no_existence_check_before_the_listing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # On S3 `exists` is a HeadObject and a listing of its own, so the one
+        # listing call is the only request; a missing prefix is its error.
+        (tmp_path / "a.tif").write_bytes(b"x")
+        root = UPath(tmp_path)
+
+        def exists(*args: object, **kwargs: object) -> bool:
+            del args, kwargs
+            msg = "exists() must not be called"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(type(root.fs), "exists", exists)
+        assert list_object_sizes(root) == {"a.tif": 1}
+        assert list_object_sizes(root / "missing", recursive=True) == {}
 
 
 class TestAtomicWriteText:
