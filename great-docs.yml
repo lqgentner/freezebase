@@ -114,6 +114,21 @@ reference:
       contents:
         - s3.make_s3_upath
         - s3.s3_env
+        - s3.subprocess_s3_env
+        - s3.aws_session
+        - s3.clear_aws_session_cache
+        - s3.resolve_endpoint_url
+        - s3.configured_endpoint_url
+        - s3.list_object_sizes
+        - s3.atomic_write_text
+        - s3.content_type_for
+        - s3.CONTENT_TYPES
+
+    - title: S3 settings
+      desc: >-
+        Connection settings read from prefixed environment variables
+      contents:
+        - settings.S3Settings
 
     - title: Vector data
       desc: Cached vector datasets and GeoDataFrame helpers

@@ -6,6 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the project is pre-1.0 (`0.x`), minor releases may contain breaking changes.
 
+## [0.7.1] - 2026-09-08
+
+### Added
+
+- `freezebase.settings.S3Settings` reads a profile, an optional endpoint and
+  the two botocore checksum policies from prefixed environment variables
+  (`S3Settings.from_env("MYAPP_S3_")`), and `resolve_path` turns a local path
+  or an `s3://` URI into a `Path` or a configured `UPath`. It replaces the
+  copies of this class downstream packages carried. `pydantic-settings` joins
+  the `s3` extra.
+- `configured_endpoint_url(profile)` performs botocore's own configured
+  endpoint lookup (`AWS_ENDPOINT_URL_S3`, `AWS_ENDPOINT_URL`, the `services`
+  section, the profile's `endpoint_url`, honouring
+  `ignore_configured_endpoint_urls`), cached per profile and cleared by
+  `clear_aws_session_cache`. `resolve_endpoint_url(path)` returns the endpoint
+  a path's requests go to: an `endpoint_url` on the path, else one inside
+  `client_kwargs`, else the configured one — the same precedence s3fs
+  applies.
+- `list_object_sizes(directory, recursive=...)` lists a prefix as
+  `{relative path: size}` from one listing call, on any fsspec filesystem,
+  skipping zero-byte folder-marker keys. A missing prefix lists as empty.
+- `atomic_write_text(path, text)` writes through a renamed sibling on the
+  local filesystem and as one put on an object store.
+- `CONTENT_TYPES` and `content_type_for(path)` give the media type a
+  cloud-native geospatial object should be served as, by suffix.
+- `file_sha256` accepts a `UPath` and streams a remote file in chunks.
+
+### Fixed
+
+- `s3_env` and `subprocess_s3_env` point GDAL at the endpoint the path's AWS
+  configuration sets when the path carries no explicit `endpoint_url`. Before,
+  a path built from a profile whose config section sets `endpoint_url` sent
+  s3fs to that gateway and GDAL to AWS; the same held for `AWS_ENDPOINT_URL`
+  with explicit credentials.
+- `subprocess_s3_env` now hands the child the same GDAL reader configuration
+  `s3_env` applies in-process (`GDAL_DISABLE_READDIR_ON_OPEN=EMPTY_DIR` and the
+  HTTP retry settings). Before, a child process listed the directory of every
+  `/vsis3/` object it opened. Both builders read the new `GDAL_S3_OPTIONS`
+  table, so they cannot drift apart again. An S3 path without a profile or
+  endpoint therefore no longer yields an empty mapping.
+
 ## [0.7.0] - 2026-09-04
 
 ### Added

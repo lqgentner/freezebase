@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any
+from pathlib import Path, PurePosixPath
+from secrets import token_hex
+from typing import TYPE_CHECKING, Any, cast
 
-from botocore.exceptions import ClientError
+from botocore.configprovider import ConfiguredEndpointProvider
+from botocore.exceptions import ClientError, ProfileNotFound
+import botocore.session
 import rasterio
 from rasterio.session import AWSSession
 from s3fs.core import set_custom_error_handler
@@ -15,7 +19,7 @@ from upath import UPath
 from freezebase.download import TRANSIENT_HTTP_STATUS_CODES
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Generator, Mapping
 
 # Transient on CDSE and Ceph gateways.
 TRANSIENT_S3_ERROR_CODES = frozenset(
@@ -31,8 +35,63 @@ GDAL_HTTP_RETRY_CODES = ",".join(str(code) for code in sorted({403, *TRANSIENT_H
 GDAL_HTTP_MAX_RETRY = 5
 GDAL_HTTP_RETRY_DELAY_S = 1
 
+# GDAL configuration every /vsis3/ reader needs, whether it runs in this process
+# (`s3_env`) or in a child (`subprocess_s3_env`). One table so the two cannot
+# drift: a child that lacks GDAL_DISABLE_READDIR_ON_OPEN lists the directory of
+# every object it opens, which is one extra request per source.
+GDAL_S3_OPTIONS: Mapping[str, str] = {
+    "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
+    # /vsis3/ cannot write randomly without a temporary file.
+    "CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE": "YES",
+    "GDAL_HTTP_MAX_RETRY": str(GDAL_HTTP_MAX_RETRY),
+    "GDAL_HTTP_RETRY_DELAY": str(GDAL_HTTP_RETRY_DELAY_S),
+    "GDAL_HTTP_RETRY_CODES": GDAL_HTTP_RETRY_CODES,
+}
+
 # These client kwargs bypass the credentials visible to s3_env.
 CLIENT_CREDENTIAL_KEYS = ("aws_access_key_id", "aws_secret_access_key", "aws_session_token")
+
+DEFAULT_CONTENT_TYPE = "application/octet-stream"
+
+# Content type per suffix, as an object should be served to a browser or a
+# client. A bucket serves what the upload declared, and `mimetypes` knows none
+# of the cloud-native suffixes, so without this a COG downloads instead of
+# opening by range request and a README saves instead of rendering.
+CONTENT_TYPES: Mapping[str, str] = {
+    ".json": "application/json",
+    ".geojson": "application/geo+json",
+    ".md": "text/markdown",
+    ".parquet": "application/vnd.apache.parquet",
+    ".tif": "image/tiff; application=geotiff; profile=cloud-optimized",
+    ".tiff": "image/tiff; application=geotiff; profile=cloud-optimized",
+    ".pmtiles": "application/vnd.pmtiles",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".svg": "image/svg+xml",
+    ".yaml": "application/yaml",
+    ".yml": "application/yaml",
+    ".csv": "text/csv",
+    ".txt": "text/plain",
+    ".html": "text/html",
+}
+
+
+def content_type_for(path: str | Path | UPath) -> str:
+    """Return the content type an object should be served as, by its suffix.
+
+    Parameters
+    ----------
+    path : str, Path, or UPath
+        Object name or path. Only the suffix is read, case-insensitively.
+
+    Returns
+    -------
+    str
+        A media type from :data:`CONTENT_TYPES`, or ``application/octet-stream``
+        for an unlisted suffix rather than a guess.
+    """
+    return CONTENT_TYPES.get(PurePosixPath(str(path)).suffix.lower(), DEFAULT_CONTENT_TYPE)
 
 
 def _retry_transient_s3_errors(exc: Exception) -> bool:
@@ -96,8 +155,9 @@ def aws_session(path: UPath) -> AWSSession:
 
 
 def clear_aws_session_cache() -> None:
-    """Clear cached AWS sessions."""
+    """Clear cached AWS sessions and configured endpoints."""
     _aws_session.cache_clear()
+    configured_endpoint_url.cache_clear()
 
 
 def make_s3_upath(
@@ -203,26 +263,100 @@ def s3_env(path: UPath) -> Generator[None]:
     path : UPath
         S3 path created by :func:`make_s3_upath`.
     """
-    so = path.storage_options
     session = aws_session(path)
 
-    options: dict[str, str] = {
-        "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
-        # /vsis3/ cannot write randomly without a temporary file.
-        "CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE": "YES",
-        "GDAL_HTTP_MAX_RETRY": str(GDAL_HTTP_MAX_RETRY),
-        "GDAL_HTTP_RETRY_DELAY": str(GDAL_HTTP_RETRY_DELAY_S),
-        "GDAL_HTTP_RETRY_CODES": GDAL_HTTP_RETRY_CODES,
-    }
-    if endpoint_url := so.get("endpoint_url"):
-        # GDAL < 3.11 expects the endpoint without a scheme.
-        options["AWS_S3_ENDPOINT"] = endpoint_url.removeprefix("https://").removeprefix("http://")
-        options["AWS_VIRTUAL_HOSTING"] = "FALSE"
-        if endpoint_url.startswith("http://"):
-            options["AWS_HTTPS"] = "NO"
+    options = {**GDAL_S3_OPTIONS, **_endpoint_options(resolve_endpoint_url(path))}
 
     with rasterio.Env(session=session, **options):
         yield
+
+
+@lru_cache(maxsize=32)
+def configured_endpoint_url(profile: str | None = None) -> str | None:
+    """Return the S3 endpoint the AWS configuration sets for a profile, if any.
+
+    The lookup botocore performs when a client is created without an explicit
+    endpoint: ``AWS_ENDPOINT_URL_S3``, then ``AWS_ENDPOINT_URL``, then the
+    ``services`` section and the ``endpoint_url`` key of the profile in the
+    shared config file, all of them ignored when
+    ``AWS_IGNORE_CONFIGURED_ENDPOINT_URLS`` or the profile's
+    ``ignore_configured_endpoint_urls`` says so.
+
+    Reading the configuration files is not free, and :func:`s3_env` runs once
+    per raster opened, so the result is cached per profile alongside
+    :func:`aws_session`. Call :func:`clear_aws_session_cache` after changing
+    the configuration files or the endpoint variables during a process.
+
+    Parameters
+    ----------
+    profile : str, optional
+        Named AWS profile. ``None`` reads the default profile.
+
+    Returns
+    -------
+    str or None
+        The configured endpoint, or ``None`` when nothing sets one or the
+        profile does not exist.
+    """
+    session = botocore.session.Session(profile=profile)
+    try:
+        scoped = session.get_scoped_config()
+    except ProfileNotFound:
+        return None
+    if session.get_config_variable("ignore_configured_endpoint_urls"):
+        return None
+    provider = ConfiguredEndpointProvider(
+        full_config=session.full_config,
+        scoped_config=scoped,
+        client_name="s3",
+    )
+    endpoint = provider.provide()
+    return str(endpoint) if endpoint else None
+
+
+def resolve_endpoint_url(path: UPath) -> str | None:
+    """Return the endpoint an S3 path's requests go to.
+
+    An ``endpoint_url`` in the path's storage options wins, then one inside
+    its ``client_kwargs``, the same precedence s3fs applies. Without either,
+    the path's profile, or the default profile for a path with explicit
+    credentials, is looked up with :func:`configured_endpoint_url`, which is
+    what s3fs's own client resolves to. A profile whose config section
+    carries ``endpoint_url`` therefore points GDAL at the same gateway s3fs
+    already talks to.
+
+    Parameters
+    ----------
+    path : UPath
+        S3 path created by :func:`make_s3_upath`.
+
+    Returns
+    -------
+    str or None
+        The endpoint, or ``None`` for plain AWS.
+    """
+    so = path.storage_options
+    if endpoint_url := so.get("endpoint_url"):
+        return str(endpoint_url)
+    if endpoint_url := (so.get("client_kwargs") or {}).get("endpoint_url"):
+        return str(endpoint_url)
+    profile = so.get("profile")
+    return configured_endpoint_url(str(profile) if profile else None)
+
+
+def _endpoint_options(endpoint_url: object) -> dict[str, str]:
+    """GDAL options that point /vsis3/ at an S3-compatible endpoint, if any."""
+    if not endpoint_url:
+        return {}
+    endpoint = str(endpoint_url)
+    options = {
+        # GDAL < 3.11 expects the endpoint without a scheme.
+        "AWS_S3_ENDPOINT": endpoint.removeprefix("https://").removeprefix("http://"),
+        "AWS_VIRTUAL_HOSTING": "FALSE",
+    }
+    if endpoint.startswith("http://"):
+        options["AWS_HTTPS"] = "NO"
+    return options
 
 
 def subprocess_s3_env(path: UPath) -> dict[str, str]:
@@ -230,7 +364,9 @@ def subprocess_s3_env(path: UPath) -> dict[str, str]:
 
     :func:`s3_env` only configures this process; GDAL in a child instead
     honours ``AWS_PROFILE`` against ``~/.aws/credentials``, so no access key
-    needs to pass through the environment.
+    needs to pass through the environment. The child also receives the same
+    GDAL reader configuration :func:`s3_env` applies, so a subprocess opens a
+    remote object with the same number of requests as the parent would.
 
     Parameters
     ----------
@@ -246,14 +382,95 @@ def subprocess_s3_env(path: UPath) -> dict[str, str]:
     if path.protocol != "s3":
         return {}
     so = path.storage_options
-    env: dict[str, str] = {}
+    env: dict[str, str] = dict(GDAL_S3_OPTIONS)
     if profile := so.get("profile"):
         env["AWS_PROFILE"] = str(profile)
-    if endpoint_url := so.get("endpoint_url"):
-        endpoint = str(endpoint_url)
-        # GDAL < 3.11 expects the endpoint without a scheme, as in s3_env.
-        env["AWS_S3_ENDPOINT"] = endpoint.removeprefix("https://").removeprefix("http://")
-        env["AWS_VIRTUAL_HOSTING"] = "FALSE"
-        if endpoint.startswith("http://"):
-            env["AWS_HTTPS"] = "NO"
+    env.update(_endpoint_options(resolve_endpoint_url(path)))
     return env
+
+
+def list_object_sizes(directory: str | Path | UPath, *, recursive: bool = False) -> dict[str, int]:
+    """List a prefix as ``{relative path: size}`` from one listing call.
+
+    One listing replaces one remote open per object, which is what makes
+    checking tens of thousands of objects affordable. Only the size is taken:
+    an ETag is the MD5 for a single-part upload and something else for a
+    multipart one, so keying on it would constrain how every writer uploads.
+
+    Parameters
+    ----------
+    directory : str, Path, or UPath
+        Prefix to list. Any fsspec-backed path works, including a local one.
+    recursive : bool, default False
+        Include everything below the prefix, keyed by its path relative to the
+        prefix with ``/`` separators. The default lists the prefix's direct
+        entries by name.
+
+    Returns
+    -------
+    dict of str to int
+        Relative path to size in bytes. Empty when the prefix does not exist.
+    """
+    root = UPath(directory)
+    prefix = str(root.path).rstrip("/") + "/"
+    # No existence check first: on S3 that is a HeadObject and a listing of
+    # its own. A missing prefix is the listing's own error, or an empty one.
+    try:
+        if recursive:
+            # `detail=True` makes fsspec return `{path: info}`; its signature
+            # declares only the `detail=False` list, so the mapping is named.
+            found = cast(
+                "dict[str, dict[str, Any]]",
+                root.fs.find(str(root.path), detail=True),
+            )
+            infos = list(found.values())
+        else:
+            infos = cast("list[dict[str, Any]]", root.fs.ls(str(root.path), detail=True))
+    except FileNotFoundError:
+        return {}
+    entries: dict[str, int] = {}
+    for info in infos:
+        if info.get("type") == "directory":
+            continue
+        name = str(info["name"])
+        if not name.startswith(prefix):
+            continue
+        size = int(info.get("size") or info.get("Size") or 0)
+        # A zero-byte "folder marker" key ends in a slash and lists as a file;
+        # a key that ends in a slash but holds bytes is an object.
+        if size == 0 and name.endswith("/"):
+            continue
+        entries[name[len(prefix) :]] = size
+    return entries
+
+
+LOCAL_PROTOCOLS = frozenset({"", "file", "local"})
+"""The fsspec protocols that name the local filesystem."""
+
+
+def atomic_write_text(path: str | Path | UPath, text: str) -> None:
+    """Write a text file so that a reader never sees it half-written.
+
+    On an object store one put is atomic on its own, so the text is written
+    directly. On the local filesystem the text goes to a sibling temporary
+    file that is renamed over the target, and the temporary file is removed
+    if the write fails.
+
+    Parameters
+    ----------
+    path : str, Path, or UPath
+        Destination.
+    text : str
+        Content to write.
+    """
+    target = UPath(path)
+    if target.protocol not in LOCAL_PROTOCOLS:
+        target.write_text(text)
+        return
+    partial = target.with_name(f"{target.name}.{token_hex(8)}.partial")
+    try:
+        partial.write_text(text)
+        partial.replace(target)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise

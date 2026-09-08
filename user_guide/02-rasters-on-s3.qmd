@@ -46,7 +46,8 @@ configuration. The wrapper deliberately supports local and S3 paths; other
 ::: {.callout-note}
 ## Install the S3 extra
 
-The S3 integration requires s3fs, fsspec, and boto3:
+The S3 integration requires s3fs, fsspec, boto3, and pydantic-settings (the
+last for `freezebase.settings`, below):
 
 ```bash
 pip install "freezebase[s3]"
@@ -77,18 +78,61 @@ The profile name—not its credentials—is stored on the path and inherited by
 child paths. s3fs and Rasterio independently load that same profile when they
 access the object store.
 
+The endpoint may also come from the AWS configuration instead of an explicit
+argument. botocore's own lookup—`AWS_ENDPOINT_URL_S3`, then
+`AWS_ENDPOINT_URL`, then the `services` section and the `endpoint_url` key of
+the profile's section in the AWS config file—applies to a path built from the
+profile alone:
+
+```ini
+# ~/.aws/config
+[profile ceph-research]
+region = eu-central-1
+endpoint_url = https://objects.example.org
+```
+
+```python
+ceph_path = make_s3_upath("s3://ceph-bucket/data", profile="ceph-research")
+```
+
+An explicit `endpoint_url` argument wins over all of that, and one set through
+`client_kwargs={"endpoint_url": ...}` wins over the configured value too.
+`resolve_endpoint_url(path)` returns whichever applies, and is what `s3_env`
+and `subprocess_s3_env` point GDAL at.
+
+## Settings from the environment
+
+An application usually takes the profile and endpoint from its own environment
+variables rather than hard-coding them. `S3Settings` reads them under a prefix
+of your choosing and resolves a configured value into a `Path` or a `UPath`:
+
+```python
+from freezebase.settings import S3Settings
+
+# Reads MYAPP_S3_PROFILE, MYAPP_S3_ENDPOINT_URL, and the two
+# MYAPP_S3_*_CHECKSUM_* policies for S3-compatible gateways.
+s3 = S3Settings.from_env("MYAPP_S3_")
+data_dir = s3.resolve_path("s3://my-bucket/data")  # a UPath
+scratch = s3.resolve_path("~/scratch")  # a Path
+```
+
+Only the profile is required for an `s3://` value; the endpoint may come from
+the AWS configuration instead, as above.
+
 Selecting a profile explicitly also makes boto skip its environment-variable
 credential provider. A profiled path is therefore never signed by whatever
 `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` happens to be set in the shell.
 Besides making multiple stores usable in one process, this prevents ambient
 credentials intended for one service from being sent to another.
 
-Resolving a profile means reading the AWS configuration files, so the resulting
-Rasterio session is cached per configuration and reused by every subsequent
-read and write. Refreshable credentials—STS or SSO profiles—still rotate on
-their own. Static credentials are held for the lifetime of the process; if the
-credentials file is rewritten underneath a long-running process, call
-`clear_aws_session_cache()` to force the next access to resolve it again.
+Resolving a profile means reading the AWS configuration files, so the
+resulting Rasterio session and the configured endpoint are each cached per
+profile and reused by every subsequent read and write. Refreshable
+credentials—STS or SSO profiles—still rotate on their own. Static credentials
+and configured endpoints are held for the lifetime of the process; if the
+credentials or config file is rewritten underneath a long-running process,
+call `clear_aws_session_cache()` to force the next access to resolve both
+again.
 
 Explicit credentials and temporary session tokens are also supported. This is
 useful when credentials come from an application-specific secret store rather

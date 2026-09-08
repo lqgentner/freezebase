@@ -83,7 +83,8 @@ rewrite_tiff("in.tif", "out.tif", profile=COG_PROFILE, move=True)  # move
 
 ### The `s3` extra
 
-S3 support needs the optional `s3fs`, `fsspec`, and `boto3` dependencies:
+S3 support needs the optional `s3fs`, `fsspec`, `boto3`, and `pydantic-settings`
+dependencies:
 
 ```bash
 uv add "freezebase[s3]"
