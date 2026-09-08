@@ -15,7 +15,7 @@ from upath import UPath
 from freezebase.download import TRANSIENT_HTTP_STATUS_CODES
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Generator, Mapping
 
 # Transient on CDSE and Ceph gateways.
 TRANSIENT_S3_ERROR_CODES = frozenset(
@@ -30,6 +30,19 @@ S3_RETRY_MODE = "adaptive"
 GDAL_HTTP_RETRY_CODES = ",".join(str(code) for code in sorted({403, *TRANSIENT_HTTP_STATUS_CODES}))
 GDAL_HTTP_MAX_RETRY = 5
 GDAL_HTTP_RETRY_DELAY_S = 1
+
+# GDAL configuration every /vsis3/ reader needs, whether it runs in this process
+# (`s3_env`) or in a child (`subprocess_s3_env`). One table so the two cannot
+# drift: a child that lacks GDAL_DISABLE_READDIR_ON_OPEN lists the directory of
+# every object it opens, which is one extra request per source.
+GDAL_S3_OPTIONS: Mapping[str, str] = {
+    "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
+    # /vsis3/ cannot write randomly without a temporary file.
+    "CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE": "YES",
+    "GDAL_HTTP_MAX_RETRY": str(GDAL_HTTP_MAX_RETRY),
+    "GDAL_HTTP_RETRY_DELAY": str(GDAL_HTTP_RETRY_DELAY_S),
+    "GDAL_HTTP_RETRY_CODES": GDAL_HTTP_RETRY_CODES,
+}
 
 # These client kwargs bypass the credentials visible to s3_env.
 CLIENT_CREDENTIAL_KEYS = ("aws_access_key_id", "aws_secret_access_key", "aws_session_token")
@@ -206,23 +219,25 @@ def s3_env(path: UPath) -> Generator[None]:
     so = path.storage_options
     session = aws_session(path)
 
-    options: dict[str, str] = {
-        "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
-        # /vsis3/ cannot write randomly without a temporary file.
-        "CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE": "YES",
-        "GDAL_HTTP_MAX_RETRY": str(GDAL_HTTP_MAX_RETRY),
-        "GDAL_HTTP_RETRY_DELAY": str(GDAL_HTTP_RETRY_DELAY_S),
-        "GDAL_HTTP_RETRY_CODES": GDAL_HTTP_RETRY_CODES,
-    }
-    if endpoint_url := so.get("endpoint_url"):
-        # GDAL < 3.11 expects the endpoint without a scheme.
-        options["AWS_S3_ENDPOINT"] = endpoint_url.removeprefix("https://").removeprefix("http://")
-        options["AWS_VIRTUAL_HOSTING"] = "FALSE"
-        if endpoint_url.startswith("http://"):
-            options["AWS_HTTPS"] = "NO"
+    options = {**GDAL_S3_OPTIONS, **_endpoint_options(so.get("endpoint_url"))}
 
     with rasterio.Env(session=session, **options):
         yield
+
+
+def _endpoint_options(endpoint_url: object) -> dict[str, str]:
+    """GDAL options that point /vsis3/ at an S3-compatible endpoint, if any."""
+    if not endpoint_url:
+        return {}
+    endpoint = str(endpoint_url)
+    options = {
+        # GDAL < 3.11 expects the endpoint without a scheme.
+        "AWS_S3_ENDPOINT": endpoint.removeprefix("https://").removeprefix("http://"),
+        "AWS_VIRTUAL_HOSTING": "FALSE",
+    }
+    if endpoint.startswith("http://"):
+        options["AWS_HTTPS"] = "NO"
+    return options
 
 
 def subprocess_s3_env(path: UPath) -> dict[str, str]:
@@ -230,7 +245,9 @@ def subprocess_s3_env(path: UPath) -> dict[str, str]:
 
     :func:`s3_env` only configures this process; GDAL in a child instead
     honours ``AWS_PROFILE`` against ``~/.aws/credentials``, so no access key
-    needs to pass through the environment.
+    needs to pass through the environment. The child also receives the same
+    GDAL reader configuration :func:`s3_env` applies, so a subprocess opens a
+    remote object with the same number of requests as the parent would.
 
     Parameters
     ----------
@@ -246,14 +263,8 @@ def subprocess_s3_env(path: UPath) -> dict[str, str]:
     if path.protocol != "s3":
         return {}
     so = path.storage_options
-    env: dict[str, str] = {}
+    env: dict[str, str] = dict(GDAL_S3_OPTIONS)
     if profile := so.get("profile"):
         env["AWS_PROFILE"] = str(profile)
-    if endpoint_url := so.get("endpoint_url"):
-        endpoint = str(endpoint_url)
-        # GDAL < 3.11 expects the endpoint without a scheme, as in s3_env.
-        env["AWS_S3_ENDPOINT"] = endpoint.removeprefix("https://").removeprefix("http://")
-        env["AWS_VIRTUAL_HOSTING"] = "FALSE"
-        if endpoint.startswith("http://"):
-            env["AWS_HTTPS"] = "NO"
+    env.update(_endpoint_options(so.get("endpoint_url")))
     return env

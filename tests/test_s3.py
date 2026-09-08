@@ -16,6 +16,9 @@ from rasterio.env import getenv
 from upath import UPath
 
 from freezebase.s3 import (
+    GDAL_HTTP_MAX_RETRY,
+    GDAL_HTTP_RETRY_CODES,
+    GDAL_S3_OPTIONS,
     TRANSIENT_S3_ERROR_CODES,
     _retry_transient_s3_errors,
     aws_session,
@@ -281,7 +284,17 @@ class TestSubprocessS3Env:
 
     def test_profile_only(self) -> None:
         p = make_s3_upath("s3://b/k", profile="research")
-        assert subprocess_s3_env(p) == {"AWS_PROFILE": "research"}
+        assert subprocess_s3_env(p) == {**GDAL_S3_OPTIONS, "AWS_PROFILE": "research"}
+
+    def test_child_gets_the_reader_options_s3_env_applies(self) -> None:
+        # Previously the child listed the directory of every object it opened:
+        # GDAL_DISABLE_READDIR_ON_OPEN reached the parent's rasterio.Env only.
+        p = make_s3_upath("s3://b/k", profile="research")
+        env = subprocess_s3_env(p)
+        assert env["GDAL_DISABLE_READDIR_ON_OPEN"] == "EMPTY_DIR"
+        assert env["GDAL_HTTP_MAX_RETRY"] == str(GDAL_HTTP_MAX_RETRY)
+        assert env["GDAL_HTTP_RETRY_CODES"] == GDAL_HTTP_RETRY_CODES
+        assert GDAL_S3_OPTIONS.items() <= env.items()
 
     def test_https_endpoint_options(self) -> None:
         p = make_s3_upath("s3://b/k", key="a", secret="b", endpoint_url="https://ceph.example.org")
@@ -303,9 +316,11 @@ class TestSubprocessS3Env:
         assert env["AWS_PROFILE"] == "research"
         assert env["AWS_S3_ENDPOINT"] == "ceph.example.org"
 
-    def test_no_profile_or_endpoint_yields_empty_mapping(self) -> None:
+    def test_explicit_credentials_never_reach_the_child(self) -> None:
         p = make_s3_upath("s3://b/k", key="a", secret="b")
-        assert subprocess_s3_env(p) == {}
+        env = subprocess_s3_env(p)
+        assert env == dict(GDAL_S3_OPTIONS)
+        assert not any(name.startswith("AWS_") for name in env)
 
 
 @pytest.fixture

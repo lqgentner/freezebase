@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the project is pre-1.0 (`0.x`), minor releases may contain breaking changes.
 
+## Unreleased
+
+### Fixed
+
+- `subprocess_s3_env` now hands the child the same GDAL reader configuration
+  `s3_env` applies in-process (`GDAL_DISABLE_READDIR_ON_OPEN=EMPTY_DIR` and the
+  HTTP retry settings). Before, a child process listed the directory of every
+  `/vsis3/` object it opened. Both builders read the new `GDAL_S3_OPTIONS`
+  table, so they cannot drift apart again. An S3 path without a profile or
+  endpoint therefore no longer yields an empty mapping.
+
 ## [0.7.0] - 2026-09-04
 
 ### Added
