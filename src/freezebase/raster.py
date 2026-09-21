@@ -7,6 +7,7 @@ import hashlib
 import logging
 from pathlib import Path
 from secrets import token_hex
+import tempfile
 from typing import TYPE_CHECKING, Any, Literal, overload
 
 from pyproj import CRS
@@ -17,6 +18,8 @@ from rasterio.io import MemoryFile
 from rasterio.merge import merge
 import rasterio.shutil
 from upath import UPath
+
+from freezebase.utils import file_sha256
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Mapping, Sequence
@@ -117,6 +120,14 @@ def _to_vsi_uri(path: AnyPath) -> str:
             raise ValueError(msg)
 
 
+def _upload(src: bytes | Path, dst: UPath) -> None:
+    """Upload an encoded raster to S3; GDAL never writes to ``/vsis3/`` itself."""
+    # Lazy import: keeps botocore/s3fs (the `[s3]` extra) out of the base import.
+    from freezebase.s3 import upload_object  # noqa: PLC0415
+
+    upload_object(src, dst)
+
+
 @contextmanager
 def _rasterio_open(
     path: AnyPath,
@@ -125,8 +136,29 @@ def _rasterio_open(
 ) -> Generator[DatasetReader | DatasetWriter]:
     """Yield a dataset in the appropriate rasterio environment."""
     path = UPath(path)
+    if mode != "r" and path.protocol == "s3":
+        with _staged_s3_open(path, mode, **kwargs) as dataset:
+            yield dataset
+        return
     with _env_for_path(path), rasterio.open(str(path), mode, **kwargs) as dataset:
         yield dataset
+
+
+@contextmanager
+def _staged_s3_open(
+    path: UPath,
+    mode: Literal["r+", "w", "w+"],
+    **kwargs: Any,
+) -> Generator[DatasetWriter]:
+    """Open a local copy of an S3 raster, uploaded once the dataset closes cleanly."""
+    with tempfile.TemporaryDirectory(prefix="freezebase-") as tmp:
+        local = Path(tmp) / path.name
+        if mode == "r+":
+            path.fs.get_file(str(path.path), str(local))
+        # The S3 environment serves any remote source the local copy references.
+        with _env_for_path(path), rasterio.open(local, mode, **kwargs) as dataset:
+            yield dataset
+        _upload(local, path)
 
 
 @overload
@@ -147,6 +179,9 @@ def rasterio_open(
     **kwargs: Any,
 ) -> AbstractContextManager[DatasetReader | DatasetWriter]:
     """Open a local or S3-backed rasterio dataset.
+
+    On S3, a write mode opens a local copy that is uploaded once the dataset
+    closes without an error; ``"r+"`` downloads the object first.
 
     Parameters
     ----------
@@ -488,20 +523,26 @@ def merge_tiffs(
         band_names = None
 
     dst_profile = build_rasterio_profile(src_profile, profile)
-
-    # Use an S3 operand to configure credentials when needed.
-    env_path: AnyPath = dst_file if dst_file.protocol == "s3" else src_paths[0]
+    is_s3 = dst_file.protocol == "s3"
 
     try:
-        with _env_for_path(env_path):
-            merge(
-                [str(p) for p in src_paths],
-                method=method,
-                mem_limit=mem_limit_mb,
-                dst_path=str(dst_file),
-                dst_kwds=dst_profile,
-            )
-            _inject_band_metadata(dst_file, band_names=band_names)
+        with tempfile.TemporaryDirectory(prefix="freezebase-") as tmp:
+            # An S3 destination is merged locally and uploaded whole.
+            local_dst = Path(tmp) / dst_file.name
+            work_dst: AnyPath = local_dst if is_s3 else dst_file
+            # Credentials come from an S3 source, if any; the destination is local here.
+            env_path = next((p for p in src_paths if p.protocol == "s3"), src_paths[0])
+            with _env_for_path(env_path):
+                merge(
+                    [str(p) for p in src_paths],
+                    method=method,
+                    mem_limit=mem_limit_mb,
+                    dst_path=str(work_dst),
+                    dst_kwds=dst_profile,
+                )
+            _inject_band_metadata(work_dst, band_names=band_names)
+            if is_s3:
+                _upload(local_dst, dst_file)
     except Exception as e:
         msg = f"Failed to merge GeoTIFFs: {e}"
         raise RuntimeError(msg) from e
@@ -601,7 +642,7 @@ def _rewrite_via_memory(
     band_tags: Sequence[Mapping[str, str]] | None,
     units: list[str] | None,
 ) -> None:
-    """Stage in memory, then atomically write the S3 destination."""
+    """Stage in memory, encode to a temporary file, then upload it in one put."""
     with MemoryFile() as memfile:
         with _env_for_path(src_file):
             rasterio.shutil.copy(_to_vsi_uri(src_file), memfile.name, driver="GTiff")
@@ -613,8 +654,12 @@ def _rewrite_via_memory(
             band_tags=band_tags,
             units=units,
         )
-        with _env_for_path(dst_file):
-            rasterio.shutil.copy(memfile.name, _to_vsi_uri(dst_file), driver=driver, **dst_profile)
+        # Encoded to disk, not a second MemoryFile: a large product would
+        # otherwise sit in memory twice more (the encode and its bytes copy).
+        with tempfile.TemporaryDirectory(prefix="freezebase-") as tmp:
+            encoded = Path(tmp) / dst_file.name
+            rasterio.shutil.copy(memfile.name, str(encoded), driver=driver, **dst_profile)
+            _upload(encoded, dst_file)
 
 
 def _rewrite_via_tempfile(
@@ -761,7 +806,7 @@ def write_cog(
     dst_file = UPath(dst_file)
     # S3 PutObject is atomic; local writes use an atomic rename.
     is_s3 = dst_file.protocol == "s3"
-    work_dst = dst_file if is_s3 else dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.tmp")
+    work_dst = dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.tmp")
 
     mem_profile = build_rasterio_profile(profile)
     mem_profile.pop("driver", None)
@@ -796,17 +841,24 @@ def write_cog(
                     units=units,
                 )
 
-            if checksum:
-                # /vsis3/ streams straight to the destination without holding
-                # the bytes, so buffer into a second MemoryFile to hash them.
+            if is_s3:
+                # Encoded to a temporary file and uploaded in one put, never
+                # through /vsis3/; hashed from that file, the bytes that go up.
+                with tempfile.TemporaryDirectory(prefix="freezebase-") as tmp:
+                    encoded = Path(tmp) / dst_file.name
+                    rasterio.shutil.copy(memfile.name, str(encoded), **cog_profile)
+                    if checksum:
+                        digest = _SHA256_MULTIHASH_PREFIX + file_sha256(encoded)
+                    _upload(encoded, dst_file)
+            elif checksum:
+                # Hash the encoded bytes before they are renamed into place.
                 with MemoryFile() as cog_memfile:
                     rasterio.shutil.copy(memfile.name, cog_memfile.name, **cog_profile)
                     buf = bytes(cog_memfile.getbuffer())
                 digest = _SHA256_MULTIHASH_PREFIX + hashlib.sha256(buf).hexdigest()
                 work_dst.write_bytes(buf)
             else:
-                with _env_for_path(dst_file):
-                    rasterio.shutil.copy(memfile.name, _to_vsi_uri(work_dst), **cog_profile)
+                rasterio.shutil.copy(memfile.name, _to_vsi_uri(work_dst), **cog_profile)
 
         if not is_s3:
             work_dst.replace(dst_file)

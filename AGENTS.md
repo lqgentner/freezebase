@@ -31,12 +31,12 @@ checks after fixes. Add or update tests for behavior changes; bug fixes should i
 regression test.
 
 Unit tests are offline. Tests marked `integration` need a live S3-compatible service and are
-skipped unless `FREEZEBASE_TEST_S3_*` is set:
+skipped unless `FREEZEBASE_TEST_S3_*` is set. CI uses [RustFS](https://github.com/rustfs/rustfs):
 
 ```bash
-docker run -d --name minio -p 9000:9000 \
-  -e MINIO_ROOT_USER=testkey -e MINIO_ROOT_PASSWORD=testsecret \
-  minio/minio server /data
+docker run -d --name rustfs -p 9000:9000 \
+  -e RUSTFS_ACCESS_KEY=testkey -e RUSTFS_SECRET_KEY=testsecret \
+  rustfs/rustfs:1.0.0 /data
 
 FREEZEBASE_TEST_S3_ENDPOINT=http://localhost:9000 \
 FREEZEBASE_TEST_S3_KEY=testkey \

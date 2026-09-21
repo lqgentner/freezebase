@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the project is pre-1.0 (`0.x`), minor releases may contain breaking changes.
 
+## [0.8.0] - 2026-09-21
+
+### Added
+
+- `upload_object(src, dst)` uploads bytes or a local file to an object store,
+  using `content_type_for` on S3. It reads back the stored size and raises
+  `OSError` on mismatch. Refused uploads retain their exception class and
+  `errno`.
+
+### Changed
+
+- S3 integration tests now use RustFS 1.0.0 instead of MinIO, which is archived
+  and whose Docker Hub image is gone.
+
+### Fixed
+
+- `write_cog`, `rewrite_tiff`, `merge_tiffs`, `create_warped_vrt` and
+  `rasterio_open` in write modes no longer write through GDAL's `/vsis3/`.
+  A gateway rejected GDAL's unsigned `Content-Type` with `403 AccessDenied`;
+  GDAL warned without raising, so writes silently stored nothing. Uploads now
+  use s3fs, which signs the headers and raises on refusal. `atomic_write_text`
+  and the VRT XML writers use the same upload path on S3.
+- `rasterio_open` in S3 write modes (`"w"`, `"w+"`, `"r+"`) stages a local copy
+  and uploads it on clean close. A failed write leaves the object untouched.
+
 ## [0.7.1] - 2026-09-08
 
 ### Added

@@ -7,13 +7,14 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from xml.etree import ElementTree as ET
 
 from rasterio.enums import Resampling
+from rasterio.io import MemoryFile
 import rasterio.shutil
 from rasterio.transform import Affine
 from rasterio.vrt import WarpedVRT
 from rasterio.warp import transform_bounds
 from upath import UPath
 
-from freezebase.raster import _env_for_path, _to_vsi_uri, rasterio_open
+from freezebase.raster import _to_vsi_uri, _upload, rasterio_open
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -72,7 +73,11 @@ def _write_vrt(root: ET.Element, dst: AnyPath) -> None:
     """Serialize a VRT element tree."""
     ET.indent(root)
     xml = ET.tostring(root, encoding="unicode")
-    UPath(dst).write_text(xml)
+    dst = UPath(dst)
+    if dst.protocol == "s3":
+        _upload(xml.encode(), dst)
+    else:
+        dst.write_text(xml)
 
 
 def _source_ref(src: AnyPath, dst_vrt: AnyPath) -> tuple[str, str]:
@@ -546,11 +551,16 @@ def create_warped_vrt(
                 resampling=resampling,
                 **extra,
             ) as vrt,
-            # The source is already open; only the write needs its own env.
-            _env_for_path(output_vrt),
         ):
-            # Written with the source as an absolute path, so it reopens anywhere.
-            rasterio.shutil.copy(vrt, _to_vsi_uri(output_vrt), driver="VRT")
+            if output_vrt.protocol != "s3":
+                # Written with the source as an absolute path, so it reopens anywhere.
+                rasterio.shutil.copy(vrt, _to_vsi_uri(output_vrt), driver="VRT")
+                return
+            # An S3 VRT is serialized in memory and uploaded whole.
+            with MemoryFile(ext=".vrt") as memfile:
+                rasterio.shutil.copy(vrt, memfile.name, driver="VRT")
+                xml = bytes(memfile.getbuffer())
+    _upload(xml, output_vrt)
 
 
 def _snap_out(

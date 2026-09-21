@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -15,6 +16,7 @@ from botocore.exceptions import ClientError
 from rasterio.env import getenv
 from upath import UPath
 
+from freezebase import s3
 from freezebase.s3 import (
     CONTENT_TYPES,
     DEFAULT_CONTENT_TYPE,
@@ -33,10 +35,11 @@ from freezebase.s3 import (
     resolve_endpoint_url,
     s3_env,
     subprocess_s3_env,
+    upload_object,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Callable, Generator
     from pathlib import Path
 
 
@@ -691,18 +694,17 @@ class TestAtomicWriteText:
         assert target.read_text() == "{}"
         assert [p.name for p in target.parent.iterdir()] == ["state.json"]
 
-    def test_s3_is_one_put(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        written: dict[str, str] = {}
+    def test_s3_is_one_verified_upload(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        written: dict[str, bytes] = {}
         p = make_s3_upath("s3://b/state.json", profile="research")
 
-        def record(self: UPath, text: str, **kwargs: object) -> int:
-            del kwargs
-            written[str(self)] = text
-            return len(text)
+        def record(src: bytes | Path, dst: UPath) -> None:
+            assert isinstance(src, bytes)
+            written[str(dst)] = src
 
-        monkeypatch.setattr(type(p), "write_text", record)
+        monkeypatch.setattr(s3, "upload_object", record)
         atomic_write_text(p, "{}")
-        assert written == {"s3://b/state.json": "{}"}
+        assert written == {"s3://b/state.json": b"{}"}
 
 
 class TestContentTypeFor:
@@ -726,3 +728,75 @@ class TestContentTypeFor:
     def test_accepts_paths(self, tmp_path: Path) -> None:
         assert content_type_for(tmp_path / "x.png") == "image/png"
         assert content_type_for(UPath("s3://b/x.parquet")) == CONTENT_TYPES[".parquet"]
+
+
+def _info(size: int) -> Callable[..., dict[str, int]]:
+    """Stand in for ``fs.info`` reporting an object of ``size`` bytes."""
+
+    def info(*_args: object, **_kwargs: object) -> dict[str, int]:
+        return {"size": size}
+
+    return info
+
+
+class TestUploadObject:
+    def test_uploads_bytes_and_a_local_file(self, tmp_path: Path) -> None:
+        root = UPath("memory://upload-object")
+        upload_object(b"abc", root / "a.bin")
+        local = tmp_path / "b.bin"
+        local.write_bytes(b"defg")
+        upload_object(local, root / "b.bin")
+        assert (root / "a.bin").read_bytes() == b"abc"
+        assert (root / "b.bin").read_bytes() == b"defg"
+
+    def test_rejects_a_local_destination(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="is local"):
+            upload_object(b"abc", tmp_path / "a.bin")
+
+    def test_a_short_stored_object_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        target = UPath("memory://upload-object/short.bin")
+        monkeypatch.setattr(target.fs, "info", _info(1))
+        with pytest.raises(OSError, match="stored 1 bytes, expected 3"):
+            upload_object(b"abc", target)
+
+    def test_s3_signs_the_content_type_through_s3fs(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = make_s3_upath("s3://b/k/x.tif", key="a", secret="b")
+        calls: list[tuple[str, dict[str, Any]]] = []
+
+        def pipe_file(path: str, data: bytes, **kwargs: Any) -> None:
+            calls.append((path, kwargs))
+            assert data == b"abc"
+
+        monkeypatch.setattr(target.fs, "pipe_file", pipe_file)
+        monkeypatch.setattr(target.fs, "info", _info(3))
+        upload_object(b"abc", target)
+        assert calls == [("b/k/x.tif", {"ContentType": CONTENT_TYPES[".tif"]})]
+
+    def test_a_refused_put_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        target = make_s3_upath("s3://b/k/x.tif", key="a", secret="b")
+
+        def refuse(*_args: object, **_kwargs: object) -> None:
+            # What s3fs raises for a Ceph 403 with an empty <Message>.
+            error = {"Error": {"Code": "AccessDenied", "Message": ""}}
+            raise PermissionError(None) from ClientError(error, "PutObject")
+
+        monkeypatch.setattr(target.fs, "pipe_file", refuse)
+        with pytest.raises(
+            PermissionError, match=r"Upload of 's3://b/k/x.tif' failed: .*AccessDenied"
+        ):
+            upload_object(b"abc", target)
+
+    def test_a_throttled_put_keeps_its_errno(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        target = make_s3_upath("s3://b/k/x.tif", key="a", secret="b")
+
+        def throttle(*_args: object, **_kwargs: object) -> None:
+            # s3fs translates SlowDown into EBUSY; retry logic keys on the errno.
+            raise OSError(errno.EBUSY, "SlowDown")
+
+        monkeypatch.setattr(target.fs, "pipe_file", throttle)
+        with pytest.raises(OSError, match="SlowDown") as info:
+            upload_object(b"abc", target)
+        assert info.value.errno == errno.EBUSY
