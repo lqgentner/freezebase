@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the project is pre-1.0 (`0.x`), minor releases may contain breaking changes.
 
+## [Unreleased]
+
+### Fixed
+
+- S3 writes no longer go through GDAL's `/vsis3/`. A gateway that refuses
+  GDAL's unsigned `Content-Type` header answered every upload with
+  `403 AccessDenied`, and GDAL reported that as a warning, so `write_cog`,
+  `rewrite_tiff`, `merge_tiffs`, `create_warped_vrt` and `rasterio_open` in a
+  write mode returned normally while nothing was stored. Rasters are now encoded
+  in memory or in a local temporary file and uploaded in one s3fs put, which
+  signs every header and raises when the store refuses it.
+  `rasterio_open(path, "w" | "w+" | "r+")` on S3 works on a local copy that is
+  uploaded when the dataset closes cleanly. A failed write leaves the object as
+  it was.
+- `atomic_write_text` and the VRT XML writers upload through the same path on S3.
+
+### Added
+
+- `upload_object(src, dst)` uploads bytes or a local file to an object store,
+  declares the content type from `content_type_for` on S3, and reads the stored
+  size back, raising `OSError` when it differs from what was sent.
+
 ## [0.7.1] - 2026-09-08
 
 ### Added

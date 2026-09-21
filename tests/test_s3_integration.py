@@ -33,11 +33,13 @@ if TYPE_CHECKING:
 
 from freezebase.raster import (
     COG_PROFILE,
+    merge_tiffs,
     rasterio_open,
     rewrite_tiff,
     write_cog,
 )
 from freezebase.s3 import (
+    CONTENT_TYPES,
     atomic_write_text,
     clear_aws_session_cache,
     configured_endpoint_url,
@@ -211,6 +213,58 @@ class TestCreateWarpedVrtS3:
         assert s3_key.exists()
         with rasterio_open(s3_key) as ds:
             assert ds.crs.to_epsg() == 3857
+
+
+class TestUploadsThroughS3fs:
+    """Every raster write lands as one s3fs put carrying a declared content type."""
+
+    def test_written_cog_declares_its_content_type(self, s3_key: UPath) -> None:
+        write_cog(np.ones((HEIGHT, WIDTH), np.float32), s3_key, _RASTER_PROFILE)
+
+        s3_key.fs.invalidate_cache(str(s3_key.path))
+        assert s3_key.fs.info(str(s3_key.path))["ContentType"] == CONTENT_TYPES[".tif"]
+
+    def test_update_in_place(self, s3_key: UPath) -> None:
+        write_cog(np.ones((HEIGHT, WIDTH), np.float32), s3_key, _RASTER_PROFILE)
+
+        with rasterio_open(s3_key, "r+", IGNORE_COG_LAYOUT_BREAK="YES") as ds:
+            ds.update_tags(EDITED="yes")
+
+        with rasterio_open(s3_key) as ds:
+            assert ds.tags()["EDITED"] == "yes"
+
+    def test_merge_to_s3(self, tmp_path: Path, s3_key: UPath) -> None:
+        left, right = tmp_path / "left.tif", tmp_path / "right.tif"
+        write_cog(np.ones((HEIGHT, WIDTH), np.float32), left, _RASTER_PROFILE, band_names=["VV"])
+        shifted = _RASTER_PROFILE | {
+            "transform": from_origin(500000 + WIDTH * 10, 5200000, 10, 10)
+        }
+        write_cog(np.ones((HEIGHT, WIDTH), np.float32), right, shifted, band_names=["VV"])
+
+        merge_tiffs([left, right], s3_key)
+
+        with rasterio_open(s3_key) as ds:
+            assert ds.width == 2 * WIDTH
+            assert ds.descriptions == ("VV",)
+
+    def test_merge_a_local_and_an_s3_source(
+        self,
+        tmp_path: Path,
+        s3_key: UPath,
+        s3_key2: UPath,
+    ) -> None:
+        # The merge reads the S3 source with that source's credentials.
+        left = tmp_path / "left.tif"
+        write_cog(np.ones((HEIGHT, WIDTH), np.float32), left, _RASTER_PROFILE)
+        shifted = _RASTER_PROFILE | {
+            "transform": from_origin(500000 + WIDTH * 10, 5200000, 10, 10)
+        }
+        write_cog(np.ones((HEIGHT, WIDTH), np.float32), s3_key, shifted)
+
+        merge_tiffs([left, s3_key], s3_key2)
+
+        with rasterio_open(s3_key2) as ds:
+            assert ds.width == 2 * WIDTH
 
 
 class TestListingsCache:

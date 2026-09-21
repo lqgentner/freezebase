@@ -447,6 +447,9 @@ def list_object_sizes(directory: str | Path | UPath, *, recursive: bool = False)
 LOCAL_PROTOCOLS = frozenset({"", "file", "local"})
 """The fsspec protocols that name the local filesystem."""
 
+S3_PROTOCOLS = frozenset({"s3", "s3a"})
+"""The fsspec protocols served by s3fs."""
+
 
 def atomic_write_text(path: str | Path | UPath, text: str) -> None:
     """Write a text file so that a reader never sees it half-written.
@@ -465,7 +468,7 @@ def atomic_write_text(path: str | Path | UPath, text: str) -> None:
     """
     target = UPath(path)
     if target.protocol not in LOCAL_PROTOCOLS:
-        target.write_text(text)
+        upload_object(text.encode(), target)
         return
     partial = target.with_name(f"{target.name}.{token_hex(8)}.partial")
     try:
@@ -474,3 +477,60 @@ def atomic_write_text(path: str | Path | UPath, text: str) -> None:
     except BaseException:
         partial.unlink(missing_ok=True)
         raise
+
+
+def upload_object(src: bytes | Path, dst: str | Path | UPath) -> None:
+    """Upload bytes or a local file to an object store and confirm it arrived.
+
+    Every object freezebase writes to a store goes through here rather than
+    through GDAL's ``/vsis3/``: GDAL does not sign the ``Content-Type`` header
+    it sends, which a gateway may reject, and it reports a failed upload as a
+    warning rather than an error. s3fs signs every header and raises on a
+    refused request, and the stored size is read back so an upload that was
+    accepted but not kept fails too.
+
+    Parameters
+    ----------
+    src : bytes or Path
+        Content, or a local file to upload.
+    dst : str, Path, or UPath
+        Destination object. On S3 its content type comes from
+        :func:`content_type_for`.
+
+    Raises
+    ------
+    ValueError
+        If ``dst`` is on the local filesystem.
+    OSError
+        If the store refuses the upload, naming the store's error, or if the
+        stored object does not have the size that was uploaded. A refusal keeps
+        the subclass s3fs raised, e.g. ``PermissionError`` for ``AccessDenied``.
+    """
+    target = UPath(dst)
+    if target.protocol in LOCAL_PROTOCOLS:
+        msg = f"upload_object writes to an object store; '{target}' is local."
+        raise ValueError(msg)
+    fs = target.fs
+    key = str(target.path)
+    # ContentType is the s3fs spelling; other fsspec stores name it differently.
+    extra = {"ContentType": content_type_for(target)} if target.protocol in S3_PROTOCOLS else {}
+    size = len(src) if isinstance(src, bytes) else Path(src).stat().st_size
+    try:
+        if isinstance(src, bytes):
+            fs.pipe_file(key, src, **extra)
+        else:
+            fs.put_file(str(src), key, **extra)
+    except OSError as e:
+        # s3fs keeps the store's error code only on the cause; a gateway that
+        # sends an empty message would otherwise surface as e.g. "None". The
+        # errno stays, so retry logic keyed on it (EBUSY for SlowDown) still works.
+        msg = f"Upload of '{target}' failed: {e.__cause__ or e}"
+        raise (type(e)(e.errno, msg) if e.errno is not None else type(e)(msg)) from e
+    # Ask the store itself: a listing cached before the put, or repopulated by a
+    # concurrent one, would report the old size.
+    fs.invalidate_cache(key)
+    info = fs.info(key, refresh=True) if target.protocol in S3_PROTOCOLS else fs.info(key)
+    stored = int(info["size"])
+    if stored != size:
+        msg = f"Upload of '{target}' stored {stored} bytes, expected {size}."
+        raise OSError(msg)

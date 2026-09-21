@@ -233,6 +233,12 @@ destination = make_s3_upath(f"s3://my-bucket/dem/{square.mgrs_code}.tif")
 write_cog(data, destination, profile, band_names=["elevation"])
 ```
 
+GDAL only encodes: the raster is written to memory or a local temporary file
+and uploaded to S3 in one s3fs put, which declares its content type and raises
+if the store refuses it. The stored size is read back, so an upload that was
+accepted but not kept fails too. `rasterio_open()` in a write mode on S3 works
+on a local copy that is uploaded when the dataset closes without an error.
+
 `rewrite_tiff()` handles existing files. It can recompress or retile them and
 copy between local storage and S3. Source and destination credentials are
 resolved independently, so two S3 paths may refer to different stores:

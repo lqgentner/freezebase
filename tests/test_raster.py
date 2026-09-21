@@ -11,9 +11,11 @@ from pyproj import CRS
 import pytest
 import rasterio
 from rasterio.enums import ColorInterp
+import rasterio.shutil
 from rasterio.transform import from_origin
 from upath import UPath
 
+from freezebase import raster, vrt
 from freezebase.raster import (
     COG_PROFILE,
     RASTERIO_PROFILE_DEFAULTS,
@@ -25,10 +27,12 @@ from freezebase.raster import (
     get_utm_zone_string,
     group_tiffs_by_crs,
     merge_tiffs,
+    rasterio_open,
     rewrite_tiff,
     utm_zone_to_crs,
     write_cog,
 )
+from freezebase.vrt import create_decibel_vrt, create_warped_vrt
 
 WIDTH, HEIGHT = 8, 6
 
@@ -704,7 +708,11 @@ class TestMetadataInjection:
         assert not dst.exists()
         assert sorted(p.name for p in tmp_path.iterdir()) == ["src.tif"]
 
-    def test_memory_stage_retains_tags_units_and_cog_layout(self, tmp_path: Path) -> None:
+    def test_memory_stage_retains_tags_units_and_cog_layout(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         # The S3 destination path, exercised locally: the metadata goes into the
         # in-memory GTiff and the COG driver writes the layout around it.
         src = tmp_path / "src.tif"
@@ -712,9 +720,15 @@ class TestMetadataInjection:
         make_tiff(src)
         dst_profile = {k: v for k, v in COG_PROFILE.items() if k != "driver"}
 
+        # The upload is the only S3-specific step; land its bytes locally.
+        def land(src: bytes | Path, _dst: UPath) -> None:
+            dst.write_bytes(src if isinstance(src, bytes) else src.read_bytes())
+
+        monkeypatch.setattr(raster, "_upload", land)
+
         _rewrite_via_memory(
             UPath(src),
-            UPath(dst),
+            UPath("s3://bucket/dst.tif"),
             driver="COG",
             dst_profile=dst_profile,
             band_names=None,
@@ -864,3 +878,168 @@ class TestCogCreationOptions:
             structure = out.tags(ns="IMAGE_STRUCTURE")
         assert structure["COMPRESSION"] == "ZSTD"
         assert structure["PREDICTOR"] == "3"
+
+
+_S3_PREFIXES = ("/vsis3/", "s3://")
+
+
+@pytest.fixture
+def s3_uploads(monkeypatch: pytest.MonkeyPatch) -> dict[str, bytes]:
+    """Record every S3 upload, and fail any write GDAL makes to S3 itself.
+
+    GDAL's own S3 writes are what lost data silently: a gateway refused the
+    unsigned Content-Type header, and the failure never reached Python. So the
+    route is asserted, not just the result.
+    """
+    uploads: dict[str, bytes] = {}
+
+    def record(src: bytes | Path, dst: UPath) -> None:
+        uploads[str(dst)] = src if isinstance(src, bytes) else Path(src).read_bytes()
+
+    real_copy = rasterio.shutil.copy
+    real_open = rasterio.open
+
+    def guarded_copy(src: Any, dst: Any, *args: Any, **kwargs: Any) -> Any:
+        assert not str(dst).startswith(_S3_PREFIXES), f"GDAL wrote to {dst}"
+        return real_copy(src, dst, *args, **kwargs)
+
+    def guarded_open(fp: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        assert mode == "r" or not str(fp).startswith(_S3_PREFIXES), f"GDAL opened {fp} as {mode}"
+        return real_open(fp, mode, *args, **kwargs)
+
+    monkeypatch.setattr(raster, "_upload", record)
+    monkeypatch.setattr(vrt, "_upload", record)
+    monkeypatch.setattr(rasterio.shutil, "copy", guarded_copy)
+    monkeypatch.setattr(rasterio, "open", guarded_open)
+    return uploads
+
+
+def _landed(uploads: dict[str, bytes], key: str, tmp_path: Path) -> Path:
+    """Write an uploaded object's bytes to a local file to inspect it."""
+    local = tmp_path / "landed" / key.rsplit("/", 1)[-1]
+    local.parent.mkdir(exist_ok=True)
+    local.write_bytes(uploads[key])
+    return local
+
+
+class TestS3WritesUploadThroughS3fs:
+    """Every S3 write encodes locally and uploads once, never through /vsis3/."""
+
+    dst = "s3://bucket/out/x.tif"
+
+    def test_write_cog_without_checksum(
+        self, tmp_path: Path, s3_uploads: dict[str, bytes]
+    ) -> None:
+        profile = {
+            "dtype": "float32",
+            "count": 1,
+            "width": WIDTH,
+            "height": HEIGHT,
+            "crs": "EPSG:32632",
+            "transform": from_origin(500000, 5200000, 10, 10),
+        }
+        write_cog(np.ones((HEIGHT, WIDTH), np.float32), UPath(self.dst), profile, tags={"A": "1"})
+        landed = _landed(s3_uploads, self.dst, tmp_path)
+        assert_is_cog(landed)
+        with rasterio.open(landed) as ds:
+            assert ds.tags()["A"] == "1"
+
+    def test_write_cog_checksum_is_of_the_uploaded_bytes(
+        self,
+        s3_uploads: dict[str, bytes],
+    ) -> None:
+        profile = {
+            "dtype": "float32",
+            "count": 1,
+            "width": WIDTH,
+            "height": HEIGHT,
+            "crs": "EPSG:32632",
+            "transform": from_origin(500000, 5200000, 10, 10),
+        }
+        digest = write_cog(
+            np.ones((HEIGHT, WIDTH), np.float32), UPath(self.dst), profile, checksum=True
+        )
+        assert digest == "1220" + hashlib.sha256(s3_uploads[self.dst]).hexdigest()
+
+    def test_rewrite_tiff_moves_only_after_the_upload(
+        self,
+        tmp_path: Path,
+        s3_uploads: dict[str, bytes],
+    ) -> None:
+        src = tmp_path / "src.tif"
+        make_tiff(src)
+        rewrite_tiff(src, UPath(self.dst), tags={"A": "1"}, move=True)
+        with rasterio.open(_landed(s3_uploads, self.dst, tmp_path)) as ds:
+            assert ds.tags()["A"] == "1"
+        assert not src.exists()
+
+    def test_rasterio_open_uploads_on_a_clean_close(
+        self,
+        tmp_path: Path,
+        s3_uploads: dict[str, bytes],
+    ) -> None:
+        profile = {
+            "driver": "GTiff",
+            "dtype": "uint8",
+            "count": 1,
+            "width": WIDTH,
+            "height": HEIGHT,
+            "crs": "EPSG:32632",
+            "transform": from_origin(500000, 5200000, 10, 10),
+        }
+        with rasterio_open(UPath(self.dst), "w", **profile) as ds:
+            ds.write(np.full((1, HEIGHT, WIDTH), 7, np.uint8))
+        with rasterio.open(_landed(s3_uploads, self.dst, tmp_path)) as ds:
+            assert int(ds.read(1)[0, 0]) == 7
+
+        other = "s3://bucket/out/failed.tif"
+
+        def fail_mid_write() -> None:
+            with rasterio_open(UPath(other), "w", **profile):
+                msg = "boom"
+                raise RuntimeError(msg)
+
+        with pytest.raises(RuntimeError, match="boom"):
+            fail_mid_write()
+        assert other not in s3_uploads
+
+    def test_merge_tiffs(self, tmp_path: Path, s3_uploads: dict[str, bytes]) -> None:
+        a, b = tmp_path / "a.tif", tmp_path / "b.tif"
+        make_tiff(a, fill=1)
+        make_tiff(b, fill=2, origin=(500000 + WIDTH * 10, 5200000))
+        merge_tiffs([a, b], UPath(self.dst))
+        with rasterio.open(_landed(s3_uploads, self.dst, tmp_path)) as ds:
+            assert ds.width == 2 * WIDTH
+            assert ds.descriptions == ("VV",)
+
+    def test_create_warped_vrt(self, tmp_path: Path, s3_uploads: dict[str, bytes]) -> None:
+        src = tmp_path / "src.tif"
+        make_tiff(src)
+        dst = "s3://bucket/out/x.vrt"
+        create_warped_vrt(src, UPath(dst), crs="EPSG:32632", resolution=20)
+        xml = s3_uploads[dst].decode()
+        assert "<VRTDataset" in xml
+        assert str(src) in xml
+
+    def test_xml_vrt(self, tmp_path: Path, s3_uploads: dict[str, bytes]) -> None:
+        src = tmp_path / "src.tif"
+        make_tiff(src)
+        dst = "s3://bucket/out/db.vrt"
+        create_decibel_vrt(src, UPath(dst))
+        assert s3_uploads[dst].decode().startswith("<VRTDataset")
+
+    def test_a_failed_upload_raises_and_keeps_the_source(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def refuse(_src: bytes | Path, _dst: UPath) -> None:
+            msg = "AccessDenied"
+            raise PermissionError(msg)
+
+        monkeypatch.setattr(raster, "_upload", refuse)
+        src = tmp_path / "src.tif"
+        make_tiff(src)
+        with pytest.raises(RuntimeError, match="AccessDenied"):
+            rewrite_tiff(src, UPath(self.dst), move=True)
+        assert src.exists()
