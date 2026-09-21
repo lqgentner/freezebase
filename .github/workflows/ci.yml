@@ -93,18 +93,20 @@ jobs:
 
   test-s3:
     # Exercises the credentialed S3 read/write paths (`_s3_env`) against a real
-    # MinIO server -- the object-store code unit tests can't reach.
+    # S3 server -- the object-store code unit tests can't reach. Silo is the
+    # maintained fork of the MinIO server (MinIO is archived and its Docker Hub
+    # image gone); it keeps MinIO's variables and health route.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
-      - name: Start MinIO
+      - name: Start Silo
         run: |
-          docker run -d --name minio -p 9000:9000 \
+          docker run -d --name silo -p 9000:9000 \
             -e MINIO_ROOT_USER=testkey -e MINIO_ROOT_PASSWORD=testsecret \
-            minio/minio server /data
+            docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z server /data
           for _ in $(seq 1 30); do
             curl -sf http://localhost:9000/minio/health/live && break
             sleep 1

@@ -22,6 +22,12 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   it was.
 - `atomic_write_text` and the VRT XML writers upload through the same path on S3.
 
+### Changed
+
+- The S3 integration tests run against [Silo](https://github.com/pgsty/silo),
+  the maintained fork of the MinIO server, in CI and in `AGENTS.md`. MinIO is
+  archived and its Docker Hub image is gone.
+
 ### Added
 
 - `upload_object(src, dst)` uploads bytes or a local file to an object store,
