@@ -6,33 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the project is pre-1.0 (`0.x`), minor releases may contain breaking changes.
 
-## [Unreleased]
-
-### Fixed
-
-- S3 writes no longer go through GDAL's `/vsis3/`. A gateway that refuses
-  GDAL's unsigned `Content-Type` header answered every upload with
-  `403 AccessDenied`, and GDAL reported that as a warning, so `write_cog`,
-  `rewrite_tiff`, `merge_tiffs`, `create_warped_vrt` and `rasterio_open` in a
-  write mode returned normally while nothing was stored. Rasters are now encoded
-  in memory or in a local temporary file and uploaded in one s3fs put, which
-  signs every header and raises when the store refuses it.
-  `rasterio_open(path, "w" | "w+" | "r+")` on S3 works on a local copy that is
-  uploaded when the dataset closes cleanly. A failed write leaves the object as
-  it was.
-- `atomic_write_text` and the VRT XML writers upload through the same path on S3.
-
-### Changed
-
-- The S3 integration tests run against [Silo](https://github.com/pgsty/silo),
-  the maintained fork of the MinIO server, in CI and in `AGENTS.md`. MinIO is
-  archived and its Docker Hub image is gone.
+## [0.8.0] - 2026-09-21
 
 ### Added
 
 - `upload_object(src, dst)` uploads bytes or a local file to an object store,
-  declares the content type from `content_type_for` on S3, and reads the stored
-  size back, raising `OSError` when it differs from what was sent.
+  using `content_type_for` on S3. It reads back the stored size and raises
+  `OSError` on mismatch. Refused uploads retain their exception class and
+  `errno`.
+
+### Changed
+
+- S3 integration tests now use RustFS 1.0.0 instead of MinIO, which is archived
+  and whose Docker Hub image is gone.
+
+### Fixed
+
+- `write_cog`, `rewrite_tiff`, `merge_tiffs`, `create_warped_vrt` and
+  `rasterio_open` in write modes no longer write through GDAL's `/vsis3/`.
+  A gateway rejected GDAL's unsigned `Content-Type` with `403 AccessDenied`;
+  GDAL warned without raising, so writes silently stored nothing. Uploads now
+  use s3fs, which signs the headers and raises on refusal. `atomic_write_text`
+  and the VRT XML writers use the same upload path on S3.
+- `rasterio_open` in S3 write modes (`"w"`, `"w+"`, `"r+"`) stages a local copy
+  and uploads it on clean close. A failed write leaves the object untouched.
 
 ## [0.7.1] - 2026-09-08
 

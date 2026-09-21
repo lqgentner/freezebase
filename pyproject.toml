@@ -211,7 +211,7 @@ python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 markers = [
-    "integration: tests requiring a live S3-compatible service (Silo, a MinIO fork, in CI); configured via FREEZEBASE_TEST_S3_* env vars, skipped when unset.",
+    "integration: tests requiring a live S3-compatible service (RustFS in CI); configured via FREEZEBASE_TEST_S3_* env vars, skipped when unset.",
 ]
 filterwarnings = [
     # Raised inside rasterio's compiled _io.pyx read() path under NumPy 2.5;

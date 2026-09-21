@@ -93,22 +93,21 @@ jobs:
 
   test-s3:
     # Exercises the credentialed S3 read/write paths (`_s3_env`) against a real
-    # S3 server -- the object-store code unit tests can't reach. Silo is the
-    # maintained fork of the MinIO server (MinIO is archived and its Docker Hub
-    # image gone); it keeps MinIO's variables and health route.
+    # S3 server -- the object-store code unit tests can't reach. RustFS replaces
+    # MinIO, which is archived and whose Docker Hub image is gone.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
-      - name: Start Silo
+      - name: Start RustFS
         run: |
-          docker run -d --name silo -p 9000:9000 \
-            -e MINIO_ROOT_USER=testkey -e MINIO_ROOT_PASSWORD=testsecret \
-            docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z server /data
+          docker run -d --name rustfs -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=testkey -e RUSTFS_SECRET_KEY=testsecret \
+            rustfs/rustfs:1.0.0 /data
           for _ in $(seq 1 30); do
-            curl -sf http://localhost:9000/minio/health/live && break
+            curl -sf http://localhost:9000/health && break
             sleep 1
           done
       - name: Run S3 integration tests
