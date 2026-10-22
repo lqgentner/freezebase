@@ -30,7 +30,7 @@ from freezebase.vrt._model import VRT
 from freezebase.vrt._xml import from_xml
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Mapping
+    from collections.abc import Generator
 
     from rasterio.coords import BoundingBox
     from rasterio.io import DatasetReader
@@ -108,8 +108,11 @@ def warp(
         If neither ``crs`` nor ``like`` is given, ``like`` comes with ``crs``,
         ``resolution`` or ``bounds``, ``bounds`` comes without ``resolution``,
         ``resolution`` is not positive, ``bounds`` does not lie on the ``resolution`` grid,
-        ``tolerance`` is negative, the source has no CRS and no ``src_crs`` is given, or no
-        exact transformation is available and ``allow_ballpark`` is false.
+        ``tolerance`` is negative or NaN, the source has no CRS and no ``src_crs`` is given, or no
+        exact transformation is available and ``allow_ballpark`` is false, or the source has
+        a scale/offset or colour table the model cannot hold.
+    RuntimeError
+        If GDAL's serialized transformer cannot be made exact or ballpark-free.
     """
     tolerance = _resolve_tolerance(tolerance)
     ref = source if isinstance(source, VRT) else _absolute(UPath(source))
@@ -145,12 +148,21 @@ def warp(
         ):
             rasterio.shutil.copy(warped, memfile.name, driver="VRT")
             xml = bytes(memfile.getbuffer()).decode()
-    vrt = from_xml(xml, storage_options=_storage_options(ref))
+    try:
+        vrt = from_xml(xml)
+    except ValueError as err:
+        msg = f"warp cannot keep the source's scale/offset or colour table: {err}"
+        raise ValueError(msg) from err
     if vrt.warp is None:  # pragma: no cover  # GDAL always writes a warped VRT here
         msg = "GDAL did not serialize a warped VRT"
         raise RuntimeError(msg)
+    # GDAL's path carries no storage options, and the source VRT is the caller's own.
+    vrt.warp.source = ref
     vrt.warp.options_xml = _set_transformer(
-        vrt.warp.options_xml, exact=tolerance == 0, allow_ballpark=allow_ballpark
+        vrt.warp.options_xml,
+        exact=tolerance == 0,
+        allow_ballpark=allow_ballpark,
+        reprojects=source_crs != dst_crs,
     )
     _check_transformation(vrt, source_crs, dst_crs)
     return vrt
@@ -160,7 +172,7 @@ def _resolve_tolerance(tolerance: float | Literal["auto"]) -> float:
     """Return the approximation error to warp with, in source pixels."""
     if tolerance == "auto":
         return _APPROX_TOLERANCE
-    if tolerance < 0:
+    if not tolerance >= 0:
         msg = f"tolerance must not be negative, got {tolerance}."
         raise ValueError(msg)
     return float(tolerance)
@@ -229,29 +241,37 @@ def _target_grid(
     return dst_crs, Affine(rx, 0.0, left, 0.0, -ry, top), width, height
 
 
-def _storage_options(ref: SourceRef) -> Mapping[str, Any] | None:
-    """Return the S3 storage options of ``ref``'s files, which GDAL's XML does not carry."""
-    files = [ref] if isinstance(ref, UPath) else ref.source_files(follow=False)
-    return next((path.storage_options for path in files if path.protocol == "s3"), None)
-
-
-def _set_transformer(options_xml: str, *, exact: bool, allow_ballpark: bool) -> str:
+def _set_transformer(
+    options_xml: str, *, exact: bool, allow_ballpark: bool, reprojects: bool
+) -> str:
     """Make the serialized transformer exact or ballpark-free, as GDAL would write it."""
     # rasterio builds an explicit grid's transformer without options, and never exact.
     # The options come from GDAL's own serialization.
     options = ET.fromstring(options_xml)  # noqa: S314
     transformer = options.find("Transformer")
-    approx = transformer.find("ApproxTransformer") if transformer is not None else None
-    base = approx.find("BaseTransformer/*") if approx is not None else None
-    if exact and transformer is not None and approx is not None and base is not None:
+    if transformer is None:
+        msg = "GDAL wrote no <Transformer> in the warp options"
+        raise RuntimeError(msg)
+    if exact and (approx := transformer.find("ApproxTransformer")) is not None:
+        base = approx.find("BaseTransformer/*")
+        if base is None:
+            msg = "Cannot make the warp exact: <ApproxTransformer> holds no base transformer"
+            raise RuntimeError(msg)
         transformer.remove(approx)
         transformer.append(base)
     if not allow_ballpark:
-        for reprojection in options.iter("ReprojectionTransformer"):
+        reprojections = list(options.iter("ReprojectionTransformer"))
+        if reprojects and not reprojections:
+            msg = "Cannot refuse ballpark transformations: GDAL wrote no <ReprojectionTransformer>"
+            raise RuntimeError(msg)
+        for reprojection in reprojections:
             items = reprojection.find("Options")
             if items is None:
                 items = ET.SubElement(reprojection, "Options")
-            ET.SubElement(items, "Option", key="ALLOW_BALLPARK").text = "NO"
+            option = items.find("Option[@key='ALLOW_BALLPARK']")
+            if option is None:
+                option = ET.SubElement(items, "Option", key="ALLOW_BALLPARK")
+            option.text = "NO"
     return ET.tostring(options, encoding="unicode")
 
 
