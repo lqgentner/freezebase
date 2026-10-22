@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import rasterio
-from rasterio.transform import Affine, from_origin
+from rasterio.transform import Affine
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -42,7 +42,9 @@ def make_tiff(
         count=count,
         dtype=dtype,
         crs=crs,
-        transform=transform if transform is not None else from_origin(*origin, *res),
+        transform=transform
+        if transform is not None
+        else Affine(res[0], 0, origin[0], 0, -res[1], origin[1]),
         nodata=nodata,
     ) as dst:
         dst.write(data)

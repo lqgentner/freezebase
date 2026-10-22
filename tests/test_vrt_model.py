@@ -21,6 +21,7 @@ from rasterio.windows import Window
 from upath import UPath
 
 from freezebase.vrt import VRT, Band, PixelFunction, Source, SourceProperties, Warp
+from freezebase.vrt._paths import gdal_path
 from tests.rasters import make_tiff
 
 DB_FLOAT32 = replace(PixelFunction.db(), transfer_type="float32")
@@ -342,3 +343,102 @@ class TestPixelFunction:
         assert band.find("SourceTransferType") is None
         with rasterio.open(v.to_xml()) as ds:
             np.testing.assert_allclose(ds.read(1), 3.0)
+
+
+class TestWrite:
+    """Path policy and ``VRT.write``."""
+
+    def test_source_beside_the_vrt_is_a_bare_name(self, tmp_path: Path) -> None:
+        tile = make_tiff(tmp_path / "a.tif")
+        out = vrt_over(tile).write(tmp_path / "m.vrt")
+        assert out == UPath(tmp_path / "m.vrt")
+        name = find(parse(out.read_text()), ".//SourceFilename")
+        assert (name.text, name.get("relativeToVRT")) == ("a.tif", "1")
+
+    def test_source_in_a_sibling_directory_is_dotdot_relative(self, tmp_path: Path) -> None:
+        (tmp_path / "tiles").mkdir()
+        (tmp_path / "vrts").mkdir()
+        tile = make_tiff(tmp_path / "tiles" / "a.tif")
+        vrt_over(tile).write(tmp_path / "vrts" / "m.vrt")
+        name = find(parse((tmp_path / "vrts" / "m.vrt").read_text()), ".//SourceFilename")
+        assert (name.text, name.get("relativeToVRT")) == ("../tiles/a.tif", "1")
+        moved = tmp_path.parent / f"{tmp_path.name}_moved"
+        tmp_path.rename(moved)
+        with rasterio.open(moved / "vrts" / "m.vrt") as ds:
+            assert ds.read(1).shape == (4, 6)
+
+    def test_relative_false_writes_absolute(self, tmp_path: Path) -> None:
+        tile = make_tiff(tmp_path / "a.tif")
+        vrt_over(tile).write(tmp_path / "m.vrt", relative=False)
+        name = find(parse((tmp_path / "m.vrt").read_text()), ".//SourceFilename")
+        assert (name.text, name.get("relativeToVRT")) == (str(tile.resolve()), "0")
+
+    def test_s3_source_same_bucket_is_relative(self) -> None:
+        got = gdal_path(UPath("s3://b/t/a.tif"), relative_to=UPath("s3://b/v/m.vrt"))
+        assert got == ("../t/a.tif", True)
+
+    def test_s3_source_other_bucket_is_absolute(self) -> None:
+        got = gdal_path(UPath("s3://c/a.tif"), relative_to=UPath("s3://b/m.vrt"))
+        assert got == ("/vsis3/c/a.tif", False)
+
+    def test_local_source_under_s3_vrt_is_absolute(self, tmp_path: Path) -> None:
+        tile = tmp_path / "a.tif"
+        got = gdal_path(UPath(tile), relative_to=UPath("s3://b/m.vrt"))
+        assert got == (str(tile.resolve()), False)
+
+    def test_write_is_atomic_on_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        tile = make_tiff(tmp_path / "a.tif")
+        dst = tmp_path / "m.vrt"
+        dst.write_text("old")
+
+        def boom(*_args: Any, **_kwargs: Any) -> str:
+            msg = "boom"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(ET, "tostring", boom)
+        with pytest.raises(RuntimeError, match="boom"):
+            vrt_over(tile).write(dst)
+        assert dst.read_text() == "old"
+        assert list(tmp_path.glob("*.tmp")) == []
+
+    def test_failed_replace_leaves_no_temp_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        tile = make_tiff(tmp_path / "a.tif")
+
+        def boom(_self: Any, _target: Any) -> None:
+            msg = "boom"
+            raise OSError(msg)
+
+        monkeypatch.setattr(Path, "replace", boom)
+        with pytest.raises(OSError, match="boom"):
+            vrt_over(tile).write(tmp_path / "m.vrt")
+        assert not (tmp_path / "m.vrt").exists()
+        assert list(tmp_path.glob("*.tmp")) == []
+
+    def test_write_to_s3_uploads_once(self, tmp_path: Path, s3_uploads: dict[str, bytes]) -> None:
+        tile = make_tiff(tmp_path / "a.tif")
+        out = vrt_over(tile).write("s3://bucket/v/m.vrt")
+        assert out == UPath("s3://bucket/v/m.vrt")
+        assert list(s3_uploads) == ["s3://bucket/v/m.vrt"]
+        name = find(parse(s3_uploads["s3://bucket/v/m.vrt"]), ".//SourceFilename")
+        assert name.get("relativeToVRT") == "0"
+
+    def test_special_characters_round_trip(self, tmp_path: Path) -> None:
+        tiles = tmp_path / "a b&<ü"
+        tiles.mkdir()
+        (tmp_path / "v").mkdir()
+        tile = make_tiff(tiles / "t.tif")
+        inner = vrt_over(tile)
+        outer = replace(
+            inner,
+            bands=[
+                replace(inner.bands[0], sources=[replace(inner.bands[0].sources[0], path=inner)])
+            ],
+        )
+        for vrt, name in ((inner, "plain.vrt"), (outer, "nested.vrt")):
+            out = vrt.write(tmp_path / "v" / name)
+            with rasterio.open(out.path) as ds:
+                assert ds.read(1).shape == (4, 6)

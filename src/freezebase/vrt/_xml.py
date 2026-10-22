@@ -10,8 +10,8 @@ from xml.etree import ElementTree as ET
 import rasterio
 from rasterio.enums import ColorInterp, Resampling
 
-from freezebase.raster import _to_vsi_uri
 from freezebase.vrt._model import _GDAL_DTYPE_NAMES, VRT
+from freezebase.vrt._paths import gdal_path
 
 if TYPE_CHECKING:
     from rasterio.windows import Window
@@ -91,8 +91,8 @@ def _number(value: float) -> str:
 
 def _path_text(path: UPath, *, relative_to: UPath | None) -> tuple[str, str]:
     """Return the GDAL path of ``path`` and its ``relativeToVRT`` flag."""
-    del relative_to  # every path is written absolute until relative paths are supported
-    return _to_vsi_uri(path), "0"
+    text, relative = gdal_path(path, relative_to=relative_to)
+    return text, "1" if relative else "0"
 
 
 def _add_metadata(parent: ET.Element, metadata: dict[str, str]) -> None:
