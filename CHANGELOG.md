@@ -34,7 +34,8 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   color_interp=)` mosaics tiles of any band count, later sources drawing over earlier ones;
   `VRT` inputs are nested. With `resolution="finest"` or `(x, y)`, tiles of mixed pixel
   sizes or off the output grid are resampled and placed exactly, not snapped to it, and
-  fill only the output pixels whose centre they contain.
+  fill only the output pixels whose centre they contain. `nodata` sets the bands' NODATA;
+  each tile's own NODATA pixels stay transparent under it.
 - `freezebase.vrt.derive(sources, function, dtype=, nodata=, description=, band=)` applies a
   GDAL pixel function to one input (every band) or several (one band from each). `VRT`
   inputs are nested whole, so the function sees mosaicked pixels; input NODATA is honoured
