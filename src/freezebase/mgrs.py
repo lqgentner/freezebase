@@ -245,8 +245,6 @@ _ROW_CHARS = np.array(list(_ROW_LETTERS))
 _DIGIT_CHARS = np.array(list("0123456789"))
 # Zone, band, 100 km square and one digit each for easting and northing.
 _MGRS_10KM_LENGTH = 7
-# Width of `MGRSGrid.mgrs_codes`, kept for compatibility.
-_MGRS_CODES_DTYPE = np.dtype("<U27")
 
 
 @functools.cache
@@ -303,7 +301,7 @@ def _mgrs_10km_codes(
     chars[:, 4] = _ROW_CHARS[(northings + _row_offset(zone)) % _ROW_CYCLE // _100KM_SIZE]
     chars[:, 5] = _DIGIT_CHARS[eastings % _100KM_SIZE // _10KM_SIZE]
     chars[:, 6] = _DIGIT_CHARS[northings % _100KM_SIZE // _10KM_SIZE]
-    return chars.view(f"<U{_MGRS_10KM_LENGTH}")[:, 0].astype(_MGRS_CODES_DTYPE)
+    return chars.view(f"<U{_MGRS_10KM_LENGTH}")[:, 0]
 
 
 def _mgrs_10km_to_utm(match: re.Match[str]) -> tuple[int, Hemisphere, int, int]:
@@ -560,6 +558,9 @@ def _overlaps_zone(boxes: GeoArray, zone: int, hemisphere: Hemisphere) -> NDArra
     inside, near = _zone_envelope_relation(shapely.bounds(boxes), rects)
     overlaps = inside
     unsettled = np.flatnonzero(near & ~inside)
+    # A single square from `from_mgrs` is usually settled here; skip the GEOS calls.
+    if not len(unsettled):
+        return overlaps
     # Predicates only use the prepared geometry when it is the first argument.
     shapely.prepare(zone_geom)
     hits = unsettled[shapely.intersects(zone_geom, boxes[unsettled])]
@@ -703,10 +704,7 @@ def _utm_lattice_rings(
     x_edges: NDArray[np.integer],
     y_edges: NDArray[np.integer],
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    """Return the WGS84 rings and envelopes of grids of UTM squares, grid by grid, row by row.
-
-    Row ``i`` of ``x_edges`` and ``y_edges`` holds the cell edges of grid ``i``.
-    """
+    """Return WGS84 rings and envelopes of UTM square grids; edge row ``i`` is grid ``i``."""
     # Neighbouring squares share corners, so each corner is projected only once.
     x = x_edges[:, np.newaxis, :].astype(np.float64)
     y = y_edges[:, :, np.newaxis].astype(np.float64)

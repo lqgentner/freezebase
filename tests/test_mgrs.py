@@ -300,6 +300,9 @@ class TestMGRSGrid:
         codes = [cell.mgrs_code for cell in grid]
         assert len(codes) == len(set(codes))
 
+    def test_mgrs_codes_are_seven_characters_wide(self, grid: MGRSGrid) -> None:
+        assert grid.mgrs_codes.dtype == np.dtype("<U7")
+
     def test_mgrs_codes_sorted(self, grid: MGRSGrid) -> None:
         codes = [cell.mgrs_code for cell in grid]
         assert codes == sorted(codes)

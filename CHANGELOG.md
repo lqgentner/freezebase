@@ -16,10 +16,9 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 - `mgrs` is no longer a dependency. MGRS references are now computed with NumPy
   and pyproj, giving the same codes and squares as `mgrs` (GeoTrans) except for
-  the fixes below. `MGRSGrid` builds about a third faster.
-- `MGRSGrid` builds three to four times faster for large areas, and far faster
-  for detailed areas of interest, whose many vertices no longer slow down the test
-  of each square. The squares and their codes are unchanged.
+  the fixes below. `MGRSGrid` builds about five times faster, and far faster
+  for detailed areas of interest, whose many vertices no longer slow down the
+  test of each square.
 - **Breaking:** `MGRSGeoBox.from_mgrs` raises `ValueError` for every reference
   that uses letters its zone lacks or names a square outside its latitude band
   or UTM zone. Before, GeoTrans rejected some with `mgrs.core.MGRSError` (band X
