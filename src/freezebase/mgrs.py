@@ -283,15 +283,14 @@ def _band_bounds(band: str) -> tuple[float, float]:
 
 def _mgrs_10km_codes(
     zone: int,
-    hemisphere: Hemisphere,
     eastings: NDArray[np.int32],
     northings: NDArray[np.int32],
+    latitudes: NDArray[np.float64],
 ) -> NDArray[np.str_]:
     """Return the 10 km MGRS references of squares in one zone, named by their SW corners."""
-    _, latitudes = _utm_to_wgs84(zone, hemisphere).transform(eastings, northings)
     # The nudge puts a corner on a band edge into the northern band, as GeoTrans does;
     # clipping folds corners just south of 80 S into C and stretches X to the pole.
-    band_index = np.floor((np.asarray(latitudes) + 80) / 8 + 1e-12)
+    band_index = np.floor((latitudes + 80) / 8 + 1e-12)
     # Zones 32, 34 and 36 end at 72 N, so their squares straddling it stay in band W.
     top_band = len(_LATITUDE_BANDS) - (2 if zone in (_ZONE_32, _ZONE_34, _ZONE_36) else 1)
     band_index = np.clip(band_index, 0, top_band).astype(np.intp)
@@ -835,12 +834,11 @@ class MGRSGrid:
         for _, zone_row in matched_utm_zones.iterrows():
             zone: int = zone_row["zone"]
             hemisphere: Hemisphere = zone_row["hemisphere"]
-            zone_eastings, zone_northings, zone_geometries = self._materialize_zone(
-                zone,
-                hemisphere,
+            zone_eastings, zone_northings, zone_latitudes, zone_geometries = (
+                self._materialize_zone(zone, hemisphere)
             )
             n = len(zone_eastings)
-            codes.append(_mgrs_10km_codes(zone, hemisphere, zone_eastings, zone_northings))
+            codes.append(_mgrs_10km_codes(zone, zone_eastings, zone_northings, zone_latitudes))
             eastings.append(zone_eastings)
             northings.append(zone_northings)
             zones.append(np.full(n, zone, dtype=np.uint8))
@@ -862,8 +860,8 @@ class MGRSGrid:
         self,
         zone: int,
         hemisphere: Hemisphere,
-    ) -> tuple[NDArray[np.int32], NDArray[np.int32], GeoArray]:
-        """Return the SW corners and WGS84 boxes of one zone's squares."""
+    ) -> tuple[NDArray[np.int32], NDArray[np.int32], NDArray[np.float64], GeoArray]:
+        """Return the SW corners, their latitudes and the WGS84 boxes of one zone's squares."""
         zone_geom_wgs = _zone_geometry(zone, hemisphere)
         coarse_x, coarse_y = self._build_coarse_coords(zone, hemisphere)
         coarse_boxes_wgs = _utm_squares_to_wgs84(
@@ -901,7 +899,8 @@ class MGRSGrid:
         mask = np.zeros(len(rings), dtype=np.bool_)
         mask[square_idx[hits]] = True
         mask[mask] = _overlaps_zone(squares[mask], zone, hemisphere)
-        return fine_x[mask], fine_y[mask], squares[mask]
+        # The fourth ring vertex is the projected SW corner.
+        return fine_x[mask], fine_y[mask], rings[mask, 3, 1], squares[mask]
 
     def _build_coarse_coords(
         self,
