@@ -46,6 +46,7 @@ from freezebase.s3 import (
     list_object_sizes,
     make_s3_upath,
     resolve_endpoint_url,
+    s3_env,
 )
 from freezebase.vrt import VRT, create_warped_vrt, mosaic, read, warp
 
@@ -300,6 +301,21 @@ class TestVrtOnS3:
 
         assert files == tiles
         assert all(f.storage_options == prefix.storage_options for f in files)
+
+    def test_open_through_two_local_vrts_to_s3(self, prefix: UPath, tmp_path: Path) -> None:
+        tiles = self._upload_tiles(prefix)
+        warped = [
+            warp(tile, crs="EPSG:3857", resolution=20.0).write(tmp_path / f"w{i}.vrt")
+            for i, tile in enumerate(tiles)
+        ]
+        # Building reads the local VRTs' headers, which reach S3 too.
+        with s3_env(prefix):
+            final = read(mosaic(warped).write(tmp_path / "final.vrt"))
+
+        # Previously env() followed the local VRTs without options: bare s3:// tiles.
+        with final.open(storage_options=prefix.storage_options) as ds:
+            data = ds.read(1)
+        assert {1.0, 2.0} <= set(np.unique(data[np.isfinite(data)]).tolist())
 
 
 class TestUploadsThroughS3fs:

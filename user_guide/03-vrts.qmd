@@ -120,16 +120,18 @@ references it. Here a local mosaic points at local warped VRTs, whose tiles are 
 
 ```python
 from freezebase import vrt
-from freezebase.s3 import make_s3_upath
+from freezebase.s3 import make_s3_upath, s3_env
 
-options = make_s3_upath("s3://bucket", profile="research").storage_options
 tiles = [make_s3_upath(f"s3://bucket/tiles/{name}.tif", profile="research") for name in "ab"]
 warped = [
     vrt.warp(tile, crs="EPSG:3857", resolution=20.0).write(f"warped_{i}.vrt")
     for i, tile in enumerate(tiles)
 ]
-final = vrt.read(vrt.mosaic(warped).write("final.vrt"), storage_options=options)
-with final.open(storage_options=options) as ds:  # final.vrt -> warped_*.vrt -> S3
+with s3_env(tiles[0]):  # mosaic reads the warped VRTs' headers, which reach S3
+    final = vrt.mosaic(warped).write("final.vrt")
+
+options = tiles[0].storage_options
+with vrt.read(final).open(storage_options=options) as ds:  # final -> warped_* -> S3
     data = ds.read(1)
 ```
 
