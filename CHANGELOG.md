@@ -33,6 +33,10 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   `VRT` inputs are nested. With `resolution="finest"` or `(x, y)`, tiles of mixed pixel
   sizes or off the output grid are resampled and placed exactly, not snapped to it, and
   fill only the output pixels whose centre they contain.
+- `freezebase.vrt.derive(sources, function, dtype=, nodata=, description=, band=)` applies a
+  GDAL pixel function to one input (every band) or several (one band from each). `VRT`
+  inputs are nested whole, so the function sees mosaicked pixels; input NODATA is honoured
+  through `propagateNoData`, so a nodata input gives a nodata output.
 
 ### Changed
 

@@ -13,7 +13,7 @@ from rasterio.transform import Affine
 from rasterio.warp import reproject
 from rasterio.windows import Window
 
-from freezebase.vrt import VRT, Source, from_raster, mosaic, stack
+from freezebase.vrt import VRT, PixelFunction, Source, derive, from_raster, mosaic, stack
 from freezebase.vrt._grid import raster_info
 from tests.rasters import make_tiff
 
@@ -474,3 +474,148 @@ class TestMosaicMixedResolution:
         a = make_tiff(tmp_path / "a.tif")
         with pytest.raises(ValueError, match="positive"):
             mosaic([a], resolution=(10.0, 0.0))
+
+
+def _write(
+    path: Path, data: np.ndarray, *, nodata: float | None, origin_x: float = 500000.0
+) -> Path:
+    """Write ``data`` (bands, rows, cols) as a GeoTIFF of its own dtype and nodata."""
+    count, height, width = data.shape
+    make_tiff(
+        path,
+        size=(width, height),
+        count=count,
+        dtype=str(data.dtype),
+        nodata=nodata,
+        origin=(origin_x, 5200000.0),
+    )
+    with rasterio.open(path, "r+") as ds:
+        ds.write(data)
+    return path
+
+
+class TestDerive:
+    def test_db_over_an_in_memory_mosaic_is_not_zero(self, tmp_path: Path) -> None:
+        """A dB band over a two-tile band reads the mosaicked pixels."""
+        # Previously a dB band over a two-tile band returned 0 everywhere.
+        tile_100 = make_tiff(tmp_path / "a.tif", fill=100)
+        tile_1000 = make_tiff(tmp_path / "b.tif", fill=1000, origin=(500060.0, 5200000.0))
+        m = mosaic([tile_100, tile_1000])
+        vrt = derive(m, PixelFunction.db())
+        assert isinstance(vrt.bands[0].sources[0].path, VRT)
+        with vrt.open() as ds:
+            a = ds.read(1)
+        assert np.allclose(a, [[20.0] * 6 + [30.0] * 6] * 4)
+
+    def test_db_of_nodata_zero_is_nan(self, tmp_path: Path) -> None:
+        """A uint16 0 sentinel gives NaN, not -inf."""
+        data = np.array([[[0, 10, 100]]], dtype="uint16")
+        p = _write(tmp_path / "a.tif", data, nodata=0)
+        with derive(p, PixelFunction.db()).open() as ds:
+            a = ds.read(1)
+        assert np.isnan(a[0, 0])
+        assert np.allclose(a[0, 1:], [10.0, 20.0])
+
+    def test_diff_of_integer_nodata_is_nan(self, tmp_path: Path) -> None:
+        """An int16 -9999 in either input gives NaN."""
+        x = _write(tmp_path / "x.tif", np.array([[[5, -9999, 7, 1]]], dtype="int16"), nodata=-9999)
+        y = _write(tmp_path / "y.tif", np.array([[[1, 2, -9999, 1]]], dtype="int16"), nodata=-9999)
+        with derive([x, y], PixelFunction.diff()).open() as ds:
+            a = ds.read(1)
+        np.testing.assert_array_equal(a[0], [4, np.nan, np.nan, 0])
+
+    def test_div_of_integer_nodata_is_nan(self, tmp_path: Path) -> None:
+        x = _write(tmp_path / "x.tif", np.array([[[6, -9999, 8]]], dtype="int16"), nodata=-9999)
+        y = _write(tmp_path / "y.tif", np.array([[[2, 2, -9999]]], dtype="int16"), nodata=-9999)
+        with derive([x, y], PixelFunction.div()).open() as ds:
+            a = ds.read(1)
+        np.testing.assert_array_equal(a[0], [3, np.nan, np.nan])
+
+    def test_sum_propagates_nodata(self, tmp_path: Path) -> None:
+        x = _write(tmp_path / "x.tif", np.array([[[1, -9999, 3]]], dtype="int16"), nodata=-9999)
+        y = _write(tmp_path / "y.tif", np.array([[[1, 1, 1]]], dtype="int16"), nodata=-9999)
+        vrt = derive([x, y], PixelFunction("sum"))
+        assert vrt.bands[0].pixel_function is not None
+        assert vrt.bands[0].pixel_function.args["propagateNoData"] == "true"
+        with vrt.open() as ds:
+            a = ds.read(1)
+        np.testing.assert_array_equal(a[0], [2, np.nan, 4])
+
+    def test_one_input_derives_every_band(self, tmp_path: Path) -> None:
+        p = make_tiff(tmp_path / "a.tif", count=2, fill=100)
+        with rasterio.open(p, "r+") as ds:
+            ds.write(np.full((4, 6), 1000, dtype="float32"), 2)
+        vrt = derive(p, PixelFunction.db(), description="power")
+        assert [b.sources[0].band for b in vrt.bands] == [1, 2]
+        with vrt.open() as ds:
+            assert ds.count == 2
+            assert ds.descriptions == ("power", "power")
+            assert np.allclose(ds.read(1), 20)
+            assert np.allclose(ds.read(2), 30)
+
+    def test_one_input_with_band_derives_only_that_band(self, tmp_path: Path) -> None:
+        p = make_tiff(tmp_path / "a.tif", count=2, fill=100)
+        vrt = derive(p, PixelFunction.db(), band=2)
+        assert len(vrt.bands) == 1
+        assert vrt.bands[0].sources[0].band == 2
+
+    def test_several_inputs_read_the_given_band(self, tmp_path: Path) -> None:
+        x = make_tiff(tmp_path / "x.tif", count=2, fill=0)
+        y = make_tiff(tmp_path / "y.tif", count=2, fill=0)
+        with rasterio.open(x, "r+") as ds:
+            ds.write(np.full((4, 6), 8, dtype="float32"), 2)
+        with rasterio.open(y, "r+") as ds:
+            ds.write(np.full((4, 6), 2, dtype="float32"), 2)
+        vrt = derive([x, y], PixelFunction.div(), band=2)
+        assert len(vrt.bands) == 1
+        assert [s.band for s in vrt.bands[0].sources] == [2, 2]
+        with vrt.open() as ds:
+            assert np.allclose(ds.read(1), 4)
+
+    def test_rejects_different_grids(self, tmp_path: Path) -> None:
+        x = make_tiff(tmp_path / "x.tif")
+        y = make_tiff(tmp_path / "y.tif", origin=(500060.0, 5200000.0))
+        with pytest.raises(ValueError, match="share one grid"):
+            derive([x, y], PixelFunction.div())
+
+    def test_rejects_bad_band_and_empty(self, tmp_path: Path) -> None:
+        x = make_tiff(tmp_path / "x.tif")
+        with pytest.raises(ValueError, match="no band 2"):
+            derive([x, x], PixelFunction.div(), band=2)
+        with pytest.raises(ValueError, match="at least one"):
+            derive([], PixelFunction.div())
+
+    def test_vrt_input_is_named_by_position_in_errors(self, tmp_path: Path) -> None:
+        x = make_tiff(tmp_path / "x.tif")
+        y = from_raster(make_tiff(tmp_path / "y.tif", origin=(500060.0, 5200000.0)))
+        with pytest.raises(ValueError, match="VRT input #1"):
+            derive([x, y], PixelFunction.div())
+
+    def test_source_without_nodata_is_simple(self, tmp_path: Path) -> None:
+        p = make_tiff(tmp_path / "a.tif", nodata=None, fill=100)
+        vrt = derive(p, PixelFunction.db())
+        assert vrt.bands[0].sources[0].nodata is None
+        xml = vrt.to_xml()
+        assert "<SimpleSource>" in xml
+        assert "<NODATA>" not in xml
+        with vrt.open() as ds:
+            assert np.allclose(ds.read(1), 20)
+
+    def test_caller_propagate_nodata_is_kept(self, tmp_path: Path) -> None:
+        p = make_tiff(tmp_path / "a.tif", fill=100)
+        function = PixelFunction("dB", {"propagateNoData": "false"})
+        vrt = derive(p, function)
+        assert vrt.bands[0].pixel_function is not None
+        assert vrt.bands[0].pixel_function.args["propagateNoData"] == "false"
+        assert function.args == {"propagateNoData": "false"}
+
+    def test_dtype_and_transfer_type(self, tmp_path: Path) -> None:
+        p = make_tiff(tmp_path / "a.tif", dtype="uint16", nodata=0, fill=3)
+        vrt = derive(p, PixelFunction.scale(), dtype="float64", nodata=-1.0)
+        band = vrt.bands[0]
+        assert (band.dtype, band.nodata) == ("float64", -1.0)
+        assert band.pixel_function is not None
+        assert band.pixel_function.transfer_type == "float64"
+        kept = derive(p, PixelFunction("sum", transfer_type="float32")).bands[0].pixel_function
+        assert kept is not None
+        assert kept.transfer_type == "float32"
