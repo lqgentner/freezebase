@@ -34,6 +34,8 @@ def create_decibel_vrt(
 ) -> None:
     """Create a VRT applying a decibel conversion.
 
+    A complex source gives the dB of its real part; ``derive`` gives that of its modulus.
+
     Parameters
     ----------
     src_path : str | Path | UPath
@@ -43,9 +45,9 @@ def create_decibel_vrt(
     from_intensity : bool, optional
         Use ``10*log10`` for intensity; otherwise use ``20*log10``.
     """
-    derived = derive(
-        src_path, PixelFunction.db(10 if from_intensity else 20), description="dB", band=1
-    )
+    # Read as float32, as 0.8 did: a complex source gives the dB of its real part.
+    function = PixelFunction("dB", {"fact": 10 if from_intensity else 20}, "float32")
+    derived = derive(src_path, function, description="dB", band=1)
     derived.write(output_vrt)
 
 

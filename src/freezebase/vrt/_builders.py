@@ -35,6 +35,24 @@ if TYPE_CHECKING:
     from freezebase.vrt._model import AnyPath
 
 _ALMOST_EQUAL_PRECISION = 1e-6
+# GDAL's built-in pixel functions documented to take complex values.
+_COMPLEX_FUNCTIONS = frozenset(
+    {
+        "real",
+        "imag",
+        "mod",
+        "phase",
+        "conj",
+        "intensity",
+        "dB",
+        "log10",
+        "sum",
+        "diff",
+        "mul",
+        "cmul",
+        "inv",
+    }
+)
 # The kernels a VRT source can resample with; GDAL rejects the others.
 _SOURCE_RESAMPLINGS = frozenset(
     {
@@ -413,13 +431,15 @@ def derive(
     -------
     VRT
         With one input, a derived band per input band; with several, one derived band.
-        Each source carries its input's NODATA, and ``transfer_type`` defaults to ``dtype``.
+        Each source carries its input's NODATA. ``transfer_type`` defaults to ``dtype``, or
+        to ``complex64`` (``complex128`` for such an input) when an input is complex.
 
     Raises
     ------
     ValueError
-        If ``sources`` is empty, the grids differ (use ``warp`` first), or ``band`` is out
-        of range.
+        If ``sources`` is empty, the grids differ (use ``warp`` first), ``band`` is out
+        of range, or an input is complex and neither ``function`` takes complex values
+        nor its ``transfer_type`` is set.
     """
     inputs = [sources] if isinstance(sources, (str, Path, UPath, VRT)) else list(sources)
     if not inputs:
@@ -438,13 +458,14 @@ def derive(
         for i, info in enumerate(infos):
             _selected_bands(info, wanted, i)
         groups = [[(info, wanted[0]) for info in infos]]
+    transfer_type = function.transfer_type or _transfer_type(groups, function.name, dtype)
     out = [
         Band(
             dtype=dtype,
             sources=[_derive_source(info, b) for info, b in group],
             nodata=nodata,
             description=description,
-            pixel_function=PixelFunction(function.name, args, function.transfer_type or dtype),
+            pixel_function=PixelFunction(function.name, args, transfer_type),
         )
         for group in groups
     ]
@@ -455,6 +476,24 @@ def derive(
         height=first.height,
         bands=out,
     )
+
+
+def _transfer_type(
+    groups: Sequence[Sequence[tuple[RasterInfo, int]]], function: str, dtype: str
+) -> str:
+    """Return the default transfer type: complex for complex inputs, else ``dtype``."""
+    input_dtypes = {info.dtypes[band - 1] for group in groups for info, band in group}
+    if not any(name.startswith("complex") for name in input_dtypes):
+        return dtype
+    if function not in _COMPLEX_FUNCTIONS:
+        msg = (
+            f"The pixel function {function!r} does not take complex inputs; pass a "
+            f"transfer_type to read them as real numbers, or use one of "
+            f"{sorted(_COMPLEX_FUNCTIONS)}."
+        )
+        raise ValueError(msg)
+    # A real transfer type would keep only the real part.
+    return "complex128" if "complex128" in input_dtypes else "complex64"
 
 
 def _derive_source(info: RasterInfo, band: int) -> Source:

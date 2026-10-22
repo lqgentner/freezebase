@@ -9,7 +9,9 @@ from xml.etree import ElementTree as ET
 import numpy as np
 import pytest
 import rasterio
+from rasterio.enums import Resampling
 from rasterio.transform import Affine, from_origin
+from rasterio.vrt import WarpedVRT
 
 from freezebase.vrt import (
     build_vrt_mosaic,
@@ -516,11 +518,18 @@ class TestBuildVrtMosaic:
 
     def test_rejects_unsupported_dtype(self, tmp_path: Path) -> None:
         tile_a = tmp_path / "a.tif"
-        make_tiff(tile_a, fill=1.0, dtype="complex64", nodata=None)
+        make_tiff(tile_a, fill=1.0, dtype="float16", nodata=None)
 
-        # Complex dtypes have no GDAL name; better than emitting a broken VRT.
+        # Float16 has no entry in the dtype table; better than emitting a broken VRT.
         with pytest.raises(ValueError, match="Unsupported tile dtype"):
             build_vrt_mosaic([tile_a], tmp_path / "mosaic.vrt")
+
+    def test_accepts_complex_tiles(self, tmp_path: Path) -> None:
+        make_tiff(tmp_path / "a.tif", fill=1.0, dtype="complex64", nodata=None)
+        build_vrt_mosaic([tmp_path / "a.tif"], tmp_path / "mosaic.vrt")
+        with rasterio.open(tmp_path / "mosaic.vrt") as ds:
+            assert ds.dtypes == ("complex64",)
+            assert (ds.read(1) == 1).all()
 
     def test_rejects_mismatched_nodata(self, tmp_path: Path) -> None:
         tile_a = tmp_path / "a.tif"
@@ -598,6 +607,59 @@ def make_paletted_tiff(path: Path) -> None:
     make_tiff(path, fill=1, dtype="uint8", nodata=None)
     with rasterio.open(path, "r+") as ds:
         ds.write_colormap(1, {0: (255, 0, 0, 255), 1: (0, 255, 0, 255)})
+
+
+def make_complex_tiff(path: Path) -> None:
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=2,
+        height=2,
+        count=1,
+        dtype="complex64",
+        crs="EPSG:32632",
+        transform=Affine(10, 0, 500000, 0, -10, 5200020),
+    ) as dst:
+        dst.write(np.array([[[3 + 4j, 1 + 0j], [0 + 2j, 10 + 0j]]], dtype="complex64"))
+
+
+class TestComplexInputs:
+    def test_decibel_vrt_matches_0_8(self, tmp_path: Path) -> None:
+        make_complex_tiff(tmp_path / "slc.tif")
+        # Previously raised "Unsupported dtype 'complex64'"; 0.8 took dB of the real part.
+        create_decibel_vrt(tmp_path / "slc.tif", tmp_path / "db.vrt")
+        with rasterio.open(tmp_path / "db.vrt") as ds:
+            np.testing.assert_allclose(
+                ds.read(1), [[10 * np.log10(3), 0.0], [-np.inf, 10.0]], rtol=1e-6
+            )
+
+    def test_warped_vrt_matches_rasterio(self, tmp_path: Path) -> None:
+        make_complex_tiff(tmp_path / "slc.tif")
+        # Previously raised "Unsupported GDAL data type 'CFloat32'".
+        create_warped_vrt(
+            tmp_path / "slc.tif", tmp_path / "w.vrt", crs="EPSG:3857", resolution=10.0
+        )
+        with rasterio.open(tmp_path / "w.vrt") as ds:
+            assert ds.dtypes == ("complex64",)
+            with (
+                rasterio.open(tmp_path / "slc.tif") as src,
+                WarpedVRT(
+                    src,
+                    crs="EPSG:3857",
+                    transform=ds.transform,
+                    width=ds.width,
+                    height=ds.height,
+                    resampling=Resampling.average,
+                ) as ref,
+            ):
+                np.testing.assert_array_equal(ds.read(1), ref.read(1))
+
+    def test_rgb_vrt_rejects_complex_inputs(self, tmp_path: Path) -> None:
+        make_complex_tiff(tmp_path / "vv.tif")
+        make_complex_tiff(tmp_path / "vh.tif")
+        with pytest.raises(ValueError, match="complex"):
+            create_rgb_vrt(tmp_path / "vv.tif", tmp_path / "vh.tif", tmp_path / "rgb.vrt")
 
 
 class TestColourTables:

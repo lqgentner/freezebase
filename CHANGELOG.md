@@ -57,6 +57,11 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   a multi-band source raises `ValueError`. PROJ needs the grids, e.g. via `PROJ_DATA`.
 - `VRT.metadata_domains` holds dataset metadata of named domains, such as the
   `IMAGE_STRUCTURE` interleaving GDAL records for a warped multi-band raster.
+- Complex rasters: the model maps `complex_int16`, `complex_int32`, `complex64` and
+  `complex128` to GDAL's `CInt16`, `CInt32`, `CFloat32` and `CFloat64`. `derive` reads
+  complex inputs as complex, so `PixelFunction.db()` gives the dB of the modulus, and
+  raises `ValueError` for a pixel function GDAL does not document for complex values
+  unless `transfer_type` is set. `build_vrt_mosaic` accepts complex tiles.
 - `Band.scale` and `Band.offset` hold a band's `<Scale>` and `<Offset>`. `from_raster`,
   `stack`, `mosaic` and `warp` carry them from their inputs; `mosaic` tiles must share
   them. A colour table, which the model cannot hold, raises `ValueError` in all four.
@@ -73,6 +78,10 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   `ValueError` for an input with a colour table. Before, `build_vrt_mosaic` and
   `create_rgb_vrt` dropped the table and `create_warped_vrt` kept it; now expand the input
   to RGB(A) first, e.g. with `gdal_translate -expand rgba`.
+- **Breaking:** `create_rgb_vrt` raises `ValueError` for complex inputs. Before, it read
+  their real parts, so the blue band was the ratio or difference of the real parts; now
+  convert them first, e.g. with `derive(path, PixelFunction("intensity"))`.
+  `create_decibel_vrt` still gives the dB of a complex source's real part, as before.
 - **Breaking:** `build_vrt_mosaic` writes the tiles' scale and offset, and raises
   `ValueError` for tiles whose scale or offset differ. Before, it wrote neither, so readers
   saw the raw stored values.
