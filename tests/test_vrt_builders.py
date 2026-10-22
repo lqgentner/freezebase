@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pytest
@@ -619,3 +619,25 @@ class TestDerive:
         kept = derive(p, PixelFunction("sum", transfer_type="float32")).bands[0].pixel_function
         assert kept is not None
         assert kept.transfer_type == "float32"
+
+
+class TestSouthUp:
+    """South-up rasters (positive pixel height) are refused, not pasted upside down."""
+
+    @staticmethod
+    def _south_up(tmp_path: Path) -> Path:
+        return make_tiff(tmp_path / "south.tif", transform=Affine(10, 0, 0, 0, 10, 0))
+
+    @pytest.mark.parametrize("resolution", [None, "finest"])
+    def test_mosaic_raises(self, tmp_path: Path, resolution: Literal["finest"] | None) -> None:
+        # Previously the tile's southern row became the mosaic's top row.
+        with pytest.raises(ValueError, match=r"south\.tif.*south-up"):
+            mosaic([self._south_up(tmp_path)], resolution=resolution)
+
+    def test_stack_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="south-up"):
+            stack([self._south_up(tmp_path)])
+
+    def test_from_raster_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="south-up"):
+            from_raster(self._south_up(tmp_path))

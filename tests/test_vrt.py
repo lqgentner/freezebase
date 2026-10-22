@@ -175,6 +175,15 @@ class TestDecibelVrt:
 
 
 class TestRgbVrt:
+    def test_rejects_south_up_inputs(self, tmp_path: Path) -> None:
+        south_up = Affine(10, 0, 500000, 0, 10, 5200000)
+        vv_path, vh_path = tmp_path / "vv.tif", tmp_path / "vh.tif"
+        make_tiff(vv_path, transform=south_up)
+        make_tiff(vh_path, transform=south_up)
+
+        with pytest.raises(ValueError, match="south-up"):
+            create_rgb_vrt(vv_path, vh_path, tmp_path / "rgb.vrt")
+
     def test_reads_band_one_of_multiband_inputs(self, tmp_path: Path) -> None:
         vv_path, vh_path = tmp_path / "vv.tif", tmp_path / "vh.tif"
         data = make_uint16_tiff(vv_path, count=2, nodata=None)
@@ -535,6 +544,14 @@ class TestBuildVrtMosaic:
 
         with pytest.raises(ValueError, match="Rotated/sheared"):
             build_vrt_mosaic([tile_a, tile_b], tmp_path / "mosaic.vrt")
+
+    def test_rejects_south_up_tile(self, tmp_path: Path) -> None:
+        tile = tmp_path / "a.tif"
+        make_tiff(tile, fill=1.0, transform=Affine(10, 0, 500000, 0, 10, 5200000))
+
+        # Previously the mosaic placed the tile's southern row at the top.
+        with pytest.raises(ValueError, match="south-up"):
+            build_vrt_mosaic([tile], tmp_path / "mosaic.vrt")
 
     def test_accepts_tiles_without_nodata(self, tmp_path: Path) -> None:
         tile_a = tmp_path / "a.tif"

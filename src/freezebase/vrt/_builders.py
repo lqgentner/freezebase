@@ -17,6 +17,7 @@ from freezebase.vrt._grid import (
     RasterInfo,
     _assert_extent_aligned,
     _assert_grid_aligned,
+    _check_north_up,
     _label,
     _mosaic_grid,
     _validate_tiles,
@@ -83,8 +84,14 @@ def from_raster(path: AnyPath) -> VRT:
     VRT
         A VRT with the file's grid, bands, descriptions, colour interpretation, units,
         nodata and metadata.
+
+    Raises
+    ------
+    ValueError
+        If the raster is south-up.
     """
     info = raster_info(path)
+    _check_north_up(info, _label(info, 0))
     return VRT(
         crs=info.crs,
         transform=info.transform,
@@ -153,8 +160,9 @@ def stack(
     Raises
     ------
     ValueError
-        If ``sources`` is empty, the grids differ (use ``warp`` first), a ``bands`` entry
-        is out of range, or ``bands``, ``band_names`` or ``color_interp`` do not match.
+        If ``sources`` is empty, the grids differ (use ``warp`` first), a source is
+        south-up, a ``bands`` entry is out of range, or ``bands``, ``band_names`` or
+        ``color_interp`` do not match.
     """
     if not sources:
         msg = "stack needs at least one source."
@@ -164,6 +172,7 @@ def stack(
         raise ValueError(msg)
     infos = [raster_info(source) for source in sources]
     _check_same_grid(infos)
+    _check_north_up(infos[0], _label(infos[0], 0))
     out = [
         _band(info, band - 1)
         for i, info in enumerate(infos)
@@ -323,9 +332,9 @@ def mosaic(
     ------
     ValueError
         If ``sources`` is empty, the tiles are incompatible, off the pixel grid (with
-        ``resolution=None``) or rotated, ``bounds`` is not whole pixels, ``resolution`` is
-        not positive, ``resampling`` is not supported, or ``band_names`` or
-        ``color_interp`` do not match the band count.
+        ``resolution=None``), rotated or south-up, ``bounds`` is not whole pixels,
+        ``resolution`` is not positive, ``resampling`` is not supported, or ``band_names``
+        or ``color_interp`` do not match the band count.
     """
     if not sources:
         msg = "sources must not be empty."

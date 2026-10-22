@@ -58,6 +58,10 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 - `build_vrt_mosaic` accepts multi-band tiles and writes sources on the VRT's store relative
   to it, even outside its directory (`other/b.tif`, not an absolute path).
+- **Breaking:** `build_vrt_mosaic` and `create_rgb_vrt` raise `ValueError` for a south-up
+  input (positive pixel height). Before, they wrote a south-up VRT; now warp the input
+  north-up first, e.g. with `freezebase.vrt.warp`. `mosaic`, `stack` and `from_raster`
+  refuse such rasters too.
 - **Breaking:** `create_decibel_vrt` writes nodata where a source with non-NaN NODATA holds
   that value. Before, `10 * log10(nodata)` reached the output, e.g. `-inf` for a NODATA of
   0; now the output pixel is nodata (NaN). Mask `-inf` no longer; test for NaN instead.
