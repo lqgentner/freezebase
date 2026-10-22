@@ -16,6 +16,7 @@ from upath import UPath
 
 from freezebase import raster
 from freezebase.raster import _to_vsi_uri, rasterio_open
+from freezebase.vrt._model import _GDAL_DTYPE_NAMES
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -25,19 +26,6 @@ if TYPE_CHECKING:
     from rasterio.crs import CRS
 
 type AnyPath = str | Path | UPath
-
-_GDAL_DTYPE_NAMES = {
-    "uint8": "Byte",
-    "int8": "Int8",
-    "uint16": "UInt16",
-    "int16": "Int16",
-    "uint32": "UInt32",
-    "int32": "Int32",
-    "uint64": "UInt64",
-    "int64": "Int64",
-    "float32": "Float32",
-    "float64": "Float64",
-}
 
 _PIXEL_SIZE_TOL = 1e-6
 _ALIGNMENT_TOL = 1e-3
