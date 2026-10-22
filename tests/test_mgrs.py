@@ -7,12 +7,23 @@ import geopandas as gpd
 import numpy as np
 from pyproj import CRS
 import pytest
-from shapely import Point, Polygon, box, equals_exact, get_parts, is_prepared, union_all
+from shapely import (
+    Point,
+    Polygon,
+    area,
+    box,
+    equals_exact,
+    get_parts,
+    intersection,
+    is_prepared,
+    union_all,
+)
 
 from freezebase.mgrs import (
     MGRSGeoBox,
     MGRSGrid,
     UTMZones,
+    _shares_zone_area,
     _zone_rectangles,
     mgrs_to_crs,
     transform_shapely,
@@ -207,6 +218,20 @@ class TestUTMZoneExceptions:
         for zone in range(1, 61):
             rects = _zone_rectangles(zone, hemisphere)
             assert union_all(box(*rects.T)).equals(UTMZones().get_zone_geometry(zone, hemisphere))
+
+    def test_clipped_edge_areas_match_the_exact_overlay(self) -> None:
+        # Zone 32N starts at 6 E, and at 3 E between 56 N and 64 N.
+        zone_geom = UTMZones().get_zone_geometry(32, "N")
+        overhangs = [0.05, 2e-10, 1.5e-10, 0.7e-10, 0.0]  # around the 1e-9 cutoff
+        boxes = np.array(
+            [box(6.0 - 0.1, 50.0, 6.0 + d, 50.1) for d in overhangs]
+            + [box(5.9, 55.95, 6.05, 56.05), box(2.95, 63.95, 3.05, 64.05)],
+        )
+        exact = area(intersection(boxes, zone_geom)) > 1e-9 * area(boxes)
+
+        result = _shares_zone_area(boxes, zone_geom, _zone_rectangles(32, "N"))
+
+        assert result.tolist() == exact.tolist() == [True, True, True, False, False, True, True]
 
 
 # ---------------------------------------------------------------------------

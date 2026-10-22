@@ -530,6 +530,8 @@ class UTMZones:
 
 # Smaller overlaps are rounding error where a square edge lies on the zone boundary (31V).
 _MIN_ZONE_OVERLAP = 1e-9
+# Clipped and overlaid areas agree to about 1e-15 of a square, far inside this factor.
+_CLIP_AREA_MARGIN = 2.0
 
 
 def _overlaps_zone(boxes: GeoArray, zone: int, hemisphere: Hemisphere) -> NDArray[np.bool_]:
@@ -559,9 +561,29 @@ def _overlaps_zone(boxes: GeoArray, zone: int, hemisphere: Hemisphere) -> NDArra
     overlaps[hits] = True
     # Only squares on the zone boundary need the costlier area test.
     edge = hits[~shapely.contains_properly(zone_geom, boxes[hits])]
-    shared = shapely.area(shapely.intersection(boxes[edge], zone_geom))
-    overlaps[edge] = shared > _MIN_ZONE_OVERLAP * shapely.area(boxes[edge])
+    overlaps[edge] = _shares_zone_area(boxes[edge], zone_geom, rects)
     return overlaps
+
+
+def _shares_zone_area(
+    boxes: GeoArray,
+    zone_geom: BaseGeometry,
+    rects: NDArray[np.float64],
+) -> NDArray[np.bool_]:
+    """Return which boxes share more than rounding error of their area with a zone."""
+    min_shared = _MIN_ZONE_OVERLAP * shapely.area(boxes)
+    shared = np.full(len(boxes), np.nan)
+    bounds = shapely.bounds(boxes)
+    # Within one latitude slab the zone is that slab's rectangle, which clips much faster.
+    for west, south, east, north in rects:
+        in_slab = (bounds[:, 1] >= south) & (bounds[:, 3] <= north)
+        clipped = shapely.clip_by_rect(boxes[in_slab], west, south, east, north)
+        shared[in_slab] = shapely.area(clipped)
+    # Clipping and overlay differ only by rounding, so overlay is redone only near the
+    # cutoff, where that could flip the result, or for boxes spanning several slabs.
+    redo = ~((shared > _CLIP_AREA_MARGIN * min_shared) | (shared < min_shared / _CLIP_AREA_MARGIN))
+    shared[redo] = shapely.area(shapely.intersection(boxes[redo], zone_geom))
+    return shared > min_shared
 
 
 @functools.cache
