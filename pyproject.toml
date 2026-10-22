@@ -27,6 +27,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Topic :: Scientific/Engineering :: GIS",
     "Operating System :: OS Independent",
     "Typing :: Typed",
@@ -232,3 +233,5 @@ show_missing = true
 # sources, so no import needs to be ignored.
 [tool.pyrefly]
 preset = "strict"
+# Check against the oldest supported Python, not the interpreter in .venv.
+python-version = "3.12"
