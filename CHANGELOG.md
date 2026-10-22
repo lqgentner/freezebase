@@ -8,6 +8,10 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## Unreleased
 
+### Added
+
+- Python 3.15 support, verified in CI.
+
 ### Changed
 
 - `mgrs` is no longer a dependency. MGRS references are now computed with NumPy

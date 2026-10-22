@@ -7,7 +7,7 @@ API. Preserve compatibility unless a change is explicitly breaking.
 
 ## Environment
 
-The project uses uv and supports Python 3.12–3.14. Dependencies are declared in
+The project uses uv and supports Python 3.12–3.15. Dependencies are declared in
 `pyproject.toml`, and the virtual environment is located at `.venv/`.
 
 ```bash
