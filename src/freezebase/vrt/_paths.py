@@ -77,7 +77,8 @@ def parse_gdal_path(
     base : UPath | None
         The VRT file; ``None`` when the VRT has no location.
     storage_options : Mapping[str, Any] | None
-        Options for S3 sources; ``None`` inherits those of an S3 ``base``.
+        Options for an absolute S3 ``text``; ``None`` inherits those of an S3 ``base``. A
+        relative ``text`` always keeps the options of ``base``.
 
     Returns
     -------
@@ -108,5 +109,5 @@ def parse_gdal_path(
         return UPath(urljoin(str(base), text))
     joined = posixpath.normpath(posixpath.join(base.parent.path, text))
     if base.protocol == "s3":
-        return UPath(f"s3://{joined}", **inherited_options(base, storage_options))
+        return UPath(f"s3://{joined}", **base.storage_options)
     return base.with_segments(joined)

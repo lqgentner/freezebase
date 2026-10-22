@@ -573,22 +573,29 @@ class TestRead:
             base=UPath("s3://b/v/m.vrt", key="k"),
             storage_options={"profile": "p"},
         )
-        assert [path.storage_options for path in source_paths(on_s3)] == [{"profile": "p"}] * 2
+        # The relative source keeps the VRT path's options; the other bucket takes the override.
+        assert [path.storage_options for path in source_paths(on_s3)] == [
+            {"key": "k"},
+            {"profile": "p"},
+        ]
 
-    def test_s3_vrt_is_read_with_the_storage_options(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("path", ["s3://b/v/m.vrt", UPath("s3://b/v/m.vrt", key="k")])
+    def test_s3_vrt_options_are_replaced_by_storage_options(
+        self, monkeypatch: pytest.MonkeyPatch, path: str | UPath
     ) -> None:
-        xml = VRT(None, UTM_GRID, 6, 4, [Band("float32", [Source(UPath("s3://b/a.tif"))])])
+        sources = [Source(UPath("s3://b/t/a.tif")), Source(UPath("s3://c/a.tif"))]
+        xml = VRT(None, UTM_GRID, 6, 4, [Band("float32", sources)])
         read_with: list[dict[str, Any]] = []
 
         def fake_read_text(self: UPath, *_args: Any, **_kwargs: Any) -> str:
             read_with.append(dict(self.storage_options))
-            return xml.to_xml(relative_to=UPath("s3://b/m.vrt"))
+            return xml.to_xml(relative_to=UPath("s3://b/v/m.vrt"))
 
-        monkeypatch.setattr(type(UPath("s3://b/m.vrt")), "read_text", fake_read_text)
-        v = read("s3://b/m.vrt", storage_options={"profile": "p"})
+        monkeypatch.setattr(type(UPath("s3://b/v/m.vrt")), "read_text", fake_read_text)
+        v = read(path, storage_options={"profile": "p"})
         assert read_with == [{"profile": "p"}]
-        assert [path.storage_options for path in source_paths(v)] == [{"profile": "p"}]
+        assert [str(p) for p in source_paths(v)] == ["s3://b/t/a.tif", "s3://c/a.tif"]
+        assert [p.storage_options for p in source_paths(v)] == [{"profile": "p"}] * 2
 
     def test_reads_freezebase_0_8_mosaic(self, tmp_path: Path) -> None:
         a = make_tiff(tmp_path / "a.tif")

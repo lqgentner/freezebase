@@ -37,16 +37,17 @@ def write(vrt: VRT, path: AnyPath, *, relative: bool = True) -> UPath:
 def read(path: AnyPath, *, storage_options: Mapping[str, Any] | None = None) -> VRT:
     """Read a VRT file into the model.
 
-    Relative source paths resolve against ``path``. ``/vsis3/`` sources become ``s3://``
-    paths carrying ``storage_options``, or else the storage options of an ``s3://`` ``path``.
+    Relative source paths resolve against ``path`` and keep its storage options.
+    ``/vsis3/`` sources become ``s3://`` paths carrying ``storage_options``, or else the
+    storage options of an ``s3://`` ``path``.
 
     Parameters
     ----------
     path : str | Path | UPath
         The VRT, local or ``s3://``.
     storage_options : Mapping[str, Any] | None, optional
-        Options for every S3 source, and for reading an ``s3://`` ``path``; they override
-        the storage options of ``path``.
+        Options for every S3 source. For an ``s3://`` ``path`` they replace its storage
+        options, for reading the VRT and its relative sources.
 
     Returns
     -------
@@ -61,7 +62,8 @@ def read(path: AnyPath, *, storage_options: Mapping[str, Any] | None = None) -> 
     """
     src = UPath(path)
     if src.protocol == "s3" and storage_options is not None:
-        src = UPath(src, **storage_options)
+        # Rebuilt rather than UPath(src, **options), which would merge the options.
+        src = UPath(f"s3://{src.path}", **storage_options)
     elif src.protocol == "":
         src = src.absolute()
     return from_xml(src.read_text(encoding="utf-8"), base=src, storage_options=storage_options)
