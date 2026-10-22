@@ -11,6 +11,8 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 ### Added
 
 - Python 3.15 support, verified in CI.
+- `http://` / `https://` paths in `rasterio_open` and every reader built on it, read
+  through `/vsicurl/` with `GDAL_HTTP_OPTIONS`; `http_env()`.
 
 ### Changed
 

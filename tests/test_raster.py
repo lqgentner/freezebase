@@ -18,6 +18,7 @@ from upath import UPath
 from freezebase import raster
 from freezebase.raster import (
     COG_PROFILE,
+    GDAL_HTTP_OPTIONS,
     RASTERIO_PROFILE_DEFAULTS,
     _env_for_path,
     _rewrite_via_memory,
@@ -26,12 +27,14 @@ from freezebase.raster import (
     get_epsg_string,
     get_utm_zone_string,
     group_tiffs_by_crs,
+    http_env,
     merge_tiffs,
     rasterio_open,
     rewrite_tiff,
     utm_zone_to_crs,
     write_cog,
 )
+from freezebase.s3 import GDAL_S3_OPTIONS
 from freezebase.vrt import create_decibel_vrt, create_warped_vrt
 
 WIDTH, HEIGHT = 8, 6
@@ -117,6 +120,28 @@ class TestCrsHelpers:
     def test_get_epsg_string_rejects_crs_without_epsg_code(self) -> None:
         with pytest.raises(ValueError, match="Could not extract EPSG code"):
             get_epsg_string(NON_EPSG_CRS)
+
+
+class TestHttpSources:
+    def test_https_maps_to_vsicurl(self) -> None:
+        assert _to_vsi_uri("https://example.com/a.tif") == "/vsicurl/https://example.com/a.tif"
+        assert _to_vsi_uri("http://example.com/a.tif") == "/vsicurl/http://example.com/a.tif"
+
+    def test_https_env_sets_http_options(self) -> None:
+        with _env_for_path("https://example.com/a.tif"):
+            assert rasterio.env.getenv()["GDAL_HTTP_TIMEOUT"] == "30"
+
+    def test_http_env_overrides(self) -> None:
+        with http_env(GDAL_HTTP_TIMEOUT="5"):
+            assert rasterio.env.getenv()["GDAL_HTTP_TIMEOUT"] == "5"
+
+    def test_s3_options_share_the_retry_settings(self) -> None:
+        for key in ("GDAL_HTTP_MAX_RETRY", "GDAL_HTTP_RETRY_DELAY", "GDAL_HTTP_RETRY_CODES"):
+            assert GDAL_S3_OPTIONS[key] == GDAL_HTTP_OPTIONS[key]
+
+    def test_unsupported_protocol_still_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unsupported protocol 'ftp'"):
+            _to_vsi_uri("ftp://example.com/a.tif")
 
 
 class TestPathProtocolSupport:
