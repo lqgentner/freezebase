@@ -292,8 +292,8 @@ class TestToXml:
 
     def test_unsupported_dtype_raises(self, tmp_path: Path) -> None:
         v = vrt_over(make_tiff(tmp_path / "a.tif"))
-        v.bands[0].dtype = "complex64"
-        with pytest.raises(ValueError, match="complex64"):
+        v.bands[0].dtype = "float16"
+        with pytest.raises(ValueError, match="float16"):
             v.to_xml()
 
 
@@ -607,6 +607,28 @@ class TestRead:
         assert find(parse(out.read_text()), ".//SourceFilename").text == "../tiles/a.tif"
         assert read(out) == v
 
+    @pytest.mark.parametrize(
+        ("dtype", "gdal"),
+        [
+            ("complex_int16", "CInt16"),
+            ("complex_int32", "CInt32"),
+            ("complex64", "CFloat32"),
+            ("complex128", "CFloat64"),
+        ],
+    )
+    def test_complex_dtypes_round_trip(self, dtype: str, gdal: str) -> None:
+        v = VRT(
+            None,
+            UTM_GRID,
+            1,
+            1,
+            [Band(dtype, pixel_function=PixelFunction("conj", transfer_type=dtype))],
+        )
+        root = parse(v.to_xml())
+        assert find(root, "VRTRasterBand").get("dataType") == gdal
+        assert find(root, ".//SourceTransferType").text == gdal
+        assert from_xml(v.to_xml()) == v
+
     def test_scale_and_offset_reach_gdal(self, tmp_path: Path) -> None:
         v = vrt_over(make_tiff(tmp_path / "a.tif"), scale=0.5, offset=-1.0)
         band = find(parse(v.to_xml()), "VRTRasterBand")
@@ -774,7 +796,7 @@ class TestRead:
             (one_band(dataset="<Metadata><Foo /></Metadata>"), "<Foo>"),
             (one_band("<ColorTable />"), "<ColorTable>"),
             (one_band("<ColorInterp>Sepia</ColorInterp>"), "Sepia"),
-            (one_band().replace("Float32", "CFloat32"), "CFloat32"),
+            (one_band().replace("Float32", "CFloat16"), "CFloat16"),
             (one_band("<PixelFunctionType>dB</PixelFunctionType>"), "<PixelFunctionType>"),
             (one_band(attributes=' subClass="VRTDerivedRasterBand"'), "PixelFunctionType"),
             (one_band(attributes=' subClass="VRTSourcedRasterBand"'), "VRTSourcedRasterBand"),

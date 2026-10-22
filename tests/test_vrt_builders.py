@@ -695,3 +695,50 @@ class TestScaleAndColourTable:
         ):
             with pytest.raises(ValueError, match=r"pal\.tif.*colour table"):
                 build()
+
+
+def _complex(path: Path, dtype: str = "complex64") -> Path:
+    """Write a 2x2 complex raster holding 3+4j, 1, 2j and 10."""
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=2,
+        height=2,
+        count=1,
+        dtype=dtype,
+        crs="EPSG:32632",
+        transform=Affine(10, 0, 500000, 0, -10, 5200020),
+    ) as dst:
+        dst.write(np.array([[[3 + 4j, 1 + 0j], [0 + 2j, 10 + 0j]]], dtype=dtype))
+    return path
+
+
+class TestComplex:
+    @pytest.mark.parametrize("dtype", ["complex_int16", "complex64", "complex128"])
+    def test_from_raster_keeps_complex_values(self, tmp_path: Path, dtype: str) -> None:
+        src = _complex(tmp_path / "c.tif", "complex64" if dtype == "complex_int16" else dtype)
+        if dtype == "complex_int16":
+            with rasterio.open(src) as ds:
+                profile = {**ds.profile, "dtype": dtype}
+                data = ds.read().astype("complex64")
+            with rasterio.open(tmp_path / "ci16.tif", "w", **profile) as ds:
+                ds.write(data)
+            src = tmp_path / "ci16.tif"
+        v = from_raster(src)
+        assert v.bands[0].dtype == dtype
+        with v.open() as ds:
+            np.testing.assert_array_equal(ds.read(1), [[3 + 4j, 1], [2j, 10]])
+
+    def test_derive_takes_the_modulus(self, tmp_path: Path) -> None:
+        src = _complex(tmp_path / "c.tif")
+        # Previously raised; a float32 transfer type would keep only the real part.
+        with derive(src, PixelFunction.db()).open() as ds:
+            np.testing.assert_allclose(ds.read(1), 10 * np.log10([[5, 1], [2, 10]]), rtol=1e-6)
+        with derive(src, PixelFunction("intensity")).open() as ds:
+            np.testing.assert_allclose(ds.read(1), [[25, 1], [4, 100]], rtol=1e-6)
+
+    def test_derive_rejects_functions_without_complex_support(self, tmp_path: Path) -> None:
+        src = _complex(tmp_path / "c.tif")
+        with pytest.raises(ValueError, match="complex"):
+            derive([src, src], PixelFunction.div())

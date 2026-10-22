@@ -36,6 +36,11 @@ _GDAL_DTYPE_NAMES = {
     "int64": "Int64",
     "float32": "Float32",
     "float64": "Float64",
+    # rasterio's names; NumPy has no complex integer types.
+    "complex_int16": "CInt16",
+    "complex_int32": "CInt32",
+    "complex64": "CFloat32",
+    "complex128": "CFloat64",
 }
 
 
