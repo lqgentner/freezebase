@@ -688,10 +688,28 @@ def _utm_10km_rings(
     sw_y: NDArray[np.int32],
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Return the WGS84 rings and envelopes of the 10 km squares of 100 km squares, row by row."""
+    offsets = np.arange(0, _100KM_SIZE + 1, _10KM_SIZE)
+    return _utm_lattice_rings(
+        zone,
+        hemisphere,
+        sw_x[:, np.newaxis] + offsets,
+        sw_y[:, np.newaxis] + offsets,
+    )
+
+
+def _utm_lattice_rings(
+    zone: int,
+    hemisphere: Hemisphere,
+    x_edges: NDArray[np.integer],
+    y_edges: NDArray[np.integer],
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Return the WGS84 rings and envelopes of grids of UTM squares, grid by grid, row by row.
+
+    Row ``i`` of ``x_edges`` and ``y_edges`` holds the cell edges of grid ``i``.
+    """
     # Neighbouring squares share corners, so each corner is projected only once.
-    offsets = np.arange(0, _100KM_SIZE + 1, _10KM_SIZE, dtype=np.float64)
-    x = sw_x[:, np.newaxis, np.newaxis] + offsets[np.newaxis, np.newaxis, :]
-    y = sw_y[:, np.newaxis, np.newaxis] + offsets[np.newaxis, :, np.newaxis]
+    x = x_edges[:, np.newaxis, :].astype(np.float64)
+    y = y_edges[:, :, np.newaxis].astype(np.float64)
     x, y = np.broadcast_arrays(x, y)
     lon, lat = _utm_to_wgs84(zone, hemisphere).transform(x.ravel(), y.ravel())
     corners = np.stack([lon, lat], axis=-1).reshape(*x.shape, 2)
@@ -872,13 +890,15 @@ class MGRSGrid:
         """Return the SW corners, their latitudes and the WGS84 boxes of one zone's squares."""
         zone_geom_wgs = _zone_geometry(zone, hemisphere)
         coarse_x, coarse_y = self._build_coarse_coords(zone, hemisphere)
-        coarse_boxes_wgs = _utm_squares_to_wgs84(
+        x_edges = np.unique(coarse_x)
+        y_edges = np.unique(coarse_y)
+        coarse_rings, _ = _utm_lattice_rings(
             zone,
             hemisphere,
-            coarse_x,
-            coarse_y,
-            _100KM_SIZE,
+            np.append(x_edges, x_edges[-1] + _100KM_SIZE)[np.newaxis],
+            np.append(y_edges, y_edges[-1] + _100KM_SIZE)[np.newaxis],
         )
+        coarse_boxes_wgs = _rings_to_wgs84(coarse_rings)
         # 100 km squares only prune; slivers are dropped at 10 km, where the cutoff applies.
         shapely.prepare(zone_geom_wgs)
         mask = self._intersects_any(coarse_boxes_wgs)
