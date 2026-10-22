@@ -154,7 +154,10 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 ### Removed
 
 - **Breaking:** `merge_tiffs`, which wrote a GTiff with the first source's profile, the
-  first file winning overlaps. Before: `merge_tiffs([a, b], "out.tif")`. After:
+  first file winning overlaps (`method="last"` is `vrt.mosaic(files)`, unreversed). The
+  `FileNotFoundError` pre-check and the "Failed to merge GeoTIFFs" `RuntimeError` are gone:
+  errors now come from the VRT builders or `write_cog`. Before:
+  `merge_tiffs([a, b], "out.tif")`. After:
   `write_cog(vrt.mosaic(list(reversed(files)), band_names=..., nodata=...), "out.tif")` for
   a COG (`write_cog` writes a COG, not the first source's profile), or
   `rewrite_tiff(vrt.mosaic(list(reversed(files))), "out.tif", profile)` for a GTiff.
