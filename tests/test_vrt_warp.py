@@ -356,6 +356,20 @@ class TestSources:
         with pytest.raises(ValueError, match=r"pal\.tif.*colour table"):
             warp(src, crs="EPSG:4326", resolution=1e-4)
 
+    def test_other_open_errors_are_not_relabelled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        src = make_tiff(tmp_path / "utm.tif")
+
+        def fail(_vrt: VRT, **_kwargs: object) -> None:
+            """Fail as GDAL does for an error unrelated to PROJ operations."""
+            msg = "disk on fire"
+            raise rasterio.errors.RasterioIOError(msg)
+
+        monkeypatch.setattr(VRT, "open", fail)
+        with pytest.raises(rasterio.errors.RasterioIOError, match="disk on fire"):
+            warp(src, crs="EPSG:4326", resolution=1e-4)
+
     def test_vrt_source_is_the_callers(self, tmp_path: Path) -> None:
         source = mosaic([make_tiff(tmp_path / "a.tif")])
         w = warp(source, crs="EPSG:4326", resolution=1e-4)
