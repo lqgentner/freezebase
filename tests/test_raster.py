@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, assert_type
 
 import numpy as np
@@ -1323,6 +1323,49 @@ class TestWriteCogNodataRemap:
         }
         write_cog(ArrayLike(), tmp_path / "o.tif", profile)  # pyrefly: ignore[bad-argument-type]  # duck-typed input
         assert_is_cog(tmp_path / "o.tif")
+
+
+class TestWriteCogInputs:
+    def test_masked_array_is_filled_with_nodata(self, tmp_path: Path) -> None:
+        profile = {
+            "dtype": "int16",
+            "count": 1,
+            "width": 3,
+            "height": 1,
+            "crs": "EPSG:32632",
+            "transform": from_origin(500000, 5200000, 10, 10),
+            "nodata": -1,
+        }
+        data = np.ma.masked_array([[5, 6, 7]], mask=[[True, False, False]], dtype="int16")
+        write_cog(data, tmp_path / "o.tif", profile)
+        with rasterio.open(tmp_path / "o.tif") as ds:
+            assert ds.read(1).tolist() == [[-1, 6, 7]]
+
+    def test_path_like_object_takes_the_path_route(self, tmp_path: Path) -> None:
+        src = tmp_path / "s.tif"
+        make_tiff(src)
+        write_cog(PurePosixPath(src), tmp_path / "o.tif")  # pyrefly: ignore[bad-argument-type]  # any os.PathLike works at runtime
+        assert_is_cog(tmp_path / "o.tif")
+
+    def test_unknown_dtype_raises_value_error(self, tmp_path: Path) -> None:
+        src = tmp_path / "s.tif"
+        make_tiff(src)
+        with pytest.raises(ValueError, match="Unsupported dtype"):
+            write_cog(src, tmp_path / "o.tif", {"dtype": "foo"})
+
+    def test_wrap_failure_is_a_write_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        src = tmp_path / "s.tif"
+        make_int_tiff(src, [0, 5])
+
+        def fail(*_args: Any, **_kwargs: Any) -> None:
+            msg = "cannot open"
+            raise rasterio.errors.RasterioIOError(msg)
+
+        monkeypatch.setattr("freezebase.vrt.stack", fail)
+        with pytest.raises(RuntimeError, match="Failed to write COG: cannot open"):
+            write_cog(src, tmp_path / "o.tif", {"nodata": 9})
 
 
 def _vrt_of(path: Path) -> VRT:
