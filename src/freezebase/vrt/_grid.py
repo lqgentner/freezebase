@@ -74,7 +74,7 @@ class RasterInfo(NamedTuple):
         """Extent of an axis-aligned grid."""
         t = self.transform
         x1, y1 = t.c, t.f
-        x2, y2 = t @ (self.width, self.height)
+        x2, y2 = t.c + t.a * self.width, t.f + t.e * self.height
         return BoundingBox(min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
 
 
