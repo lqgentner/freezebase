@@ -33,7 +33,6 @@ if TYPE_CHECKING:
 
 from freezebase.raster import (
     COG_PROFILE,
-    merge_tiffs,
     rasterio_open,
     rewrite_tiff,
     write_cog,
@@ -336,7 +335,7 @@ class TestUploadsThroughS3fs:
         with rasterio_open(s3_key) as ds:
             assert ds.tags()["EDITED"] == "yes"
 
-    def test_merge_to_s3(self, tmp_path: Path, s3_key: UPath) -> None:
+    def test_write_cog_from_a_mosaic_to_s3(self, tmp_path: Path, s3_key: UPath) -> None:
         left, right = tmp_path / "left.tif", tmp_path / "right.tif"
         write_cog(np.ones((HEIGHT, WIDTH), np.float32), left, _RASTER_PROFILE, band_names=["VV"])
         shifted = _RASTER_PROFILE | {
@@ -344,19 +343,19 @@ class TestUploadsThroughS3fs:
         }
         write_cog(np.ones((HEIGHT, WIDTH), np.float32), right, shifted, band_names=["VV"])
 
-        merge_tiffs([left, right], s3_key)
+        write_cog(mosaic([left, right]), s3_key)
 
         with rasterio_open(s3_key) as ds:
             assert ds.width == 2 * WIDTH
             assert ds.descriptions == ("VV",)
 
-    def test_merge_a_local_and_an_s3_source(
+    def test_mosaic_of_a_local_and_an_s3_source(
         self,
         tmp_path: Path,
         s3_key: UPath,
         s3_key2: UPath,
     ) -> None:
-        # The merge reads the S3 source with that source's credentials.
+        # The mosaic reads the S3 source with that source's credentials.
         left = tmp_path / "left.tif"
         write_cog(np.ones((HEIGHT, WIDTH), np.float32), left, _RASTER_PROFILE)
         shifted = _RASTER_PROFILE | {
@@ -364,7 +363,7 @@ class TestUploadsThroughS3fs:
         }
         write_cog(np.ones((HEIGHT, WIDTH), np.float32), s3_key, shifted)
 
-        merge_tiffs([left, s3_key], s3_key2)
+        write_cog(mosaic([left, s3_key]), s3_key2)
 
         with rasterio_open(s3_key2) as ds:
             assert ds.width == 2 * WIDTH

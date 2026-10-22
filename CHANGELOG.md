@@ -77,6 +77,9 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   VRT (mosaic, warped, derived), by nesting it; `nodata=None` keeps the VRT's. A `dtype`
   casts every band. `ValueError` if a nodata value does not fit the dtype. Array-likes,
   including masked arrays, still go through `np.asanyarray`.
+- `rewrite_tiff` accepts a `VRT`, applying `band_names`, `units`, `color_interp`, `tags` and
+  `band_tags` to a copy of it and encoding it to the driver in `profile`; `move=True` with a
+  `VRT` raises `ValueError`.
 
 ### Changed
 
@@ -150,6 +153,11 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ### Removed
 
+- **Breaking:** `merge_tiffs`. Before: `merge_tiffs([a, b], "out.tif")`.
+  After: `write_cog(vrt.mosaic([a, b]), "out.tif")` for a COG, or
+  `rewrite_tiff(vrt.mosaic([a, b]), "out.tif", profile)` for a GTiff;
+  `method="first"` is `vrt.mosaic(reversed(files))`; `min`/`max`/`sum`/`count`
+  have no replacement.
 - **Breaking:** `MGRSGrid.utm_to_mgrs`, an undocumented `np.vectorize` wrapper
   around `mgrs.MGRS().UTMToMGRS` that grid construction left on the instance.
   Before: `grid.utm_to_mgrs(zones, hemispheres, eastings, northings,
