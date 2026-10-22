@@ -1,17 +1,32 @@
 """Tests for freezebase.mgrs - MGRS grid system."""
 
+from typing import Literal
+
 from affine import Affine
 import geopandas as gpd
 import numpy as np
 from pyproj import CRS
 import pytest
-from shapely import Point, Polygon, box, get_parts
+from shapely import (
+    Point,
+    Polygon,
+    area,
+    box,
+    equals_exact,
+    get_parts,
+    intersection,
+    is_prepared,
+    union_all,
+)
 
 from freezebase.mgrs import (
     MGRSGeoBox,
     MGRSGrid,
     UTMZones,
+    _shares_zone_area,
+    _zone_rectangles,
     mgrs_to_crs,
+    transform_shapely,
     utm_to_crs,
     utms_to_epsgs,
 )
@@ -78,6 +93,15 @@ class TestUTMZoneGenerator:
     def test_returns_120_zones(self) -> None:
         gdf = UTMZones().gdf
         assert len(gdf) == 120
+
+    def test_instances_do_not_share_their_zones(self) -> None:
+        edited = UTMZones()
+        edited.gdf.loc[0, "name"] = "edited"
+        edited.gdf.drop(index=1, inplace=True)
+
+        fresh = UTMZones().gdf
+        assert fresh.loc[0, "name"] == "1S"
+        assert len(fresh) == 120
 
     def test_correct_columns(self) -> None:
         gdf = UTMZones().gdf
@@ -197,6 +221,27 @@ class TestUTMZoneExceptions:
 
         assert offenders == []
 
+    @pytest.mark.parametrize("hemisphere", ["N", "S"])
+    def test_latitude_slabs_tile_every_zone(self, hemisphere: Literal["N", "S"]) -> None:
+        # The grid settles most squares against these rectangles instead of the zone.
+        for zone in range(1, 61):
+            rects = _zone_rectangles(zone, hemisphere)
+            assert union_all(box(*rects.T)).equals(UTMZones().get_zone_geometry(zone, hemisphere))
+
+    def test_clipped_edge_areas_match_the_exact_overlay(self) -> None:
+        # Zone 32N starts at 6 E, and at 3 E between 56 N and 64 N.
+        zone_geom = UTMZones().get_zone_geometry(32, "N")
+        overhangs = [0.05, 2e-10, 1.5e-10, 0.7e-10, 0.0]  # around the 1e-9 cutoff
+        boxes = np.array(
+            [box(6.0 - 0.1, 50.0, 6.0 + d, 50.1) for d in overhangs]
+            + [box(5.9, 55.95, 6.05, 56.05), box(2.95, 63.95, 3.05, 64.05)],
+        )
+        exact = area(intersection(boxes, zone_geom)) > 1e-9 * area(boxes)
+
+        result = _shares_zone_area(boxes, zone_geom, _zone_rectangles(32, "N"))
+
+        assert result.tolist() == exact.tolist() == [True, True, True, False, False, True, True]
+
 
 # ---------------------------------------------------------------------------
 # MGRSGrid
@@ -254,6 +299,9 @@ class TestMGRSGrid:
     def test_no_duplicate_mgrs_codes(self, grid: MGRSGrid) -> None:
         codes = [cell.mgrs_code for cell in grid]
         assert len(codes) == len(set(codes))
+
+    def test_mgrs_codes_are_seven_characters_wide(self, grid: MGRSGrid) -> None:
+        assert grid.mgrs_codes.dtype == np.dtype("<U7")
 
     def test_mgrs_codes_sorted(self, grid: MGRSGrid) -> None:
         codes = [cell.mgrs_code for cell in grid]
@@ -325,6 +373,20 @@ class TestMGRSGridFilterGeometryInput:
         # Empty geometries are nulled out, not dropped, to keep tree indices aligned.
         mixed = gpd.GeoSeries([Polygon(), ZURICH_AOI], crs="EPSG:4326")
         assert len(MGRSGrid(mixed)) == self.EXPECTED
+
+    def test_many_parts_select_exactly_the_squares_they_intersect(self) -> None:
+        parts = [box(8.0, 47.0, 8.2, 47.1), box(8.5, 47.6, 8.55, 47.65), box(5.9, 46.0, 6.3, 46.2)]
+        covering = MGRSGrid(box(5.5, 45.5, 9.0, 48.0))
+        hits = [any(square.intersects(part) for part in parts) for square in covering.geometries]
+
+        grid = MGRSGrid(gpd.GeoSeries(parts, crs="EPSG:4326"))
+
+        assert grid.mgrs_codes.tolist() == covering.mgrs_codes[hits].tolist()
+
+    def test_leaves_the_callers_geometry_unprepared(self) -> None:
+        aoi = box(8.4, 47.3, 8.6, 47.4)
+        MGRSGrid(aoi)
+        assert not is_prepared(aoi)
 
 
 class TestMGRSGridInExceptionZones:
@@ -432,6 +494,21 @@ class TestMGRSGridAtAntimeridian:
 
         assert len(gdf) > 0
         assert (bounds.maxx - bounds.minx < 1).all()
+
+
+def test_grid_geometries_are_the_projected_utm_squares() -> None:
+    grid = MGRSGrid(box(5.5, 45.5, 6.5, 46.5))  # spans zones 31 and 32
+    for zone in np.unique(grid.zones):
+        in_zone = grid.zones == zone
+        utm_squares = box(
+            grid.eastings[in_zone],
+            grid.northings[in_zone],
+            grid.eastings[in_zone] + 10_000,
+            grid.northings[in_zone] + 10_000,
+        )
+        expected = transform_shapely(utm_squares, utm_to_crs(int(zone), "N"), CRS(4326))
+
+        assert equals_exact(grid.geometries[in_zone], expected, tolerance=0).all()
 
 
 @pytest.mark.parametrize(

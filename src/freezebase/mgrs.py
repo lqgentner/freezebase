@@ -214,6 +214,7 @@ def mgrs_to_crs(mgrs_code: str) -> CRS:
 
 _100KM_SIZE = 100_000
 _10KM_SIZE = 10_000
+_SQUARES_PER_100KM = (_100KM_SIZE // _10KM_SIZE) ** 2
 _FALSE_EASTING = 500_000
 _FALSE_NORTHING_SOUTH = 10_000_000
 
@@ -239,6 +240,11 @@ _UTM_MAX_LAT = 84.5
 _COLUMN_LETTERS = ("ABCDEFGH", "JKLMNPQR", "STUVWXYZ")
 _ROW_LETTERS = "ABCDEFGHJKLMNPQRSTUV"
 _ROW_CYCLE = 2_000_000
+_BAND_CHARS = np.array(list(_LATITUDE_BANDS))
+_ROW_CHARS = np.array(list(_ROW_LETTERS))
+_DIGIT_CHARS = np.array(list("0123456789"))
+# Zone, band, 100 km square and one digit each for easting and northing.
+_MGRS_10KM_LENGTH = 7
 
 
 @functools.cache
@@ -275,26 +281,27 @@ def _band_bounds(band: str) -> tuple[float, float]:
 
 def _mgrs_10km_codes(
     zone: int,
-    hemisphere: Hemisphere,
     eastings: NDArray[np.int32],
     northings: NDArray[np.int32],
+    latitudes: NDArray[np.float64],
 ) -> NDArray[np.str_]:
     """Return the 10 km MGRS references of squares in one zone, named by their SW corners."""
-    _, latitudes = _utm_to_wgs84(zone, hemisphere).transform(eastings, northings)
     # The nudge puts a corner on a band edge into the northern band, as GeoTrans does;
     # clipping folds corners just south of 80 S into C and stretches X to the pole.
-    band_index = np.floor((np.asarray(latitudes) + 80) / 8 + 1e-12)
+    band_index = np.floor((latitudes + 80) / 8 + 1e-12)
     # Zones 32, 34 and 36 end at 72 N, so their squares straddling it stay in band W.
     top_band = len(_LATITUDE_BANDS) - (2 if zone in (_ZONE_32, _ZONE_34, _ZONE_36) else 1)
     band_index = np.clip(band_index, 0, top_band).astype(np.intp)
-    bands = np.array(list(_LATITUDE_BANDS))[band_index]
-    columns = np.array(list(_COLUMN_LETTERS[(zone - 1) % 3]))[eastings // _100KM_SIZE - 1]
-    rows = np.array(list(_ROW_LETTERS))[
-        (northings + _row_offset(zone)) % _ROW_CYCLE // _100KM_SIZE
-    ]
-    east_digits = (eastings % _100KM_SIZE // _10KM_SIZE).astype(np.str_)
-    north_digits = (northings % _100KM_SIZE // _10KM_SIZE).astype(np.str_)
-    return f"{zone:02d}" + bands + columns + rows + east_digits + north_digits
+    # Fill one character per column and view the rows as strings, avoiding a
+    # temporary array per concatenation.
+    chars = np.empty((len(eastings), _MGRS_10KM_LENGTH), dtype="<U1")
+    chars[:, :2] = list(f"{zone:02d}")
+    chars[:, 2] = _BAND_CHARS[band_index]
+    chars[:, 3] = np.array(list(_COLUMN_LETTERS[(zone - 1) % 3]))[eastings // _100KM_SIZE - 1]
+    chars[:, 4] = _ROW_CHARS[(northings + _row_offset(zone)) % _ROW_CYCLE // _100KM_SIZE]
+    chars[:, 5] = _DIGIT_CHARS[eastings % _100KM_SIZE // _10KM_SIZE]
+    chars[:, 6] = _DIGIT_CHARS[northings % _100KM_SIZE // _10KM_SIZE]
+    return chars.view(f"<U{_MGRS_10KM_LENGTH}")[:, 0]
 
 
 def _mgrs_10km_to_utm(match: re.Match[str]) -> tuple[int, Hemisphere, int, int]:
@@ -331,7 +338,7 @@ def _mgrs_10km_to_utm(match: re.Match[str]) -> tuple[int, Hemisphere, int, int]:
     square = _utm_squares_to_wgs84(
         zone, hemisphere, np.array([easting]), np.array([northing]), _10KM_SIZE
     )
-    if not _overlaps_zone(square, _zone_geometry(zone, hemisphere))[0]:
+    if not _overlaps_zone(square, zone, hemisphere)[0]:
         msg = f"MGRS reference {mgrs_code!r} lies outside UTM zone {zone}{hemisphere}."
         raise ValueError(msg)
     return zone, hemisphere, easting, northing
@@ -422,7 +429,8 @@ class UTMZones:
     """All UTM zones in WGS84, including Norway and Svalbard exceptions."""
 
     def __init__(self) -> None:
-        self.gdf = self._build_zones()
+        # The zones never change, so each instance gets a copy of one cached build.
+        self.gdf = self._built_zones().copy()
 
     def get_zone_geometry(self, zone: int, hemisphere: Hemisphere) -> BaseGeometry:
         """Return the WGS84 geometry of a single UTM zone.
@@ -450,7 +458,14 @@ class UTMZones:
 
         return self.gdf[mask.to_numpy()]
 
-    def _build_zones(self) -> gpd.GeoDataFrame:
+    @classmethod
+    @functools.cache
+    def _built_zones(cls) -> gpd.GeoDataFrame:
+        """Return the zones built once per class; callers must copy before handing out."""
+        return cls._build_zones()
+
+    @classmethod
+    def _build_zones(cls) -> gpd.GeoDataFrame:
         """Generate a GeoDataFrame containing all UTM zones."""
         parts: list[dict[str, Any]] = []
 
@@ -469,7 +484,7 @@ class UTMZones:
             )
 
             if zone in _NORTHERN_EXCEPTION_ZONES:
-                geom = self._build_north_exception(zone, west, east)
+                geom = cls._build_north_exception(zone, west, east)
             else:
                 geom = box(west, 0, east, 84)
 
@@ -530,25 +545,103 @@ class UTMZones:
 
 # Smaller overlaps are rounding error where a square edge lies on the zone boundary (31V).
 _MIN_ZONE_OVERLAP = 1e-9
+# Clipped and overlaid areas agree to about 1e-15 of a square, far inside this factor.
+_CLIP_AREA_MARGIN = 2.0
 
 
-def _overlaps_zone(boxes: GeoArray, zone_geom: BaseGeometry) -> NDArray[np.bool_]:
+def _overlaps_zone(boxes: GeoArray, zone: int, hemisphere: Hemisphere) -> NDArray[np.bool_]:
     """Return which boxes overlap a zone by more than rounding error."""
+    zone_geom = _zone_geometry(zone, hemisphere)
+    rects = _zone_rectangles(zone, hemisphere)
+    # Envelopes strictly inside one of the rectangles tiling the zone, or clear of all
+    # of them, settle most boxes without GEOS; the rest are tested exactly.
+    inside, near = _zone_envelope_relation(shapely.bounds(boxes), rects)
+    overlaps = inside
+    unsettled = np.flatnonzero(near & ~inside)
+    # A single square from `from_mgrs` is usually settled here; skip the GEOS calls.
+    if not len(unsettled):
+        return overlaps
     # Predicates only use the prepared geometry when it is the first argument.
     shapely.prepare(zone_geom)
-    overlaps = shapely.intersects(zone_geom, boxes)
-    hits = np.flatnonzero(overlaps)
+    hits = unsettled[shapely.intersects(zone_geom, boxes[unsettled])]
+    overlaps[hits] = True
     # Only squares on the zone boundary need the costlier area test.
     edge = hits[~shapely.contains_properly(zone_geom, boxes[hits])]
-    shared = shapely.area(shapely.intersection(boxes[edge], zone_geom))
-    overlaps[edge] = shared > _MIN_ZONE_OVERLAP * shapely.area(boxes[edge])
+    overlaps[edge] = _shares_zone_area(boxes[edge], zone_geom, rects)
     return overlaps
+
+
+def _zone_envelope_relation(
+    bounds: NDArray[np.float64],
+    rects: NDArray[np.float64],
+) -> tuple[NDArray[np.bool_], NDArray[np.bool_]]:
+    """Return which envelopes lie strictly inside a zone rectangle, and which touch any."""
+    bounds = bounds[:, np.newaxis, :]
+    inside = (
+        (bounds[..., 0] > rects[:, 0])
+        & (bounds[..., 1] > rects[:, 1])
+        & (bounds[..., 2] < rects[:, 2])
+        & (bounds[..., 3] < rects[:, 3])
+    ).any(axis=1)
+    near = (
+        (bounds[..., 0] <= rects[:, 2])
+        & (bounds[..., 1] <= rects[:, 3])
+        & (bounds[..., 2] >= rects[:, 0])
+        & (bounds[..., 3] >= rects[:, 1])
+    ).any(axis=1)
+    return inside, near
+
+
+def _shares_zone_area(
+    boxes: GeoArray,
+    zone_geom: BaseGeometry,
+    rects: NDArray[np.float64],
+) -> NDArray[np.bool_]:
+    """Return which boxes share more than rounding error of their area with a zone."""
+    min_shared = _MIN_ZONE_OVERLAP * shapely.area(boxes)
+    shared = np.full(len(boxes), np.nan)
+    bounds = shapely.bounds(boxes)
+    # Within one latitude slab the zone is that slab's rectangle, which clips much faster.
+    for west, south, east, north in rects:
+        in_slab = (bounds[:, 1] >= south) & (bounds[:, 3] <= north)
+        clipped = shapely.clip_by_rect(boxes[in_slab], west, south, east, north)
+        shared[in_slab] = shapely.area(clipped)
+    # Clipping and overlay differ only by rounding, so overlay is redone only near the
+    # cutoff, where that could flip the result, or for boxes spanning several slabs.
+    redo = ~((shared > _CLIP_AREA_MARGIN * min_shared) | (shared < min_shared / _CLIP_AREA_MARGIN))
+    shared[redo] = shapely.area(shapely.intersection(boxes[redo], zone_geom))
+    return shared > min_shared
+
+
+@functools.cache
+def _utm_zones() -> UTMZones:
+    """Return the UTM zones, built once for the cached zone lookups."""
+    return UTMZones()
 
 
 @functools.cache
 def _zone_geometry(zone: int, hemisphere: Hemisphere) -> BaseGeometry:
     """Return the cached WGS84 geometry of a UTM zone."""
-    return UTMZones().get_zone_geometry(zone, hemisphere)
+    return _utm_zones().get_zone_geometry(zone, hemisphere)
+
+
+@functools.cache
+def _zone_rectangles(zone: int, hemisphere: Hemisphere) -> NDArray[np.float64]:
+    """Return the ``[west, south, east, north]`` rectangles tiling a zone by latitude slab."""
+    zone_geom = _zone_geometry(zone, hemisphere)
+    west, _, east, _ = zone_geom.bounds
+    latitudes = np.unique(shapely.get_coordinates(zone_geom)[:, 1])
+    middles = (latitudes[:-1] + latitudes[1:]) / 2
+    crossings = shapely.intersection(
+        zone_geom,
+        shapely.linestrings(
+            np.stack([np.full_like(middles, west), np.full_like(middles, east)], axis=-1),
+            np.stack([middles, middles], axis=-1),
+        ),
+    )
+    slab_west, _, slab_east, _ = shapely.bounds(crossings).T
+    # Zones are unions of lon/lat boxes, so each latitude slab is a single rectangle.
+    return np.column_stack([slab_west, latitudes[:-1], slab_east, latitudes[1:]])
 
 
 def _split_at_antimeridian(geoms: GeoArray) -> GeoArray:
@@ -587,6 +680,52 @@ def _utm_squares_to_wgs84(
     # pyrefly: ignore [no-matching-overload]
     projected = shapely.transform(squares, transformer.transform, interleaved=False)
     return _split_at_antimeridian(projected)
+
+
+def _utm_10km_rings(
+    zone: int,
+    hemisphere: Hemisphere,
+    sw_x: NDArray[np.int32],
+    sw_y: NDArray[np.int32],
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Return the WGS84 rings and envelopes of the 10 km squares of 100 km squares, row by row."""
+    offsets = np.arange(0, _100KM_SIZE + 1, _10KM_SIZE)
+    return _utm_lattice_rings(
+        zone,
+        hemisphere,
+        sw_x[:, np.newaxis] + offsets,
+        sw_y[:, np.newaxis] + offsets,
+    )
+
+
+def _utm_lattice_rings(
+    zone: int,
+    hemisphere: Hemisphere,
+    x_edges: NDArray[np.integer],
+    y_edges: NDArray[np.integer],
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Return WGS84 rings and envelopes of UTM square grids; edge row ``i`` is grid ``i``."""
+    # Neighbouring squares share corners, so each corner is projected only once.
+    x = x_edges[:, np.newaxis, :].astype(np.float64)
+    y = y_edges[:, :, np.newaxis].astype(np.float64)
+    x, y = np.broadcast_arrays(x, y)
+    lon, lat = _utm_to_wgs84(zone, hemisphere).transform(x.ravel(), y.ravel())
+    corners = np.stack([lon, lat], axis=-1).reshape(*x.shape, 2)
+    sw = corners[:, :-1, :-1]
+    se = corners[:, :-1, 1:]
+    ne = corners[:, 1:, 1:]
+    nw = corners[:, 1:, :-1]
+    # Same vertex order as `shapely.box`, so the polygons match `_utm_squares_to_wgs84`.
+    rings = np.stack([se, ne, nw, sw, se], axis=-2).reshape(-1, 5, 2)
+    lower = np.minimum(np.minimum(sw, se), np.minimum(ne, nw)).reshape(-1, 2)
+    upper = np.maximum(np.maximum(sw, se), np.maximum(ne, nw)).reshape(-1, 2)
+    return rings, np.concatenate([lower, upper], axis=1)
+
+
+def _rings_to_wgs84(rings: NDArray[np.float64]) -> GeoArray:
+    """Return closed WGS84 rings as polygons, split at the antimeridian."""
+    # shapely's stubs type `polygons` as possibly scalar; `asarray` pins the array type.
+    return _split_at_antimeridian(np.asarray(shapely.polygons(rings), dtype=np.object_))
 
 
 class MGRSGrid:
@@ -650,6 +789,9 @@ class MGRSGrid:
         # STRtree ignores None but not empty geometries.
         non_empty = geoms.copy()
         non_empty[shapely.is_empty(non_empty)] = None
+        # Prepare copies so the caller's geometries are left untouched.
+        non_empty = shapely.from_wkb(shapely.to_wkb(non_empty))
+        shapely.prepare(non_empty)
         return shapely.STRtree(non_empty)
 
     def _make_subdivision_template(self) -> NDArray[np.int32]:
@@ -670,10 +812,39 @@ class MGRSGrid:
 
     def _intersects_any(self, geoms: GeoArray) -> NDArray[np.bool_]:
         """Return a boolean mask of geometries that intersect any filter geometry."""
-        hits = self._filter_tree.query(geoms, predicate="intersects")[0]
+        # Testing envelope matches against the prepared filter geometries avoids
+        # preparing every square, which is slow against a detailed area of interest.
+        square_idx, filter_idx = self._filter_tree.query(geoms)
+        hits = shapely.intersects(self._filter_tree.geometries[filter_idx], geoms[square_idx])
         mask = np.zeros(len(geoms), dtype=np.bool_)
-        mask[hits] = True
+        mask[square_idx[hits]] = True
         return mask
+
+    def _envelope_pairs(
+        self,
+        bounds: NDArray[np.float64],
+    ) -> tuple[NDArray[np.intp], NDArray[np.intp]]:
+        """Return the (square, filter geometry) index pairs whose envelopes intersect."""
+        # Query the tree once per 100 km square with the envelope of its 10 km squares,
+        # then compare the 10 km envelopes with those candidates directly.
+        blocks = bounds.reshape(-1, _SQUARES_PER_100KM, 4)
+        block_bounds = np.concatenate(
+            [blocks[..., :2].min(axis=1), blocks[..., 2:].max(axis=1)], axis=1
+        )
+        block_idx, filter_idx = self._filter_tree.query(shapely.box(*block_bounds.T))
+        square_idx = (
+            block_idx[:, np.newaxis] * _SQUARES_PER_100KM + np.arange(_SQUARES_PER_100KM)
+        ).ravel()
+        filter_idx = np.repeat(filter_idx, _SQUARES_PER_100KM)
+        square_bounds = bounds[square_idx]
+        filter_bounds = shapely.bounds(self._filter_tree.geometries)[filter_idx]
+        meets = (
+            (square_bounds[:, 0] <= filter_bounds[:, 2])
+            & (square_bounds[:, 1] <= filter_bounds[:, 3])
+            & (square_bounds[:, 2] >= filter_bounds[:, 0])
+            & (square_bounds[:, 3] >= filter_bounds[:, 1])
+        )
+        return square_idx[meets], filter_idx[meets]
 
     def _materialize(self) -> None:
         filter_geom = self._filter_tree.geometries
@@ -687,12 +858,11 @@ class MGRSGrid:
         for _, zone_row in matched_utm_zones.iterrows():
             zone: int = zone_row["zone"]
             hemisphere: Hemisphere = zone_row["hemisphere"]
-            zone_eastings, zone_northings, zone_geometries = self._materialize_zone(
-                zone,
-                hemisphere,
+            zone_eastings, zone_northings, zone_latitudes, zone_geometries = (
+                self._materialize_zone(zone, hemisphere)
             )
             n = len(zone_eastings)
-            codes.append(_mgrs_10km_codes(zone, hemisphere, zone_eastings, zone_northings))
+            codes.append(_mgrs_10km_codes(zone, zone_eastings, zone_northings, zone_latitudes))
             eastings.append(zone_eastings)
             northings.append(zone_northings)
             zones.append(np.full(n, zone, dtype=np.uint8))
@@ -714,27 +884,49 @@ class MGRSGrid:
         self,
         zone: int,
         hemisphere: Hemisphere,
-    ) -> tuple[NDArray[np.int32], NDArray[np.int32], GeoArray]:
-        """Return the SW corners and WGS84 boxes of one zone's squares."""
-        zone_geom_wgs = self.utm_zones.get_zone_geometry(zone, hemisphere)
+    ) -> tuple[NDArray[np.int32], NDArray[np.int32], NDArray[np.float64], GeoArray]:
+        """Return the SW corners, their latitudes and the WGS84 boxes of one zone's squares."""
+        zone_geom_wgs = _zone_geometry(zone, hemisphere)
         coarse_x, coarse_y = self._build_coarse_coords(zone, hemisphere)
-        coarse_boxes_wgs = _utm_squares_to_wgs84(
+        x_edges = np.unique(coarse_x)
+        y_edges = np.unique(coarse_y)
+        coarse_rings, _ = _utm_lattice_rings(
             zone,
             hemisphere,
-            coarse_x,
-            coarse_y,
-            _100KM_SIZE,
+            np.append(x_edges, x_edges[-1] + _100KM_SIZE)[np.newaxis],
+            np.append(y_edges, y_edges[-1] + _100KM_SIZE)[np.newaxis],
         )
+        coarse_boxes_wgs = _rings_to_wgs84(coarse_rings)
         # 100 km squares only prune; slivers are dropped at 10 km, where the cutoff applies.
         shapely.prepare(zone_geom_wgs)
         mask = self._intersects_any(coarse_boxes_wgs)
         mask &= shapely.intersects(zone_geom_wgs, coarse_boxes_wgs)
 
-        fine_x, fine_y = self._subdivide_coarse_coords(coarse_x[mask], coarse_y[mask])
-        fine_boxes_wgs = _utm_squares_to_wgs84(zone, hemisphere, fine_x, fine_y, _10KM_SIZE)
-        mask = self._intersects_any(fine_boxes_wgs)
-        mask[mask] = _overlaps_zone(fine_boxes_wgs[mask], zone_geom_wgs)
-        return fine_x[mask], fine_y[mask], fine_boxes_wgs[mask]
+        coarse_x, coarse_y = coarse_x[mask], coarse_y[mask]
+        fine_x, fine_y = self._subdivide_coarse_coords(coarse_x, coarse_y)
+        rings, bounds = _utm_10km_rings(zone, hemisphere, coarse_x, coarse_y)
+        squares = np.empty(len(rings), dtype=np.object_)
+        # Squares split at the antimeridian take the envelope of their two parts.
+        wraps = bounds[:, 2] - bounds[:, 0] > 180  # noqa: PLR2004
+        squares[wraps] = _rings_to_wgs84(rings[wraps])
+        bounds[wraps] = shapely.bounds(squares[wraps])
+
+        # Only squares whose envelope meets the zone and a filter geometry become polygons.
+        square_idx, filter_idx = self._envelope_pairs(bounds)
+        _, near = _zone_envelope_relation(bounds, _zone_rectangles(zone, hemisphere))
+        near_zone = near[square_idx]
+        square_idx, filter_idx = square_idx[near_zone], filter_idx[near_zone]
+        needed = np.zeros(len(rings), dtype=np.bool_)
+        needed[square_idx] = True
+        needed &= ~wraps
+        squares[needed] = _rings_to_wgs84(rings[needed])
+
+        hits = shapely.intersects(self._filter_tree.geometries[filter_idx], squares[square_idx])
+        mask = np.zeros(len(rings), dtype=np.bool_)
+        mask[square_idx[hits]] = True
+        mask[mask] = _overlaps_zone(squares[mask], zone, hemisphere)
+        # The fourth ring vertex is the projected SW corner.
+        return fine_x[mask], fine_y[mask], rings[mask, 3, 1], squares[mask]
 
     def _build_coarse_coords(
         self,
@@ -756,8 +948,8 @@ class MGRSGrid:
             100 km-spaced eastings and northings.
         """
         cell_size = _100KM_SIZE
-        zone_geom_wgs = self.utm_zones.get_zone_geometry(zone=zone, hemisphere=hemisphere)
-        utm_crs = utm_to_crs(zone, hemisphere)
+        zone_geom_wgs = _zone_geometry(zone, hemisphere)
+        utm_crs = _cached_utm_crs(zone, hemisphere)
         zone_geom_utm = transform_shapely(zone_geom_wgs, WGS84, utm_crs)
         minx, miny, maxx, maxy = zone_geom_utm.bounds
 
