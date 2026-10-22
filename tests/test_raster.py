@@ -43,6 +43,7 @@ from freezebase.vrt import (
     derive,
     from_raster,
     mosaic,
+    stack,
     warp,
 )
 
@@ -494,6 +495,99 @@ class TestRewriteTiffVrt:
 
     def test_merge_tiffs_is_gone(self) -> None:
         assert not hasattr(raster, "merge_tiffs")
+
+
+def make_typed_tiff(path: Path, values: list[float], dtype: str, nodata: float) -> None:
+    """Write a one-row, one-band raster of ``values`` on the shared test grid."""
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=len(values),
+        height=1,
+        count=1,
+        dtype=dtype,
+        crs="EPSG:32632",
+        transform=from_origin(500000, 5200000, 10, 10),
+        nodata=nodata,
+    ) as ds:
+        ds.write(np.array([values], dtype), 1)
+
+
+class TestMixedBands:
+    """A raster file holds one dtype and one nodata, so mixed bands are never coerced."""
+
+    def test_mixed_dtypes_raise_without_a_profile_dtype(self, tmp_path: Path) -> None:
+        a, b = tmp_path / "a.tif", tmp_path / "b.tif"
+        make_typed_tiff(a, [1, 2, 3], "uint8", 0)
+        make_typed_tiff(b, [0.25, 1000.5, -7.0], "float32", np.nan)
+
+        with pytest.raises(ValueError, match="pass dtype in profile"):
+            write_cog(stack([a, b]), tmp_path / "o.tif")
+
+        assert not (tmp_path / "o.tif").exists()
+
+    def test_mixed_dtypes_write_with_a_profile_dtype(self, tmp_path: Path) -> None:
+        a, b = tmp_path / "a.tif", tmp_path / "b.tif"
+        make_typed_tiff(a, [1, 2, 3], "uint8", 0)
+        make_typed_tiff(b, [0.25, 1000.5, -7.0], "float32", np.nan)
+
+        write_cog(stack([a, b]), tmp_path / "o.tif", {"dtype": "float32", "nodata": -9999})
+
+        with rasterio.open(tmp_path / "o.tif") as ds:
+            assert ds.dtypes == ("float32", "float32")
+            assert ds.read(2).tolist() == [[0.25, 1000.5, -7.0]]
+            assert ds.read(1).tolist() == [[1, 2, 3]]
+
+    def test_mixed_nodata_raise_without_a_profile_nodata(self, tmp_path: Path) -> None:
+        a, b = tmp_path / "a.tif", tmp_path / "b.tif"
+        make_typed_tiff(a, [0, 5, 6], "uint8", 0)
+        make_typed_tiff(b, [255, 0, 7], "uint8", 255)
+
+        with pytest.raises(ValueError, match="pass nodata in profile"):
+            write_cog(stack([a, b]), tmp_path / "o.tif")
+
+    def test_mixed_nodata_remap_per_band_with_a_profile_nodata(self, tmp_path: Path) -> None:
+        a, b = tmp_path / "a.tif", tmp_path / "b.tif"
+        make_typed_tiff(a, [0, 5, 6], "uint8", 0)
+        make_typed_tiff(b, [255, 0, 7], "uint8", 255)
+
+        write_cog(stack([a, b]), tmp_path / "o.tif", {"nodata": 254})
+
+        with rasterio.open(tmp_path / "o.tif") as ds:
+            assert ds.nodatavals == (254, 254)
+            assert ds.read(1).tolist() == [[254, 5, 6]]
+            assert ds.read(2).tolist() == [[254, 0, 7]]
+
+    def test_rewrite_tiff_refuses_mixed_bands_too(self, tmp_path: Path) -> None:
+        a, b = tmp_path / "a.tif", tmp_path / "b.tif"
+        make_typed_tiff(a, [0, 5, 6], "uint8", 0)
+        make_typed_tiff(b, [255, 0, 7], "uint8", 255)
+
+        with pytest.raises(ValueError, match="pass nodata in profile"):
+            rewrite_tiff(stack([a, b]), tmp_path / "o.tif", {"driver": "GTiff"})
+        with pytest.raises(ValueError, match="pass nodata in profile"):
+            rewrite_tiff(stack([a, b]), tmp_path / "o.tif", COG_PROFILE)
+
+    def test_a_non_local_upath_is_a_raster_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Non-local UPaths have no __fspath__, so they must not be taken for arrays.
+        src = tmp_path / "src.tif"
+        make_tiff(src)
+        remote = UPath("s3://bucket/src.tif")
+        seen: list[object] = []
+
+        def fake_from_raster(path: object) -> VRT:
+            seen.append(path)
+            return from_raster(src)
+
+        monkeypatch.setattr("freezebase.vrt.from_raster", fake_from_raster)
+
+        write_cog(remote, tmp_path / "o.tif")
+
+        assert seen == [remote]
+        assert_is_cog(tmp_path / "o.tif")
 
 
 class TestWriteCog:

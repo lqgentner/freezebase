@@ -101,8 +101,11 @@ rewrite_tiff(vrt.mosaic(["a.tif", "b.tif"]), "mosaic.tif", {"compress": "deflate
 
 A `nodata` in the profile that differs from a band's moves that band's old nodata pixels to
 the new value, whatever the VRT holds: a mosaic, a warp or a derived band. `nodata: None`
-keeps the VRT's. A `dtype` casts every band, and casting to an integer type needs a nodata
-that fits, or `write_cog` raises `ValueError`.
+keeps the VRT's. A `dtype` casts every band, and `write_cog` raises `ValueError` if a band's nodata does
+not fit the new dtype. A cast rounds and clamps out-of-range values, so a valid value can
+become the nodata value: 300 cast to `uint8` with nodata 255 reads as nodata. A raster file
+holds one dtype and one nodata, so bands that differ need `dtype` or `nodata` in the
+profile, or `ValueError`.
 
 ```python
 from freezebase import vrt
