@@ -501,6 +501,25 @@ class TestVerticalShift:
             warp(dem, crs="EPSG:4326")
         assert "pass a 3D or compound crs, or a 2D src_crs" in str(info.value)
 
+    def test_multi_band_shift_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def no_grid(*_args: object) -> None:
+            """Fail if the target grid is derived before the band check."""
+            raise AssertionError
+
+        two = make_tiff(
+            tmp_path / "two.tif", origin=(2620000.0, 1160000.0), count=2, crs="EPSG:2056+5728"
+        )
+        target = make_tiff(tmp_path / "target.tif", origin=(7.7, 46.6), crs="EPSG:4979")
+        # Previously the height shift was added to every band.
+        with pytest.raises(ValueError, match="single-band") as info:
+            warp(two, like=target)
+        assert "2D src_crs" in str(info.value)
+        monkeypatch.setattr(_warp, "calculate_default_transform", no_grid)
+        with pytest.raises(ValueError, match="single-band"):
+            warp(two, crs="EPSG:4979")
+
     def test_2d_source_into_vertical_target_raises(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="vertical") as info:
             warp(make_tiff(tmp_path / "utm.tif"), crs="EPSG:4979")

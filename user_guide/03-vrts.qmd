@@ -153,6 +153,8 @@ for example `EPSG:2056+5728` to `EPSG:4979`. Nothing else needs to be requested.
   target. For the first, pass a 2D `src_crs` to keep heights unconverted. For the second,
   pass a 3D or compound `src_crs`, or a 2D `crs`.
 - Vertical units such as feet are converted as `gdalwarp` converts them.
+- Only single-band rasters are shifted, as by `gdalwarp`. A multi-band source raises
+  `ValueError`: warp the height band alone, or pass a 2D `src_crs`.
 
 Making the grids reachable is up to you. Download them, then point PROJ at them:
 

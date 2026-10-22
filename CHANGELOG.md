@@ -53,7 +53,8 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   under `tolerance="auto"`. Heights in feet are converted as `gdalwarp` does. Warping between
   a vertical and a 2D CRS raises `ValueError`: pass a 2D `src_crs` to keep heights
   unconverted from a vertical source, and a 3D or compound `src_crs` (or a 2D `crs`) for a
-  2D source and a vertical target. PROJ needs the grids, e.g. via `PROJ_DATA`.
+  2D source and a vertical target. Only single-band rasters are shifted, as by `gdalwarp`;
+  a multi-band source raises `ValueError`. PROJ needs the grids, e.g. via `PROJ_DATA`.
 - `VRT.metadata_domains` holds dataset metadata of named domains, such as the
   `IMAGE_STRUCTURE` interleaving GDAL records for a warped multi-band raster.
 
@@ -75,7 +76,8 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   raises `ValueError` when it has no exact transformation (install the grids, e.g. via
   `PROJ_DATA`). A vertical source with a 2D target, or the reverse, raises `ValueError`
   (pass a 2D `src_crs` through `warp` to keep heights unconverted), and heights are shifted
-  and converted between units when both CRSs are compound or 3D.
+  and converted between units when both CRSs are compound or 3D; for a multi-band source,
+  which `gdalwarp` would not shift, that raises `ValueError`.
 - `mgrs` is no longer a dependency. MGRS references are now computed with NumPy
   and pyproj, giving the same codes and squares as `mgrs` (GeoTrans) except for
   the fixes below. `MGRSGrid` builds about a third faster.
