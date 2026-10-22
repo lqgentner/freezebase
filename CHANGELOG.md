@@ -11,6 +11,8 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 ### Added
 
 - Python 3.15 support, verified in CI.
+- `vectools.write_parquet` writes a GeoDataFrame atomically as zstd-compressed
+  GeoParquet; `compression_level` and `row_group_size` are keyword arguments.
 
 ### Changed
 
@@ -29,6 +31,10 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 - **Breaking:** `MGRSGeoBox.from_mgrs` stores the reference in the form
   `MGRSGrid` uses: upper case, two-digit zone, no surrounding spaces. Before,
   `from_mgrs("4QFJ15").mgrs_code` was `"4QFJ15"`; now it is `"04QFJ15"`.
+- `GeoVectorData` caches its processed GeoParquet with zstd at level 15 in row
+  groups of at most 100 000 rows, instead of pyarrow's snappy in one row group of
+  up to a million. The files shrink by a quarter to a half and read as fast;
+  caches written by earlier versions stay valid and are not rewritten.
 
 ### Removed
 
@@ -36,6 +42,10 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   around `mgrs.MGRS().UTMToMGRS` that grid construction left on the instance.
   Before: `grid.utm_to_mgrs(zones, hemispheres, eastings, northings,
   MGRSPrecision=1)`. After: read `grid.mgrs_codes`, which holds the grid's codes.
+- **Breaking:** `vectools.save_and_read_parquet`, which wrote a GeoDataFrame and
+  read the whole file back. Before: `save_and_read_parquet(gdf, path)`. After:
+  `write_parquet(gdf, path)`, followed by `gpd.read_parquet(path)` where the
+  frame is needed.
 
 ### Fixed
 
