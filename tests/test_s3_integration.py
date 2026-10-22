@@ -23,13 +23,12 @@ import uuid
 import numpy as np
 import pytest
 from rasterio.transform import from_origin
+from upath import UPath
 
 pytest.importorskip("s3fs")
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-
-    from upath import UPath
 
 from freezebase.raster import (
     COG_PROFILE,
@@ -47,7 +46,7 @@ from freezebase.s3 import (
     make_s3_upath,
     resolve_endpoint_url,
 )
-from freezebase.vrt import create_warped_vrt
+from freezebase.vrt import VRT, create_warped_vrt, mosaic, warp
 
 _ENDPOINT = os.getenv("FREEZEBASE_TEST_S3_ENDPOINT")
 _KEY = os.getenv("FREEZEBASE_TEST_S3_KEY")
@@ -213,6 +212,37 @@ class TestCreateWarpedVrtS3:
         assert s3_key.exists()
         with rasterio_open(s3_key) as ds:
             assert ds.crs.to_epsg() == 3857
+
+
+class TestWarpS3:
+    def test_path_source_keeps_its_storage_options(self, s3_key: UPath) -> None:
+        write_cog(np.full((HEIGHT, WIDTH), 1.0, dtype=np.float32), s3_key, _RASTER_PROFILE)
+
+        w = warp(s3_key, crs="EPSG:3857", resolution=20.0)
+
+        assert w.warp is not None
+        source = w.warp.source
+        assert isinstance(source, UPath)
+        assert source == s3_key
+        assert source.storage_options == s3_key.storage_options
+        with w.open() as ds:
+            assert np.nanmax(ds.read(1)) == 1.0
+
+    def test_in_memory_mosaic_of_s3_tiles(self, s3_key: UPath, s3_key2: UPath) -> None:
+        write_cog(np.full((HEIGHT, WIDTH), 1.0, dtype=np.float32), s3_key, _RASTER_PROFILE)
+        shifted = _RASTER_PROFILE | {
+            "transform": from_origin(500000 + WIDTH * 10, 5200000, 10, 10)
+        }
+        write_cog(np.full((HEIGHT, WIDTH), 2.0, dtype=np.float32), s3_key2, shifted)
+
+        w = warp(mosaic([s3_key, s3_key2]), crs="EPSG:3857", resolution=20.0)
+
+        assert w.warp is not None
+        assert isinstance(w.warp.source, VRT)
+        assert w.source_files() == [s3_key, s3_key2]
+        assert all(f.storage_options == s3_key.storage_options for f in w.source_files())
+        with w.open() as ds:
+            assert {1.0, 2.0} <= set(np.unique(ds.read(1)).tolist())
 
 
 class TestUploadsThroughS3fs:

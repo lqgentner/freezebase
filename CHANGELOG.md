@@ -37,6 +37,16 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   GDAL pixel function to one input (every band) or several (one band from each). `VRT`
   inputs are nested whole, so the function sees mosaicked pixels; input NODATA is honoured
   through `propagateNoData`, so a nodata input gives a nodata output.
+- `freezebase.vrt.warp(source, crs=, src_crs=, resolution=, bounds=, like=, resampling=,
+  snap=, dtype=, nodata=, tolerance=, allow_ballpark=)` warps a raster or `VRT` onto an
+  explicit grid (`resolution` may be `(x, y)`), onto the grid
+  `rasterio.warp.calculate_default_transform` derives, or onto a reference raster's grid
+  (`like`). PROJ ballpark transformations are refused unless `allow_ballpark=True`, so a
+  missing grid raises `ValueError` instead of silently ignoring a datum shift. `tolerance`
+  is the approximation error in source pixels (0.125 by default, `0` for exact). Both
+  settings are kept in the written VRT.
+- `VRT.metadata_domains` holds dataset metadata of named domains, such as the
+  `IMAGE_STRUCTURE` interleaving GDAL records for a warped multi-band raster.
 
 ### Changed
 
