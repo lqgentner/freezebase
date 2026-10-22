@@ -589,6 +589,30 @@ def _utm_squares_to_wgs84(
     return _split_at_antimeridian(projected)
 
 
+def _utm_10km_squares_to_wgs84(
+    zone: int,
+    hemisphere: Hemisphere,
+    sw_x: NDArray[np.int32],
+    sw_y: NDArray[np.int32],
+) -> GeoArray:
+    """Return the 10 km squares of 100 km squares as WGS84 polygons, row by row."""
+    # Neighbouring squares share corners, so each corner is projected only once.
+    offsets = np.arange(0, _100KM_SIZE + 1, _10KM_SIZE, dtype=np.float64)
+    x = sw_x[:, np.newaxis, np.newaxis] + offsets[np.newaxis, np.newaxis, :]
+    y = sw_y[:, np.newaxis, np.newaxis] + offsets[np.newaxis, :, np.newaxis]
+    x, y = np.broadcast_arrays(x, y)
+    lon, lat = _utm_to_wgs84(zone, hemisphere).transform(x.ravel(), y.ravel())
+    corners = np.stack([lon, lat], axis=-1).reshape(*x.shape, 2)
+    sw = corners[:, :-1, :-1]
+    se = corners[:, :-1, 1:]
+    ne = corners[:, 1:, 1:]
+    nw = corners[:, 1:, :-1]
+    # Same vertex order as `shapely.box`, so the polygons match `_utm_squares_to_wgs84`.
+    rings = np.stack([se, ne, nw, sw, se], axis=-2).reshape(-1, 5, 2)
+    # shapely's stubs type `polygons` as possibly scalar; `asarray` pins the array type.
+    return _split_at_antimeridian(np.asarray(shapely.polygons(rings), dtype=np.object_))
+
+
 class MGRSGrid:
     """The 10 km MGRS squares intersecting an area of interest.
 
@@ -736,8 +760,9 @@ class MGRSGrid:
         mask = self._intersects_any(coarse_boxes_wgs)
         mask &= shapely.intersects(zone_geom_wgs, coarse_boxes_wgs)
 
-        fine_x, fine_y = self._subdivide_coarse_coords(coarse_x[mask], coarse_y[mask])
-        fine_boxes_wgs = _utm_squares_to_wgs84(zone, hemisphere, fine_x, fine_y, _10KM_SIZE)
+        coarse_x, coarse_y = coarse_x[mask], coarse_y[mask]
+        fine_x, fine_y = self._subdivide_coarse_coords(coarse_x, coarse_y)
+        fine_boxes_wgs = _utm_10km_squares_to_wgs84(zone, hemisphere, coarse_x, coarse_y)
         mask = self._intersects_any(fine_boxes_wgs)
         mask[mask] = _overlaps_zone(fine_boxes_wgs[mask], zone_geom_wgs)
         return fine_x[mask], fine_y[mask], fine_boxes_wgs[mask]

@@ -5,13 +5,14 @@ import geopandas as gpd
 import numpy as np
 from pyproj import CRS
 import pytest
-from shapely import Point, Polygon, box, get_parts, is_prepared
+from shapely import Point, Polygon, box, equals_exact, get_parts, is_prepared
 
 from freezebase.mgrs import (
     MGRSGeoBox,
     MGRSGrid,
     UTMZones,
     mgrs_to_crs,
+    transform_shapely,
     utm_to_crs,
     utms_to_epsgs,
 )
@@ -437,6 +438,21 @@ class TestMGRSGridAtAntimeridian:
 
         assert len(gdf) > 0
         assert (bounds.maxx - bounds.minx < 1).all()
+
+
+def test_grid_geometries_are_the_projected_utm_squares() -> None:
+    grid = MGRSGrid(box(5.5, 45.5, 6.5, 46.5))  # spans zones 31 and 32
+    for zone in np.unique(grid.zones):
+        in_zone = grid.zones == zone
+        utm_squares = box(
+            grid.eastings[in_zone],
+            grid.northings[in_zone],
+            grid.eastings[in_zone] + 10_000,
+            grid.northings[in_zone] + 10_000,
+        )
+        expected = transform_shapely(utm_squares, utm_to_crs(int(zone), "N"), CRS(4326))
+
+        assert equals_exact(grid.geometries[in_zone], expected, tolerance=0).all()
 
 
 @pytest.mark.parametrize(
