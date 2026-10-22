@@ -536,7 +536,7 @@ def rewrite_tiff(
     ------
     ValueError
         If ``move`` is set for a ``VRT`` source, or a per-band sequence for a ``VRT`` does
-        not hold one entry per band.
+        not hold one entry per band, or its bands differ in dtype or nodata.
     RuntimeError
         If the rewrite fails.
     """
@@ -621,6 +621,8 @@ def _rewrite_vrt(
         band_tags=band_tags,
         units=units,
     )
+    # profile dtype and nodata are ignored here, so mixed bands would be coerced.
+    _require_uniform_bands(vrt)
     try:
         # Entered in the main thread: credentials set in a worker don't reach GDAL's readers.
         with vrt.env():
@@ -781,6 +783,25 @@ def _cast_and_check(vrt: VRT, dtype: Any) -> None:
             raise ValueError(msg) from e
 
 
+def _require_uniform_bands(vrt: VRT) -> None:
+    """Refuse bands of differing dtype or nodata, which a raster file cannot hold."""
+    from freezebase.vrt._model import _nodata_equal  # noqa: PLC0415
+
+    first = vrt.bands[0]
+    if any(band.dtype != first.dtype for band in vrt.bands):
+        msg = (
+            f"the bands have different dtypes ({sorted({b.dtype for b in vrt.bands})}) "
+            "but a raster file holds one: pass dtype in profile."
+        )
+        raise ValueError(msg)
+    if not all(_nodata_equal(band.nodata, first.nodata) for band in vrt.bands):
+        msg = (
+            f"the bands have different nodata values ({[b.nodata for b in vrt.bands]}) "
+            "but a raster file holds one: pass nodata in profile."
+        )
+        raise ValueError(msg)
+
+
 def _apply_vrt_metadata(
     vrt: VRT,
     *,
@@ -815,8 +836,8 @@ def _is_vrt_input(data: object) -> bool:
     """Whether ``data`` is a VRT or a path rather than an array."""
     from freezebase.vrt import VRT  # noqa: PLC0415  # freezebase.vrt imports raster
 
-    # Any path-like object, as os.fspath accepts; the bare ABC is the runtime check.
-    return isinstance(data, VRT | str) or hasattr(data, "__fspath__")
+    # Non-local UPaths have no __fspath__, so they are named; other path-likes have one.
+    return isinstance(data, VRT | str | UPath) or hasattr(data, "__fspath__")
 
 
 def _encode_cog(
@@ -879,6 +900,7 @@ def _write_cog_from_vrt(
         raise RuntimeError(msg) from e
     if profile.get("dtype") is not None or profile.get("nodata") is not None:
         _cast_and_check(vrt, profile.get("dtype"))
+    _require_uniform_bands(vrt)
     xml = vrt.to_xml()
     try:
         # Entered in the main thread: credentials set in a worker don't reach GDAL's readers.
@@ -960,6 +982,8 @@ def write_cog(
         a VRT or path only ``dtype``, ``nodata`` and the creation options apply: ``dtype``
         casts every band, and a ``nodata`` value that differs from a band's moves the pixels
         holding the old one to it. ``nodata=None`` keeps the VRT's nodata, as leaving it out.
+        A cast rounds and clamps out-of-range values, so a valid value can become the nodata
+        value. Bands that differ in dtype or nodata need ``dtype`` or ``nodata`` here.
     band_names : list[str] or None, optional
         Band descriptions, one per band.
     color_interp : list[ColorInterp] or None, optional
@@ -984,8 +1008,9 @@ def write_cog(
     ------
     ValueError
         If ``profile`` is missing for an array, a per-band sequence has the wrong length, the
-        dtype is unknown, a nodata value does not fit the dtype, or a raster path has a
-        colour table or is south-up.
+        dtype is unknown, a nodata value does not fit the dtype, a raster path has a
+        colour table or is south-up, or the bands differ in dtype or nodata without
+        ``profile`` setting it.
     RuntimeError
         If the write fails.
     """
