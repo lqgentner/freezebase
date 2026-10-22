@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -29,9 +30,13 @@ def proj_grids(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Return a PROJ data directory joining rasterio's PROJ data and pyproj's synced grids."""
     missing = [name for name in _SWISS_GRIDS if not (GRIDS / name).is_file()]
     if missing:
-        pytest.skip(
+        reason = (
             f"PROJ grids missing ({', '.join(missing)}); run pyproj sync --source-id ch_swisstopo"
         )
+        # A bad CI grid cache must not silently skip the vertical tests.
+        if os.environ.get("CI"):
+            pytest.fail(reason)
+        pytest.skip(reason)
     proj_data = PROJDataFinder().search()
     if proj_data is None:
         pytest.skip("rasterio bundles no PROJ data")
