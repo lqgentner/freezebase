@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from copy import copy
+import functools
 import re
-from typing import TYPE_CHECKING, Any, cast, overload, override
+from typing import TYPE_CHECKING, Any, overload, override
 
 from affine import Affine
 import geopandas as gpd
 from geopandas import GeoSeries
-import mgrs
 import numpy as np
 from odc.geo.geobox import GeoBox
 import pandas as pd
@@ -212,6 +212,117 @@ def mgrs_to_crs(mgrs_code: str) -> CRS:
     return CRS.from_epsg(epsg)
 
 
+_100KM_SIZE = 100_000
+_10KM_SIZE = 10_000
+_FALSE_EASTING = 500_000
+_FALSE_NORTHING_SOUTH = 10_000_000
+
+_LATITUDE_BANDS = "CDEFGHJKLMNPQRSTUVWX"
+# Northing of each band's southern edge, rounded down to 100 km.
+_BAND_MIN_NORTHING: dict[str, int] = dict(
+    zip(
+        _LATITUDE_BANDS,
+        (
+            *(1_100_000, 2_000_000, 2_800_000, 3_700_000, 4_600_000),
+            *(5_500_000, 6_400_000, 7_300_000, 8_200_000, 9_100_000),
+            *(0, 800_000, 1_700_000, 2_600_000, 3_500_000),
+            *(4_400_000, 5_300_000, 6_200_000, 7_000_000, 7_900_000),
+        ),
+        strict=True,
+    ),
+)
+# 10 km references may stray this far outside their band, but not past the UTM limits.
+_BAND_TOLERANCE = 0.1
+_UTM_MIN_LAT = -80.5
+_UTM_MAX_LAT = 84.5
+# Column letters cycle through three sets by zone; row letters repeat every 2,000 km.
+_COLUMN_LETTERS = ("ABCDEFGH", "JKLMNPQR", "STUVWXYZ")
+_ROW_LETTERS = "ABCDEFGHJKLMNPQRSTUV"
+_ROW_CYCLE = 2_000_000
+
+
+@functools.cache
+def _utm_to_wgs84(zone: int, hemisphere: Hemisphere) -> Transformer:
+    """Return a cached transformer from a UTM zone to WGS84 longitude/latitude."""
+    return Transformer.from_crs(utm_to_crs(zone, hemisphere), WGS84, always_xy=True)
+
+
+def _row_offset(zone: int) -> int:
+    """Return the northing at which row letter A starts in a zone."""
+    return 500_000 if zone % 2 == 0 else 0
+
+
+def _band_bounds(band: str) -> tuple[float, float]:
+    """Return the latitudes between which a 10 km square of a band may lie."""
+    south = -80.0 + 8 * _LATITUDE_BANDS.index(band)
+    north = south + 8
+    # GeoTrans stretches C and X to the UTM limits.
+    if band == "C":
+        south = _UTM_MIN_LAT
+    if band == "X":
+        north = _UTM_MAX_LAT
+    return (
+        max(south - _BAND_TOLERANCE, _UTM_MIN_LAT),
+        min(north + _BAND_TOLERANCE, _UTM_MAX_LAT),
+    )
+
+
+def _mgrs_10km_codes(
+    zone: int,
+    hemisphere: Hemisphere,
+    eastings: NDArray[np.int32],
+    northings: NDArray[np.int32],
+) -> NDArray[np.str_]:
+    """Return the 10 km MGRS references of squares in one zone, named by their SW corners."""
+    _, latitudes = _utm_to_wgs84(zone, hemisphere).transform(eastings, northings)
+    # The nudge puts a corner on a band edge into the northern band, as GeoTrans does;
+    # clipping folds corners just south of 80 S into C and stretches X to the pole.
+    band_index = np.floor((np.asarray(latitudes) + 80) / 8 + 1e-12)
+    band_index = np.clip(band_index, 0, len(_LATITUDE_BANDS) - 1).astype(np.intp)
+    bands = np.array(list(_LATITUDE_BANDS))[band_index]
+    columns = np.array(list(_COLUMN_LETTERS[(zone - 1) % 3]))[eastings // _100KM_SIZE - 1]
+    rows = np.array(list(_ROW_LETTERS))[
+        (northings + _row_offset(zone)) % _ROW_CYCLE // _100KM_SIZE
+    ]
+    east_digits = (eastings % _100KM_SIZE // _10KM_SIZE).astype(np.str_)
+    north_digits = (northings % _100KM_SIZE // _10KM_SIZE).astype(np.str_)
+    return f"{zone:02d}" + bands + columns + rows + east_digits + north_digits
+
+
+def _mgrs_10km_to_utm(match: re.Match[str]) -> tuple[int, Hemisphere, int, int]:
+    """Return the zone, hemisphere and SW corner of a parsed 10 km reference."""
+    mgrs_code = match.string
+    zone = int(match.group("zone"))
+    _validate_zone(zone)
+    band = match.group("band").upper()
+    column, row = match.group("square").upper()
+    columns = _COLUMN_LETTERS[(zone - 1) % 3]
+    if band == "X" and zone in (_ZONE_32, _ZONE_34, _ZONE_36):
+        msg = f"MGRS reference {mgrs_code!r}: zone {zone} has no band X."
+        raise ValueError(msg)
+    if column not in columns or row not in _ROW_LETTERS:
+        msg = f"MGRS reference {mgrs_code!r}: zone {zone} has no square {column}{row}."
+        raise ValueError(msg)
+
+    hemisphere: Hemisphere = "S" if band in _SOUTHERN_BANDS else "N"
+    band_min_northing = _BAND_MIN_NORTHING[band]
+    # Rows repeat every 2,000 km; take the first repeat at or north of the band's floor.
+    northing = (_ROW_LETTERS.index(row) * _100KM_SIZE - _row_offset(zone)) % _ROW_CYCLE
+    northing += band_min_northing // _ROW_CYCLE * _ROW_CYCLE
+    if northing < band_min_northing:
+        northing += _ROW_CYCLE
+    digits = match.group("digits")
+    easting = (columns.index(column) + 1) * _100KM_SIZE + int(digits[0]) * _10KM_SIZE
+    northing += int(digits[1]) * _10KM_SIZE
+
+    _, latitude = _utm_to_wgs84(zone, hemisphere).transform(easting, northing)
+    south, north = _band_bounds(band)
+    if northing > _FALSE_NORTHING_SOUTH or not south <= latitude <= north:
+        msg = f"MGRS reference {mgrs_code!r} lies outside latitude band {band}."
+        raise ValueError(msg)
+    return zone, hemisphere, easting, northing
+
+
 class MGRSGeoBox(GeoBox):
     """A 10 x 10 km MGRS square backed by ``odc.geo.GeoBox``.
 
@@ -258,7 +369,7 @@ class MGRSGeoBox(GeoBox):
         ValueError
             If ``resolution`` is not positive, does not evenly divide the 10 km
             grid square, or ``mgrs_code`` is not a 10 km reference (two location
-            digits, e.g. ``"32TMT64"``).
+            digits, e.g. ``"32TMT64"``) to a square of its zone and latitude band.
         """
         if resolution <= 0:
             msg = f"resolution must be positive, got {resolution}."
@@ -274,11 +385,8 @@ class MGRSGeoBox(GeoBox):
             )
             raise ValueError(msg)
 
-        converter = mgrs.MGRS()
-        zone, hemisphere, easting, northing = converter.MGRSToUTM(mgrs_code)
-        # ``mgrs`` types the hemisphere as a plain ``str``; only 'N'/'S' occur,
-        # and ``utm_to_crs`` rejects anything else at runtime.
-        crs = utm_to_crs(zone, cast("Hemisphere", hemisphere))
+        zone, hemisphere, easting, northing = _mgrs_10km_to_utm(match)
+        crs = utm_to_crs(zone, hemisphere)
 
         n_pixels = int(_10KM_SIZE / resolution)
         nw_northing = northing + _10KM_SIZE
@@ -402,11 +510,21 @@ class UTMZones:
         return union_all(parts)
 
 
-_100KM_SIZE = 100_000
-_10KM_SIZE = 10_000
-_FALSE_EASTING = 500_000
-_FALSE_NORTHING_SOUTH = 10_000_000
-_MGRS_PRECISION_10KM = 1
+# Smaller overlaps are rounding error where a square edge lies on the zone boundary (31V).
+_MIN_ZONE_OVERLAP = 1e-9
+
+
+def _overlaps_zone(boxes: GeoArray, zone_geom: BaseGeometry) -> NDArray[np.bool_]:
+    """Return which boxes overlap a zone by more than rounding error."""
+    # Predicates only use the prepared geometry when it is the first argument.
+    shapely.prepare(zone_geom)
+    overlaps = shapely.intersects(zone_geom, boxes)
+    hits = np.flatnonzero(overlaps)
+    # Only squares on the zone boundary need the costlier area test.
+    edge = hits[~shapely.contains_properly(zone_geom, boxes[hits])]
+    shared = shapely.area(shapely.intersection(boxes[edge], zone_geom))
+    overlaps[edge] = shared > _MIN_ZONE_OVERLAP * shapely.area(boxes[edge])
+    return overlaps
 
 
 class MGRSGrid:
@@ -444,6 +562,7 @@ class MGRSGrid:
         self.zones: NDArray[np.uint8] = np.empty(0, dtype=np.uint8)
         self.hemispheres: NDArray[np.str_] = np.empty(0, dtype=np.str_)
         self.geometries: NDArray[np.object_] = np.empty(0, dtype=np.object_)
+        self.mgrs_codes: NDArray[np.str_] = np.empty(0, dtype=np.str_)
 
         self._materialize()
 
@@ -497,26 +616,40 @@ class MGRSGrid:
     def _materialize(self) -> None:
         filter_geom = self._filter_tree.geometries
         matched_utm_zones = self.utm_zones.find_intersecting(filter_geom)
+        parts = []
         for _, zone_row in matched_utm_zones.iterrows():
             zone: int = zone_row["zone"]
             hemisphere: Hemisphere = zone_row["hemisphere"]
-            self._materialize_zone(zone, hemisphere)
+            eastings, northings, geometries = self._materialize_zone(zone, hemisphere)
+            n = len(eastings)
+            parts.append(
+                (
+                    _mgrs_10km_codes(zone, hemisphere, eastings, northings),
+                    eastings,
+                    northings,
+                    np.full(n, zone, dtype=np.uint8),
+                    np.full(n, hemisphere, dtype=np.str_),
+                    geometries,
+                ),
+            )
 
-        mgrs_codes = self._compute_mgrs_codes(
-            self.eastings,
-            self.northings,
-            zones=self.zones,
-            hemispheres=self.hemispheres,
-        )
-        idxs = np.argsort(mgrs_codes)
-        self.mgrs_codes = mgrs_codes[idxs]
-        self.eastings = self.eastings[idxs]
-        self.northings = self.northings[idxs]
-        self.zones = self.zones[idxs]
-        self.hemispheres = self.hemispheres[idxs]
-        self.geometries = self.geometries[idxs]
+        if not parts:
+            return
+        self.mgrs_codes = np.concat([part[0] for part in parts])
+        idxs = np.argsort(self.mgrs_codes)
+        self.mgrs_codes = self.mgrs_codes[idxs]
+        self.eastings = np.concat([part[1] for part in parts])[idxs]
+        self.northings = np.concat([part[2] for part in parts])[idxs]
+        self.zones = np.concat([part[3] for part in parts])[idxs]
+        self.hemispheres = np.concat([part[4] for part in parts])[idxs]
+        self.geometries = np.concat([part[5] for part in parts])[idxs]
 
-    def _materialize_zone(self, zone: int, hemisphere: Hemisphere) -> None:
+    def _materialize_zone(
+        self,
+        zone: int,
+        hemisphere: Hemisphere,
+    ) -> tuple[NDArray[np.int32], NDArray[np.int32], GeoArray]:
+        """Return the SW corners and WGS84 boxes of one zone's squares."""
         utm_crs = utm_to_crs(zone, hemisphere)
         zone_geom_wgs = self.utm_zones.get_zone_geometry(zone, hemisphere)
         coarse_x, coarse_y = self._build_coarse_coords(zone, hemisphere)
@@ -527,13 +660,9 @@ class MGRSGrid:
             coarse_y + _100KM_SIZE,
         )
         coarse_boxes_wgs = transform_shapely(coarse_boxes_utm, utm_crs, WGS84)
-        intersects_geom = self._intersects_any(coarse_boxes_wgs)
-        intersects_zone = shapely.intersects(coarse_boxes_wgs, zone_geom_wgs)
-        mask = intersects_geom & intersects_zone
-        coarse_x = coarse_x[mask]
-        coarse_y = coarse_y[mask]
+        mask = self._squares_to_keep(coarse_boxes_wgs, zone_geom_wgs)
 
-        fine_x, fine_y = self._subdivide_coarse_coords(coarse_x, coarse_y)
+        fine_x, fine_y = self._subdivide_coarse_coords(coarse_x[mask], coarse_y[mask])
         fine_boxes_utm = shapely.box(
             fine_x,
             fine_y,
@@ -541,16 +670,14 @@ class MGRSGrid:
             fine_y + _10KM_SIZE,
         )
         fine_boxes_wgs = transform_shapely(fine_boxes_utm, utm_crs, WGS84)
-        intersects_geom = self._intersects_any(fine_boxes_wgs)
-        intersects_zone = shapely.intersects(fine_boxes_wgs, zone_geom_wgs)
-        mask = intersects_geom & intersects_zone
+        mask = self._squares_to_keep(fine_boxes_wgs, zone_geom_wgs)
+        return fine_x[mask], fine_y[mask], fine_boxes_wgs[mask]
 
-        n = len(mask[mask])
-        self.eastings = np.concat([self.eastings, fine_x[mask]])
-        self.northings = np.concat([self.northings, fine_y[mask]])
-        self.zones = np.concat([self.zones, np.full(n, zone, dtype=np.uint8)])
-        self.hemispheres = np.concat([self.hemispheres, np.full(n, hemisphere, dtype=np.str_)])
-        self.geometries = np.concat([self.geometries, fine_boxes_wgs[mask]])
+    def _squares_to_keep(self, boxes: GeoArray, zone_geom: BaseGeometry) -> NDArray[np.bool_]:
+        """Return which squares intersect the filter geometry and overlap the zone."""
+        mask = self._intersects_any(boxes)
+        mask[mask] = _overlaps_zone(boxes[mask], zone_geom)
+        return mask
 
     def _build_coarse_coords(
         self,
@@ -611,49 +738,6 @@ class MGRSGrid:
         fine_y = (y + tpl[1]).ravel()
 
         return fine_x, fine_y
-
-    def _compute_mgrs_codes(
-        self,
-        eastings: NDArray[np.int32],
-        northings: NDArray[np.int32],
-        *,
-        zones: NDArray[np.uint8],
-        hemispheres: NDArray[np.str_],
-        precision: int = _MGRS_PRECISION_10KM,
-    ) -> NDArray[np.str_]:
-        """Compute MGRS references from UTM coordinates.
-
-        Parameters
-        ----------
-        eastings : NDArray[np.int32]
-            UTM eastings.
-        northings : NDArray[np.int32]
-            UTM northings.
-        zones : NDArray[np.uint8]
-            UTM zone numbers.
-        hemispheres : NDArray[np.str_]
-            Hemisphere letters.
-        precision : int
-            MGRS precision level.
-
-        Returns
-        -------
-        NDArray[np.str_]
-            MGRS references.
-        """
-        self.utm_to_mgrs = np.vectorize(
-            mgrs.MGRS().UTMToMGRS,
-            otypes=[str],
-            excluded={"MGRSPrecision"},
-        )
-
-        return self.utm_to_mgrs(
-            zones,
-            hemispheres,
-            eastings,
-            northings,
-            MGRSPrecision=precision,
-        )
 
     def to_geodataframe(
         self,

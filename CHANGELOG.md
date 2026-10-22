@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the project is pre-1.0 (`0.x`), minor releases may contain breaking changes.
 
+## Unreleased
+
+### Changed
+
+- `mgrs` is no longer a dependency. MGRS references are now computed with NumPy
+  and pyproj, giving the same codes and squares as `mgrs` (GeoTrans) except for
+  the zone-31 fix below. `MGRSGrid` builds about a third faster.
+- **Breaking:** `MGRSGeoBox.from_mgrs` raises `ValueError` for every reference
+  that names no square of its zone and latitude band. Before, GeoTrans rejected
+  some with `mgrs.core.MGRSError` (band X in zones 32, 34 and 36; letters not
+  used in the zone; squares past the equator) and only warned about the rest:
+  `from_mgrs("32TMA00")`, a square outside band T, emitted a `RuntimeWarning`
+  and returned it. Now both raise `ValueError`; catch that instead of
+  `MGRSError`.
+
+### Removed
+
+- `MGRSGrid.utm_to_mgrs`, an undocumented vectorised `mgrs` converter that grid
+  construction left on the instance.
+
+### Fixed
+
+- **Breaking:** `MGRSGrid` no longer mislabels zone-31 squares on the 3°E edge of
+  zone 31V (56–64°N). Before, squares that touched the zone only along that edge
+  were included and named after a different zone-32 square, e.g. `32VJH22` for
+  the zone-31 square at easting 500000, so codes repeated and `from_mgrs`
+  rebuilt the wrong square. Now those squares are dropped, and zone-31 squares
+  that reach past 64°N keep a `31V` code.
+
 ## [0.8.0] - 2026-09-21
 
 ### Added
