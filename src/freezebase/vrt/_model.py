@@ -434,13 +434,18 @@ class VRT:
     ) -> list[UPath]:
         """Return the leaf files the VRT reads, recursing into nested VRTs.
 
+        Followed VRT files are scanned for ``<SourceFilename>`` and ``<SourceDataset>``
+        only, so they may hold elements ``read`` refuses; sources of any other kind are
+        not found.
+
         Parameters
         ----------
         follow : bool, optional
             Read ``.vrt`` file sources and recurse into them; ``False`` lists them as files.
         storage_options : Mapping[str, Any] | None, optional
-            Options for reading followed VRT files, as for ``read``; ``None`` keeps each
-            path's own.
+            Options for reading followed VRT files and their S3 sources, as for ``read``.
+            ``None`` keeps each path's own, and a followed file without any inherits those
+            of the VRT that references it.
 
         Returns
         -------
@@ -450,19 +455,29 @@ class VRT:
         Raises
         ------
         ValueError
-            If a followed VRT file cannot be parsed into the model.
+            If a followed VRT file names a source GDAL path ``read`` does not support.
+        ImportError
+            If a followed VRT file is ``http(s)://`` and aiohttp is not installed.
         """
         from freezebase.vrt._io import source_files  # noqa: PLC0415  # _io imports raster
 
         return source_files(self, follow=follow, storage_options=storage_options)
 
-    def env(self) -> AbstractContextManager[None]:
+    def env(
+        self, *, storage_options: Mapping[str, Any] | None = None
+    ) -> AbstractContextManager[None]:
         """Return the rasterio environment that can read every source.
 
         Local sources need a plain environment, S3 sources the credentialed S3 environment,
         public HTTP(S) sources the HTTP one. Local sources mix with either. Callers using
         thread pools enter it in the main thread, because credentials set in a worker thread
         don't reach GDAL's reader threads.
+
+        Parameters
+        ----------
+        storage_options : Mapping[str, Any] | None, optional
+            Options for the VRT files followed to find the sources, as for
+            ``source_files``.
 
         Returns
         -------
@@ -473,17 +488,23 @@ class VRT:
         ------
         ValueError
             If S3 sources have different storage options, S3 is mixed with HTTP(S), or a
-            source uses another protocol.
+            source uses another protocol, or as ``source_files``.
+        ImportError
+            As ``source_files``.
         """
         from freezebase.vrt._io import env  # noqa: PLC0415  # _io imports raster, like _xml
 
-        return env(self)
+        return env(self, storage_options=storage_options)
 
-    def open(self, **kwargs: Any) -> AbstractContextManager[DatasetReader]:
+    def open(
+        self, *, storage_options: Mapping[str, Any] | None = None, **kwargs: Any
+    ) -> AbstractContextManager[DatasetReader]:
         """Open the VRT from memory, without writing a file.
 
         Parameters
         ----------
+        storage_options : Mapping[str, Any] | None, optional
+            Passed to ``env()``.
         **kwargs : Any
             Passed to ``rasterio.open``.
 
@@ -496,7 +517,9 @@ class VRT:
         ------
         ValueError
             As `env()`, or if a dtype has no GDAL equivalent.
+        ImportError
+            As `env()`.
         """
         from freezebase.vrt._io import open_vrt  # noqa: PLC0415  # _io imports raster, like _xml
 
-        return open_vrt(self, **kwargs)
+        return open_vrt(self, storage_options=storage_options, **kwargs)

@@ -94,7 +94,10 @@ tiles = local.source_files(storage_options=root.storage_options)
 ```
 
 `source_files()` lists the leaf files a VRT reads: it recurses into nested VRTs and follows
-`.vrt` files. `VRT.sources` lists only the direct sources, without any I/O.
+`.vrt` files. A followed file is only scanned for source paths, so it may hold elements
+`vrt.read` refuses, such as `<UseMaskBand>`. Following an `https://` VRT file needs
+aiohttp, which the `s3` extra installs. `VRT.sources` lists only the direct sources,
+without any I/O.
 
 ## Credentials and threads
 
@@ -108,6 +111,25 @@ import rasterio
 
 path = chain.write("chain.vrt")
 with chain.env(), rasterio.open(path) as ds:
+    data = ds.read(1)
+```
+
+`env()` and `open()` take `storage_options` too, for the S3 sources of `.vrt` files they
+follow. A followed file without options of its own inherits those of the VRT that
+references it. Here a local mosaic points at local warped VRTs, whose tiles are on S3:
+
+```python
+from freezebase import vrt
+from freezebase.s3 import make_s3_upath
+
+options = make_s3_upath("s3://bucket", profile="research").storage_options
+tiles = [make_s3_upath(f"s3://bucket/tiles/{name}.tif", profile="research") for name in "ab"]
+warped = [
+    vrt.warp(tile, crs="EPSG:3857", resolution=20.0).write(f"warped_{i}.vrt")
+    for i, tile in enumerate(tiles)
+]
+final = vrt.read(vrt.mosaic(warped).write("final.vrt"), storage_options=options)
+with final.open(storage_options=options) as ds:  # final.vrt -> warped_*.vrt -> S3
     data = ds.read(1)
 ```
 

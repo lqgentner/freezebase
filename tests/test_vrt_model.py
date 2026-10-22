@@ -25,7 +25,19 @@ from rasterio.vrt import WarpedVRT
 from rasterio.windows import Window
 from upath import UPath
 
-from freezebase.vrt import VRT, Band, PixelFunction, Source, SourceProperties, Warp, read
+from freezebase.vrt import (
+    VRT,
+    Band,
+    PixelFunction,
+    Source,
+    SourceProperties,
+    Warp,
+    _io,
+    create_warped_vrt,
+    mosaic,
+    read,
+    warp,
+)
 from freezebase.vrt._paths import gdal_path, parse_gdal_path
 from freezebase.vrt._xml import from_xml
 from tests.rasters import make_tiff
@@ -854,21 +866,16 @@ class TestSourcesAndEnv:
         outer = vrt_over(warped_path)
         assert outer.source_files(follow=False) == [warped_path]
 
-    def test_source_files_pass_storage_options_to_read(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        a = UPath(make_tiff(tmp_path / "a.tif"))
-        warped_path = vrt_over(a).write(tmp_path / "warped.vrt")
-        seen: list[Any] = []
-        real = read
-
-        def spy(path: UPath, *, storage_options: Any = None) -> VRT:
-            seen.append(storage_options)
-            return real(path, storage_options=storage_options)
-
-        monkeypatch.setattr("freezebase.vrt._io.read", spy)
-        vrt_over(warped_path).source_files(storage_options={"key": "k"})
-        assert seen == [{"key": "k"}]
+    def test_source_files_pass_storage_options_to_followed_vrts(self, tmp_path: Path) -> None:
+        tile = UPath("s3://b/t.tif")
+        inner = VRT(None, UTM_GRID, 1, 1, [Band("float32", [Source(tile)])])
+        outer = VRT(
+            None, UTM_GRID, 1, 1, [Band("float32", [Source(inner.write(tmp_path / "w.vrt"))])]
+        )
+        found = outer.source_files(storage_options={"key": "k"})
+        assert [(str(p), dict(p.storage_options)) for p in found] == [
+            ("s3://b/t.tif", {"key": "k"})
+        ]
 
     def test_env_local_is_plain(self, tmp_path: Path) -> None:
         v = vrt_over(make_tiff(tmp_path / "a.tif"))
@@ -928,3 +935,161 @@ class TestSourcesAndEnv:
         v = vrt_over(tile)
         with v.open() as ds, rasterio.open(tile) as src:
             np.testing.assert_array_equal(ds.read(1), src.read(1))
+
+
+FOREIGN_VRT = """<VRTDataset rasterXSize="6" rasterYSize="4">
+  <SRS>EPSG:32632</SRS>
+  <GeoTransform>500000, 10, 0, 5200000, 0, -10</GeoTransform>
+  <VRTRasterBand dataType="Float32" band="1">
+    <ComplexSource>
+      <SourceFilename relativeToVRT="1">a.tif</SourceFilename>
+      <SourceBand>1</SourceBand>
+      <UseMaskBand>true</UseMaskBand>
+    </ComplexSource>
+  </VRTRasterBand>
+  <OverviewList resampling="average">2</OverviewList>
+</VRTDataset>"""
+
+
+def _one_source_vrt(text: str, *, relative: bool = False) -> str:
+    """Return a one-band VRT whose single source is ``text``."""
+    flag = "1" if relative else "0"
+    return (
+        '<VRTDataset rasterXSize="1" rasterYSize="1"><VRTRasterBand dataType="Float32" band="1">'
+        f'<SimpleSource><SourceFilename relativeToVRT="{flag}">{escape(text)}</SourceFilename>'
+        "</SimpleSource></VRTRasterBand></VRTDataset>"
+    )
+
+
+@pytest.fixture
+def s3_env_calls(monkeypatch: pytest.MonkeyPatch) -> list[UPath]:
+    """Record the paths ``s3_env`` is entered with, without touching S3."""
+    calls: list[UPath] = []
+
+    @contextmanager
+    def recorder(path: UPath) -> Iterator[None]:
+        calls.append(path)
+        yield
+
+    monkeypatch.setattr("freezebase.s3.s3_env", recorder)
+    return calls
+
+
+class TestDiscovery:
+    """Source discovery follows VRT files GDAL reads, even ones ``read`` refuses."""
+
+    def test_env_takes_storage_options_through_local_vrts(
+        self, tmp_path: Path, s3_env_calls: list[UPath]
+    ) -> None:
+        opts = {"profile": "research", "endpoint_url": "https://s3.example"}
+        tile = UPath("s3://bucket/tiles/t0.tif", **opts)
+        warped = VRT(None, UTM_GRID, 1, 1, [Band("float32", [Source(tile)])]).write(
+            tmp_path / "warped.vrt"
+        )
+        final = read(vrt_over(warped).write(tmp_path / "final.vrt"), storage_options=opts)
+        # Previously env() read the local warped.vrt without options: a bare s3:// path.
+        with final.env(storage_options=opts):
+            pass
+        assert [(str(p), dict(p.storage_options)) for p in s3_env_calls] == [
+            ("s3://bucket/tiles/t0.tif", opts)
+        ]
+
+    def test_open_passes_storage_options_to_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[Any] = []
+        real = _io.env
+
+        def spy(vrt: VRT, *, storage_options: Any = None) -> Any:
+            seen.append(storage_options)
+            return real(vrt, storage_options=storage_options)
+
+        monkeypatch.setattr("freezebase.vrt._io.env", spy)
+        with vrt_over(make_tiff(tmp_path / "a.tif")).open(storage_options={"key": "k"}) as ds:
+            assert ds.count == 1
+        assert seen == [{"key": "k"}]
+
+    def test_followed_vrt_inherits_the_referencing_vrts_options(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, s3_env_calls: list[UPath]
+    ) -> None:
+        local = tmp_path / "local.vrt"
+        local.write_text(_one_source_vrt("/vsis3/tiles/t0.tif"))
+        mid = _one_source_vrt(str(local))
+        real = UPath.read_text
+
+        def fake_read(path: UPath, *args: Any, **kwargs: Any) -> str:
+            return mid if path.protocol == "s3" else real(path, *args, **kwargs)
+
+        monkeypatch.setattr(UPath, "read_text", fake_read)
+        top = VRT(
+            None, UTM_GRID, 1, 1, [Band("float32", [Source(UPath("s3://b/mid.vrt", key="k"))])]
+        )
+        assert [dict(p.storage_options) for p in top.source_files()] == [{"key": "k"}]
+        with top.env():
+            pass
+        assert [dict(path.storage_options) for path in s3_env_calls] == [{"key": "k"}]
+
+    def test_foreign_elements_do_not_stop_discovery(self, tmp_path: Path) -> None:
+        tile = UPath(make_tiff(tmp_path / "a.tif"))
+        foreign = tmp_path / "foreign.vrt"
+        foreign.write_text(FOREIGN_VRT)
+        with pytest.raises(ValueError, match="UseMaskBand"):
+            read(foreign)
+        # Previously discovery used the strict parser and raised as read() does.
+        assert vrt_over(foreign).source_files() == [tile]
+        with mosaic([foreign]).open() as ds:
+            assert ds.read(1).shape == (4, 6)
+
+    def test_warp_of_a_foreign_vrt(self, tmp_path: Path) -> None:
+        make_tiff(tmp_path / "a.tif")
+        foreign = tmp_path / "foreign.vrt"
+        foreign.write_text(FOREIGN_VRT)
+        with warp(foreign, crs="EPSG:3857", resolution=20.0).open() as ds:
+            assert ds.count == 1
+        create_warped_vrt(foreign, tmp_path / "w.vrt", crs="EPSG:3857", resolution=20.0)
+
+    def test_cycles_end(self, tmp_path: Path) -> None:
+        tile = UPath(make_tiff(tmp_path / "t.tif"))
+        a, b = tmp_path / "a.vrt", tmp_path / "b.vrt"
+        tile_source = '<SimpleSource><SourceFilename relativeToVRT="1">t.tif</SourceFilename>'
+        a.write_text(
+            _one_source_vrt("b.vrt", relative=True).replace(
+                "</VRTRasterBand>", f"{tile_source}</SimpleSource></VRTRasterBand>"
+            )
+        )
+        b.write_text(_one_source_vrt("a.vrt", relative=True))
+        top = VRT(None, UTM_GRID, 1, 1, [Band("float32", [Source(UPath(a))])])
+        # Previously a RecursionError.
+        assert top.source_files() == [tile]
+
+    def test_follows_escaped_and_warped_sources(self, tmp_path: Path) -> None:
+        a = UPath(make_tiff(tmp_path / "a.tif"))
+        b = UPath(make_tiff(tmp_path / "b.tif"))
+        warped = warp(vrt_over(b), crs="EPSG:3857", resolution=20.0)
+        mixed = vrt_over(a)
+        mixed.bands[0].sources.append(Source(warped))
+        path = warp(mixed.write(tmp_path / "mixed.vrt"), crs="EPSG:3857", resolution=20.0).write(
+            tmp_path / "w.vrt"
+        )
+        assert vrt_over(path).source_files() == [a, b]
+
+    def test_same_path_with_other_options_is_kept(self) -> None:
+        first, second = UPath("s3://a/x.tif", key="k1"), UPath("s3://a/x.tif", key="k2")
+        v = VRT(None, UTM_GRID, 1, 1, [Band("float32", [Source(first), Source(second)])])
+        # Previously deduplicated by path, hiding the conflict until GDAL read the file.
+        assert v.sources == [first, second]
+        with pytest.raises(ValueError, match="different credentials"):
+            v.env()
+
+    def test_https_vrt_without_aiohttp_raises_clearly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def no_module(_name: str) -> None:
+            return None
+
+        monkeypatch.setattr("freezebase.vrt._io.find_spec", no_module)
+        v = VRT(None, UTM_GRID, 1, 1, [Band("float32", [Source(UPath("https://h/m.vrt"))])])
+        with pytest.raises(ImportError, match="aiohttp"):
+            v.source_files()
+        with pytest.raises(ImportError, match="aiohttp"):
+            read("https://h/m.vrt")
