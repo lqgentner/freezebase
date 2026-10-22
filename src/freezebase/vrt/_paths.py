@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 import posixpath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin
@@ -39,13 +41,22 @@ def gdal_path(path: UPath, *, relative_to: UPath | None) -> tuple[str, bool]:
         The path text and ``True`` when it is relative to ``relative_to``.
     """
     if path.protocol == "":
-        path = path.resolve()
-    if relative_to is not None:
-        if relative_to.protocol == "":
-            relative_to = relative_to.resolve()
-        if _same_store(path, relative_to):
+        path = UPath(_absolute(path))
+    if relative_to is not None and _same_store(path, relative_to):
+        if path.protocol == "s3":
             return posixpath.relpath(path.path, relative_to.parent.path), True
+        try:
+            relative = os.path.relpath(str(path), Path(_absolute(relative_to)).parent)
+        except ValueError:  # another Windows drive
+            return _to_vsi_uri(path), False
+        return relative.replace(os.sep, "/"), True
     return _to_vsi_uri(path), False
+
+
+def _absolute(path: UPath) -> str:
+    """Make a local path absolute without following symlinks."""
+    # GDAL joins a relative source path onto the VRT path as given, symlinks unresolved.
+    return os.path.abspath(str(path))  # noqa: PTH100
 
 
 def inherited_options(
