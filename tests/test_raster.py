@@ -35,7 +35,16 @@ from freezebase.raster import (
     write_cog,
 )
 from freezebase.s3 import GDAL_S3_OPTIONS
-from freezebase.vrt import VRT, create_decibel_vrt, create_warped_vrt, from_raster, mosaic
+from freezebase.vrt import (
+    VRT,
+    PixelFunction,
+    create_decibel_vrt,
+    create_warped_vrt,
+    derive,
+    from_raster,
+    mosaic,
+    warp,
+)
 
 WIDTH, HEIGHT = 8, 6
 
@@ -1174,12 +1183,24 @@ class TestWriteCogFromVrt:
         digest = write_cog(src, dst, checksum=True)
         assert digest == "1220" + hashlib.sha256(dst.read_bytes()).hexdigest()
 
-    def test_failure_leaves_no_partial_file(self, tmp_path: Path) -> None:
+    def test_failure_removes_the_temp_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         src = tmp_path / "s.tif"
         make_tiff(src)
-        with pytest.raises(RuntimeError, match="Failed to write COG"):
-            write_cog(src, tmp_path / "missing" / "o.tif")
-        assert not list(tmp_path.glob("**/.*.tmp"))
+        real_copy = rasterio.shutil.copy
+
+        def copy_then_fail(*args: Any, **kwargs: Any) -> None:
+            real_copy(*args, **kwargs)
+            assert list(tmp_path.glob(".o.tif.*.tmp"))
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr(rasterio.shutil, "copy", copy_then_fail)
+        with pytest.raises(RuntimeError, match="disk full"):
+            write_cog(src, tmp_path / "o.tif")
+        assert not list(tmp_path.glob(".*.tmp"))
+        assert not (tmp_path / "o.tif").exists()
 
     def test_s3_destination_uploads_once(
         self, tmp_path: Path, s3_uploads: dict[str, bytes]
@@ -1203,6 +1224,105 @@ class TestWriteCogFromVrt:
     def test_ndarray_still_requires_a_profile(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="profile is required"):
             write_cog(np.zeros((2, 2), np.float32), tmp_path / "o.tif")
+
+
+class TestWriteCogNodataRemap:
+    """A nodata change moves the old nodata pixels to the new value, for every model shape."""
+
+    def test_mosaic_with_a_native_tile_nodata(self, tmp_path: Path) -> None:
+        tile = tmp_path / "a.tif"
+        make_int_tiff(tile, [0, 5, 7, 9], dtype="int16", nodata=0)
+        m = mosaic([tile], nodata=-9999)
+        write_cog(m, tmp_path / "o.tif", {"nodata": -1})
+        with rasterio.open(tmp_path / "o.tif") as ds:
+            assert ds.read(1).tolist() == [[-1, 5, 7, 9]]
+            assert ds.nodata == -1
+
+    @pytest.mark.parametrize(
+        ("profile", "expected", "nodata"),
+        [
+            ({"nodata": 65535}, [[65535, 5], [6, 7]], 65535),
+            ({"dtype": "float32", "nodata": float("nan")}, [[float("nan"), 5], [6, 7]], "nan"),
+        ],
+    )
+    def test_warped_vrt(
+        self, tmp_path: Path, profile: dict[str, Any], expected: list[list[float]], nodata: Any
+    ) -> None:
+        src = tmp_path / "b.tif"
+        with rasterio.open(
+            src,
+            "w",
+            driver="GTiff",
+            width=2,
+            height=2,
+            count=1,
+            dtype="uint16",
+            crs="EPSG:32632",
+            transform=from_origin(500000, 5200000, 10, 10),
+            nodata=0,
+        ) as dst:
+            dst.write(np.array([[0, 5], [6, 7]], np.uint16), 1)
+        w = warp(src, crs="EPSG:32632", resolution=10)
+        write_cog(w, tmp_path / "o.tif", profile)
+        with rasterio.open(tmp_path / "o.tif") as ds:
+            np.testing.assert_array_equal(ds.read(1), np.array(expected))
+            np.testing.assert_array_equal(ds.nodata, float(nodata))
+
+    def test_derived_band(self, tmp_path: Path) -> None:
+        src = tmp_path / "c.tif"
+        with rasterio.open(
+            src,
+            "w",
+            driver="GTiff",
+            width=4,
+            height=1,
+            count=1,
+            dtype="float32",
+            crs="EPSG:32632",
+            transform=from_origin(500000, 5200000, 10, 10),
+            nodata=0,
+        ) as dst:
+            dst.write(np.array([[0, 10, 100, 1]], np.float32), 1)
+        d = derive(src, PixelFunction.db())
+        write_cog(d, tmp_path / "o.tif", {"nodata": -9999.0})
+        with rasterio.open(tmp_path / "o.tif") as ds, d.open() as ref:
+            out, expected = ds.read(1), ref.read(1)
+            assert ds.nodata == -9999.0
+            assert out[0, 0] == -9999.0
+            np.testing.assert_allclose(out[0, 1:], expected[0, 1:])
+
+    def test_none_keeps_the_nodata(self, tmp_path: Path) -> None:
+        src = tmp_path / "f.tif"
+        make_tiff(src)
+        with rasterio.open(src, "r+") as ds:
+            ds.write(np.array([[np.nan, 1.5] + [1.0] * (WIDTH - 2)] * HEIGHT, np.float32), 1)
+        write_cog(src, tmp_path / "o.tif", {"nodata": None})
+        with rasterio.open(tmp_path / "o.tif") as ds:
+            assert np.isnan(ds.nodata)
+            assert np.isnan(ds.read(1)[0, 0])
+
+    def test_dtype_spellings_are_normalised(self, tmp_path: Path) -> None:
+        src = tmp_path / "s.tif"
+        make_tiff(src)
+        write_cog(src, tmp_path / "o.tif", {"dtype": "f8"})
+        with rasterio.open(tmp_path / "o.tif") as ds:
+            assert ds.dtypes == ("float64",)
+
+    def test_array_likes_are_written(self, tmp_path: Path) -> None:
+        class ArrayLike:
+            def __array__(self, dtype: Any = None, copy: Any = None) -> np.ndarray:
+                return np.ones((HEIGHT, WIDTH), np.float32)
+
+        profile = {
+            "dtype": "float32",
+            "count": 1,
+            "width": WIDTH,
+            "height": HEIGHT,
+            "crs": "EPSG:32632",
+            "transform": from_origin(500000, 5200000, 10, 10),
+        }
+        write_cog(ArrayLike(), tmp_path / "o.tif", profile)  # pyrefly: ignore[bad-argument-type]  # duck-typed input
+        assert_is_cog(tmp_path / "o.tif")
 
 
 def _vrt_of(path: Path) -> VRT:
