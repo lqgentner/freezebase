@@ -291,6 +291,15 @@ class TestVrtOnS3:
         assert data.shape == (HEIGHT, 2 * WIDTH)
         assert set(np.unique(data).tolist()) == {1.0, 2.0}
 
+    def test_write_cog_from_an_s3_mosaic(self, prefix: UPath) -> None:
+        tiles = self._upload_tiles(prefix)
+
+        write_cog(mosaic(tiles), prefix / "out.tif")
+
+        with rasterio_open(prefix / "out.tif") as ds:
+            assert ds.width == 2 * WIDTH
+            assert set(np.unique(ds.read(1)).tolist()) == {1.0, 2.0}
+
     def test_source_files_follow_a_local_vrt_to_s3(self, prefix: UPath, tmp_path: Path) -> None:
         tiles = self._upload_tiles(prefix)
         remote = mosaic(tiles).write(prefix / "m.vrt")
