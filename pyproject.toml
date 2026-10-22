@@ -124,6 +124,7 @@ exclude = [".gitignore"]
 line-length = 99
 src = ["src"]
 extension = { qmd = "markdown" }
+extend-exclude = ["docs/superpowers"]
 
 [tool.ruff.lint]
 extend-select = [
