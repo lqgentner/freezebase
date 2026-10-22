@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from freezebase.vrt._io import read
 from freezebase.vrt._legacy import (
     build_vrt_mosaic,
     create_decibel_vrt,
@@ -23,4 +24,5 @@ __all__ = [
     "create_rgb_vrt",
     "create_rgba_vrt",
     "create_warped_vrt",
+    "read",
 ]

@@ -5,9 +5,12 @@ from __future__ import annotations
 from dataclasses import replace
 import math
 from pathlib import Path
+import shutil
 from typing import Any
 from xml.etree import ElementTree as ET
+from xml.sax.saxutils import escape
 
+from affine import Affine
 import numpy as np
 import pytest
 import rasterio
@@ -20,11 +23,14 @@ from rasterio.vrt import WarpedVRT
 from rasterio.windows import Window
 from upath import UPath
 
-from freezebase.vrt import VRT, Band, PixelFunction, Source, SourceProperties, Warp
-from freezebase.vrt._paths import gdal_path
+from freezebase.vrt import VRT, Band, PixelFunction, Source, SourceProperties, Warp, read
+from freezebase.vrt._paths import gdal_path, parse_gdal_path
+from freezebase.vrt._xml import from_xml
 from tests.rasters import make_tiff
 
 DB_FLOAT32 = replace(PixelFunction.db(), transfer_type="float32")
+DATA = Path(__file__).parent / "data" / "vrt"
+UTM_GRID = Affine(10.0, 0.0, 500000.0, 0.0, -10.0, 5200000.0)
 
 
 def parse(xml: str | bytes) -> ET.Element:
@@ -435,3 +441,294 @@ class TestWrite:
             out = vrt.write(tmp_path / "v" / name)
             with rasterio.open(out.path) as ds:
                 assert ds.read(1).shape == (4, 6)
+
+
+def gdal_warped_xml(source: str) -> str:
+    """Return the VRT XML GDAL writes for ``source`` (a path or VRT XML) warped to WGS 84."""
+    with (
+        rasterio.open(source) as src,
+        WarpedVRT(src, crs="EPSG:4326") as warped,
+        MemoryFile(ext=".vrt") as mem,
+    ):
+        rasterio.shutil.copy(warped, mem.name, driver="VRT")
+        return mem.read().decode()
+
+
+def one_band(band: str = "", *, dataset: str = "", attributes: str = "") -> str:
+    """Return a one-band VRT document with ``band`` as the band's children."""
+    return (
+        '<VRTDataset rasterXSize="6" rasterYSize="4">'
+        f"{dataset}"
+        f'<VRTRasterBand dataType="Float32" band="1"{attributes}>{band}</VRTRasterBand>'
+        "</VRTDataset>"
+    )
+
+
+def source_paths(vrt: VRT) -> list[UPath]:
+    """Return the file paths of the first band's sources."""
+    paths = [source.path for source in vrt.bands[0].sources]
+    assert all(isinstance(path, UPath) for path in paths)
+    return [path for path in paths if isinstance(path, UPath)]
+
+
+WARPED = (
+    '<VRTDataset rasterXSize="6" rasterYSize="4" subClass="VRTWarpedDataset">'
+    '<VRTRasterBand dataType="Float32" band="1" subClass="VRTWarpedRasterBand" />'
+    "{}</VRTDataset>"
+)
+FILE_SOURCE = '<SourceFilename relativeToVRT="0">/data/a.tif</SourceFilename>'
+
+
+class TestRead:
+    """``vrt.read`` and the parser behind it."""
+
+    def test_round_trip_every_feature(self, tmp_path: Path) -> None:
+        (tmp_path / "tiles").mkdir()
+        (tmp_path / "v").mkdir()
+        a = make_tiff(tmp_path / "tiles" / "a.tif")
+        b = make_tiff(tmp_path / "tiles" / "b.tif", origin=(500060.0, 5200000.0))
+        whole = Window(0, 0, 6, 4)
+        mosaic = Band(
+            "float32",
+            [
+                Source(
+                    UPath(a),
+                    src_window=whole,
+                    dst_window=whole,
+                    nodata=math.nan,
+                    resampling=Resampling.cubic_spline,
+                    properties=SourceProperties(6, 4, "float32", 6, 4),
+                ),
+                Source(
+                    UPath(b),
+                    src_window=whole,
+                    dst_window=Window(6, 0, 6, 4),
+                    lut=[(0.0, 0.0), (10.0, 255.0)],
+                ),
+            ],
+            nodata=math.nan,
+            description="vv",
+            color_interp=ColorInterp.red,
+            unit="dB",
+            metadata={"B": "2"},
+        )
+        # A warp as GDAL writes it, whose source is an in-memory VRT.
+        warped = from_xml(gdal_warped_xml(vrt_over(a).to_xml()))
+        derived = Band(
+            "float32",
+            [Source(vrt_over(b)), Source(warped)],
+            pixel_function=DB_FLOAT32,
+        )
+        v = VRT(CRS.from_epsg(32632), UTM_GRID, 12, 4, [mosaic, derived], metadata={"A": "1"})
+        out = v.write(tmp_path / "v" / "m.vrt")
+        assert find(parse(out.read_text()), ".//SourceFilename").text == "../tiles/a.tif"
+        assert read(out) == v
+
+    def test_round_trip_warp_with_relative_source(self, tmp_path: Path) -> None:
+        (tmp_path / "v").mkdir()
+        tile = make_tiff(tmp_path / "a.tif")
+        v = from_xml(gdal_warped_xml(str(tile)))
+        assert v.warp is not None
+        assert v.warp.source == UPath(tile)
+        assert "SourceDataset" not in v.warp.options_xml
+        assert v.bands == [Band("float32", nodata=math.nan)]
+        out = v.write(tmp_path / "v" / "w.vrt")
+        source = find(parse(out.read_text()), "GDALWarpOptions/SourceDataset")
+        assert (source.text, source.get("relativeToVRT")) == ("../a.tif", "1")
+        assert read(out) == v
+        with (
+            rasterio.open(out.path) as ds,
+            rasterio.open(tile) as src,
+            WarpedVRT(src, crs="EPSG:4326") as expected,
+        ):
+            np.testing.assert_array_equal(ds.read(1), expected.read(1))
+
+    def test_warp_of_in_memory_vrt_parses_its_escaped_source(self, tmp_path: Path) -> None:
+        inner = vrt_over(make_tiff(tmp_path / "a.tif"))
+        v = from_xml(gdal_warped_xml(inner.to_xml()))
+        assert v.warp is not None
+        assert v.warp.source == inner
+
+    def test_round_trip_keeps_s3_storage_options(self, s3_uploads: dict[str, bytes]) -> None:
+        sources = [Source(UPath("s3://b/t/a.tif")), Source(UPath("s3://c/a.tif"))]
+        v = VRT(CRS.from_epsg(32632), UTM_GRID, 6, 4, [Band("float32", sources)])
+        v.write(UPath("s3://b/v/m.vrt", anon=False, key="k"))
+        xml = s3_uploads["s3://b/v/m.vrt"].decode()
+        assert [name.text for name in parse(xml).iter("SourceFilename")] == [
+            "../t/a.tif",
+            "/vsis3/c/a.tif",
+        ]
+        paths = source_paths(from_xml(xml, base=UPath("s3://b/v/m.vrt", key="k")))
+        assert [str(path) for path in paths] == ["s3://b/t/a.tif", "s3://c/a.tif"]
+        assert all(path.protocol == "s3" for path in paths)
+        assert [path.storage_options["key"] for path in paths] == ["k", "k"]
+
+    def test_storage_options_override_inheritance(self, tmp_path: Path) -> None:
+        sources = [Source(UPath("s3://b/t/a.tif")), Source(UPath("s3://c/a.tif"))]
+        v = VRT(None, UTM_GRID, 6, 4, [Band("float32", sources)])
+        local = read(v.write(tmp_path / "m.vrt"), storage_options={"profile": "p"})
+        assert [path.storage_options for path in source_paths(local)] == [{"profile": "p"}] * 2
+        on_s3 = from_xml(
+            v.to_xml(relative_to=UPath("s3://b/v/m.vrt")),
+            base=UPath("s3://b/v/m.vrt", key="k"),
+            storage_options={"profile": "p"},
+        )
+        assert [path.storage_options for path in source_paths(on_s3)] == [{"profile": "p"}] * 2
+
+    def test_s3_vrt_is_read_with_the_storage_options(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        xml = VRT(None, UTM_GRID, 6, 4, [Band("float32", [Source(UPath("s3://b/a.tif"))])])
+        read_with: list[dict[str, Any]] = []
+
+        def fake_read_text(self: UPath, *_args: Any, **_kwargs: Any) -> str:
+            read_with.append(dict(self.storage_options))
+            return xml.to_xml(relative_to=UPath("s3://b/m.vrt"))
+
+        monkeypatch.setattr(type(UPath("s3://b/m.vrt")), "read_text", fake_read_text)
+        v = read("s3://b/m.vrt", storage_options={"profile": "p"})
+        assert read_with == [{"profile": "p"}]
+        assert [path.storage_options for path in source_paths(v)] == [{"profile": "p"}]
+
+    def test_reads_freezebase_0_8_mosaic(self, tmp_path: Path) -> None:
+        a = make_tiff(tmp_path / "a.tif")
+        b = make_tiff(tmp_path / "b.tif", origin=(500060.0, 5200000.0))
+        fixture = shutil.copy(DATA / "legacy_mosaic_0_8.vrt", tmp_path / "m.vrt")
+        v = read(fixture)
+        assert (v.crs, v.transform, v.width, v.height) == (CRS.from_epsg(32632), UTM_GRID, 12, 4)
+        (band,) = v.bands
+        assert band.nodata is not None
+        assert math.isnan(band.nodata)
+        assert band.description == ""
+        assert source_paths(v) == [UPath(a), UPath(b)]
+        assert [s.dst_window for s in band.sources] == [Window(0, 0, 6, 4), Window(6, 0, 6, 4)]
+        assert all(s.nodata is not None and math.isnan(s.nodata) for s in band.sources)
+        assert len(parse(v.to_xml()).findall(".//ComplexSource")) == 2
+        with rasterio.open(fixture) as old, rasterio.open(v.to_xml()) as new:
+            np.testing.assert_array_equal(new.read(1), old.read(1))
+
+    def test_reads_freezebase_0_8_decibel(self, tmp_path: Path) -> None:
+        a = make_tiff(tmp_path / "a.tif", fill=100.0)
+        fixture = shutil.copy(DATA / "legacy_decibel_0_8.vrt", tmp_path / "db.vrt")
+        v = read(fixture)
+        (band,) = v.bands
+        assert band.pixel_function == DB_FLOAT32
+        assert band.description == "dB"
+        assert band.sources == [Source(UPath(a))]
+        with rasterio.open(v.to_xml()) as ds:
+            np.testing.assert_allclose(ds.read(1), 20.0)
+
+    def test_reads_gdalbuildvrt_output(self, tmp_path: Path) -> None:
+        make_tiff(tmp_path / "a.tif")
+        make_tiff(tmp_path / "b.tif", origin=(500060.0, 5200000.0))
+        fixture = shutil.copy(DATA / "gdalbuildvrt.vrt", tmp_path / "m.vrt")
+        v = read(fixture)
+        assert (v.crs, v.transform) == (CRS.from_epsg(32632), UTM_GRID)
+        assert [s.properties for s in v.bands[0].sources] == [
+            SourceProperties(6, 4, "float32", 6, 4)
+        ] * 2
+        with rasterio.open(fixture) as old, rasterio.open(v.to_xml()) as new:
+            np.testing.assert_array_equal(new.read(1), old.read(1))
+
+    def test_unknown_element_raises(self) -> None:
+        with pytest.raises(ValueError, match="<OverviewList>"):
+            from_xml(one_band(dataset="<OverviewList>2 4</OverviewList>"))
+
+    def test_escaped_xml_source_parses_as_nested(self) -> None:
+        inner = VRT(None, UTM_GRID, 6, 4, [Band("float32", [Source(UPath("/data/a.tif"))])])
+        xml = one_band(
+            f'<SimpleSource><SourceFilename relativeToVRT="0">{escape(inner.to_xml())}'
+            "</SourceFilename><SourceBand>1</SourceBand></SimpleSource>"
+        )
+        assert from_xml(xml).bands[0].sources == [Source(inner)]
+
+    def test_unsupported_vsi_prefix_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unsupported GDAL path"):
+            parse_gdal_path("/vsizip/a.zip/t.tif", relative=False, base=None, storage_options=None)
+
+    def test_color_interp_is_case_insensitive(self) -> None:
+        v = from_xml(one_band("<ColorInterp>ycbcr_y</ColorInterp>"))
+        assert v.bands[0].color_interp == ColorInterp.Y
+
+    @pytest.mark.parametrize(
+        ("text", "relative", "base", "expected"),
+        [
+            ("/vsicurl/https://ex.com/a.tif", False, None, UPath("https://ex.com/a.tif")),
+            ("/data/a.tif", False, None, UPath("/data/a.tif")),
+            ("../t/a.tif", True, UPath("/data/v/m.vrt"), UPath("/data/t/a.tif")),
+            ("a.tif", True, UPath("https://ex.com/d/m.vrt"), UPath("https://ex.com/d/a.tif")),
+        ],
+    )
+    def test_parse_gdal_path(
+        self, text: str, relative: bool, base: UPath | None, expected: UPath
+    ) -> None:
+        got = parse_gdal_path(text, relative=relative, base=base, storage_options=None)
+        assert got == expected
+
+    @pytest.mark.parametrize(
+        ("xml", "match"),
+        [
+            ("<Foo />", "<Foo>"),
+            ('<VRTDataset rasterYSize="4" />', "rasterXSize"),
+            (one_band(attributes=' blockXSize="128"'), "blockXSize"),
+            (one_band(dataset='<Metadata domain="x" />'), "domain"),
+            (one_band(dataset="<Metadata><Foo /></Metadata>"), "<Foo>"),
+            (one_band("<Scale>2</Scale>"), "<Scale>"),
+            (one_band("<ColorInterp>Sepia</ColorInterp>"), "Sepia"),
+            (one_band().replace("Float32", "CFloat32"), "CFloat32"),
+            (one_band("<PixelFunctionType>dB</PixelFunctionType>"), "<PixelFunctionType>"),
+            (one_band(attributes=' subClass="VRTDerivedRasterBand"'), "PixelFunctionType"),
+            (one_band(attributes=' subClass="VRTSourcedRasterBand"'), "VRTSourcedRasterBand"),
+            (
+                one_band("<SimpleSource><SourceBand>1</SourceBand></SimpleSource>"),
+                "SourceFilename",
+            ),
+            (
+                one_band(f"<SimpleSource>{FILE_SOURCE}<NODATA>0</NODATA></SimpleSource>"),
+                "<NODATA>",
+            ),
+            (one_band(f'<SimpleSource resampling="blur">{FILE_SOURCE}</SimpleSource>'), "blur"),
+            (
+                one_band(
+                    '<SimpleSource><SourceFilename relativeToVRT="1">a.tif</SourceFilename>'
+                    "</SimpleSource>"
+                ),
+                "relative",
+            ),
+            (one_band("<BlockXSize>2</BlockXSize>"), "<BlockXSize>"),
+            (one_band(dataset="<GDALWarpOptions />"), "<GDALWarpOptions>"),
+            (WARPED.format(""), "GDALWarpOptions"),
+            (WARPED.format("<GDALWarpOptions />"), "BlockXSize"),
+            (
+                WARPED.format(
+                    "<BlockXSize>2</BlockXSize><BlockYSize>2</BlockYSize><GDALWarpOptions />"
+                ),
+                "SourceDataset",
+            ),
+            (one_band().replace("<VRTDataset", '<VRTDataset subClass="Foo"'), "Foo"),
+        ],
+    )
+    def test_malformed_raises(self, xml: str, match: str) -> None:
+        with pytest.raises(ValueError, match=match):
+            from_xml(xml)
+
+
+class TestNodataEquality:
+    """``Band`` and ``Source`` compare NaN nodata as equal."""
+
+    def test_nan_nodata_is_equal(self) -> None:
+        path = UPath("/data/a.tif")
+        assert Source(path, nodata=math.nan) == Source(path, nodata=float("nan"))
+        assert Band("float32", nodata=math.nan) == Band("float32", nodata=float("nan"))
+
+    @pytest.mark.parametrize(("a", "b"), [(math.nan, None), (math.nan, 0.0), (0.0, 1.0)])
+    def test_other_nodata_differs(self, a: float | None, b: float | None) -> None:
+        path = UPath("/data/a.tif")
+        assert Source(path, nodata=a) != Source(path, nodata=b)
+        assert Band("float32", nodata=a) != Band("float32", nodata=b)
+
+    def test_other_fields_still_count(self) -> None:
+        assert Source(UPath("/a.tif"), nodata=math.nan) != Source(UPath("/b.tif"), nodata=math.nan)
+        assert Band("float32") != Band("uint8")
+        assert Band("float32") != "float32"
+        assert Source(UPath("/a.tif")) != "/a.tif"

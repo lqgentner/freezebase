@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, Self
+from dataclasses import dataclass, field, fields
+import math
+from typing import TYPE_CHECKING, ClassVar, Literal, Self
 from xml.etree import ElementTree as ET
 
 from rasterio.enums import ColorInterp
@@ -32,6 +33,23 @@ _GDAL_DTYPE_NAMES = {
     "float32": "Float32",
     "float64": "Float64",
 }
+
+
+def _nodata_equal(a: float | None, b: float | None) -> bool:
+    """Compare nodata values, NaN equal to NaN."""
+    if a is None or b is None:
+        return a is b
+    return a == b or (math.isnan(a) and math.isnan(b))
+
+
+def _fields_equal(a: Source | Band, b: Source | Band) -> bool:
+    """Compare every dataclass field, nodata NaN-aware."""
+    return all(
+        _nodata_equal(a.nodata, b.nodata)
+        if item.name == "nodata"
+        else getattr(a, item.name) == getattr(b, item.name)
+        for item in fields(a)
+    )
 
 
 @dataclass
@@ -194,6 +212,26 @@ class Source:
     resampling: Resampling | None = None
     properties: SourceProperties | None = None
 
+    def __eq__(self, other: object) -> bool:
+        """Compare all fields, treating NaN nodata as equal.
+
+        Parameters
+        ----------
+        other : object
+            Object to compare with.
+
+        Returns
+        -------
+        bool
+            Whether ``other`` is a ``Source`` with equal fields.
+        """
+        if not isinstance(other, Source):
+            return NotImplemented
+        return _fields_equal(self, other)
+
+    # Mutable, so unhashable, as a plain dataclass is.
+    __hash__: ClassVar[None] = None
+
 
 @dataclass
 class Band:
@@ -227,6 +265,26 @@ class Band:
     unit: str | None = None
     metadata: dict[str, str] = field(default_factory=dict)
     pixel_function: PixelFunction | None = None
+
+    def __eq__(self, other: object) -> bool:
+        """Compare all fields, treating NaN nodata as equal.
+
+        Parameters
+        ----------
+        other : object
+            Object to compare with.
+
+        Returns
+        -------
+        bool
+            Whether ``other`` is a ``Band`` with equal fields.
+        """
+        if not isinstance(other, Band):
+            return NotImplemented
+        return _fields_equal(self, other)
+
+    # Mutable, so unhashable, as a plain dataclass is.
+    __hash__: ClassVar[None] = None
 
 
 @dataclass

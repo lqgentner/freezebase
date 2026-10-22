@@ -16,6 +16,10 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 - `freezebase.vrt.VRT`, an editable model of a GDAL VRT (`Band`, `Source`,
   `SourceProperties`, `PixelFunction`, `Warp`), serialized with `VRT.to_xml()`.
   A `Source` may be another `VRT`, nested inline (needs GDAL ≥ 3.11).
+- `freezebase.vrt.read(path, *, storage_options=None)` parses a VRT file into the model,
+  including VRTs written by freezebase 0.8 and `gdalbuildvrt`. `/vsis3/` sources become
+  `s3://` paths with `storage_options`, or else those of an `s3://` `path`; elements the
+  model cannot hold raise `ValueError`. `Band` and `Source` compare NaN nodata as equal.
 
 ### Changed
 
