@@ -4,6 +4,7 @@
 
 # Storage
 data/
+!tests/data/
 cache/
 models/
 

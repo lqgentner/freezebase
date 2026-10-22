@@ -1,23 +1,36 @@
-"""Serialization of the VRT model to GDAL's VRT XML."""
+"""Serialization of the VRT model to GDAL's VRT XML, and parsing it back."""
 
 from __future__ import annotations
 
+import copy
 import numbers
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from xml.etree import ElementTree as ET
 
+from affine import Affine
 import rasterio
+from rasterio.crs import CRS
 from rasterio.enums import ColorInterp, Resampling
+from rasterio.windows import Window
 
-from freezebase.vrt._model import _GDAL_DTYPE_NAMES, VRT
-from freezebase.vrt._paths import gdal_path
+from freezebase.vrt._model import (
+    _GDAL_DTYPE_NAMES,
+    VRT,
+    Band,
+    PixelFunction,
+    Source,
+    SourceProperties,
+    Warp,
+)
+from freezebase.vrt._paths import gdal_path, inherited_options, parse_gdal_path
 
 if TYPE_CHECKING:
-    from rasterio.windows import Window
+    from collections.abc import Iterator, Mapping
+
     from upath import UPath
 
-    from freezebase.vrt._model import Band, PixelFunction, Source, SourceRef, Warp
+    from freezebase.vrt._model import SourceRef
 
 _MIN_INLINE_NESTING_GDAL = (3, 11)
 
@@ -44,6 +57,35 @@ _COLOR_INTERP_NAMES = {
 }
 
 _RESAMPLING_NAMES = {Resampling.cubic_spline: "cubicspline"}
+
+_DTYPES = {gdal: numpy for numpy, gdal in _GDAL_DTYPE_NAMES.items()}
+_COLOR_INTERPS = {
+    _COLOR_INTERP_NAMES.get(member, member.name.capitalize()).lower(): member
+    for member in ColorInterp
+}
+_RESAMPLINGS = {
+    **{member.name: member for member in Resampling},
+    **{name: member for member, name in _RESAMPLING_NAMES.items()},
+    "near": Resampling.nearest,
+}
+
+# The attributes each element may carry; GDALWarpOptions' contents are kept unchecked.
+_ATTRIBUTES = {
+    "VRTDataset": {"rasterXSize", "rasterYSize", "subClass"},
+    "SRS": {"dataAxisToSRSAxisMapping"},
+    "MDI": {"key"},
+    "VRTRasterBand": {"dataType", "band", "subClass"},
+    "SimpleSource": {"resampling"},
+    "ComplexSource": {"resampling"},
+    "SourceFilename": {"relativeToVRT", "shared"},
+    "SourceDataset": {"relativeToVRT"},
+    "SourceProperties": {"RasterXSize", "RasterYSize", "DataType", "BlockXSize", "BlockYSize"},
+    "SrcRect": {"xOff", "yOff", "xSize", "ySize"},
+    "DstRect": {"xOff", "yOff", "xSize", "ySize"},
+}
+_WARPED_DATASET = "VRTWarpedDataset"
+_DERIVED_BAND = "VRTDerivedRasterBand"
+_WARPED_BAND = "VRTWarpedRasterBand"
 
 
 def to_element(vrt: VRT, *, relative_to: UPath | None) -> ET.Element:
@@ -224,3 +266,280 @@ def _add_warp(root: ET.Element, warp: Warp, *, relative_to: UPath | None) -> Non
     position = len(tags) - tags[::-1].index("Option") if "Option" in tags else 0
     options.insert(position, source)
     root.append(options)
+
+
+def from_xml(
+    text: str,
+    *,
+    base: UPath | None = None,
+    storage_options: Mapping[str, Any] | None = None,
+) -> VRT:
+    """Parse VRT XML; relative source paths resolve against the VRT file ``base``."""
+    # Python >= 3.12 ships an expat that refuses entity expansion attacks.
+    return from_element(ET.fromstring(text), base=base, storage_options=storage_options)  # noqa: S314
+
+
+def from_element(
+    root: ET.Element,
+    *,
+    base: UPath | None,
+    storage_options: Mapping[str, Any] | None,
+) -> VRT:
+    """Parse a ``<VRTDataset>`` element into the model."""
+    if root.tag != "VRTDataset":
+        raise _unsupported(root)
+    _check_attributes(root)
+    warped = _subclass(root, _WARPED_DATASET) is not None
+    vrt = VRT(
+        None,
+        Affine.identity(),
+        int(_attribute(root, "rasterXSize")),
+        int(_attribute(root, "rasterYSize")),
+    )
+    block: dict[str, int] = {}
+    options: ET.Element | None = None
+    for child in _children(root):
+        match child.tag:
+            case "Metadata":
+                vrt.metadata = _metadata(child)
+            case "SRS":
+                vrt.crs = CRS.from_user_input(_text(child))
+            case "GeoTransform":
+                vrt.transform = Affine.from_gdal(*(float(v) for v in _text(child).split(",")))
+            case "VRTRasterBand":
+                vrt.bands.append(_band(child, base=base, storage_options=storage_options))
+            case "BlockXSize" | "BlockYSize" if warped:
+                block[child.tag] = int(_text(child))
+            case "GDALWarpOptions" if warped:
+                options = child
+            case _:
+                raise _unsupported(child)
+    if warped:
+        vrt.warp = _warp(options, block, base=base, storage_options=storage_options)
+    return vrt
+
+
+def _unsupported(element: ET.Element) -> ValueError:
+    """Return the error for an element the model cannot hold."""
+    return ValueError(f"Unsupported VRT element <{element.tag}>")
+
+
+def _check_attributes(element: ET.Element) -> None:
+    """Raise if ``element`` carries an attribute the model cannot hold."""
+    for name in element.attrib:
+        if name not in _ATTRIBUTES.get(element.tag, set()):
+            msg = f"Unsupported attribute {name!r} on <{element.tag}>"
+            raise ValueError(msg)
+
+
+def _children(element: ET.Element) -> Iterator[ET.Element]:
+    """Yield the children of ``element``, checking their attributes."""
+    for child in element:
+        # Any name is a pixel function argument.
+        if child.tag != "PixelFunctionArguments":
+            _check_attributes(child)
+        yield child
+
+
+def _attribute(element: ET.Element, name: str) -> str:
+    """Return a required attribute."""
+    value = element.get(name)
+    if value is None:
+        msg = f"<{element.tag}> lacks the {name!r} attribute"
+        raise ValueError(msg)
+    return value
+
+
+def _text(element: ET.Element) -> str:
+    """Return the text of ``element``, empty if it has none."""
+    return element.text or ""
+
+
+def _subclass(element: ET.Element, *allowed: str) -> str | None:
+    """Return the ``subClass`` of ``element``, raising unless it is one of ``allowed``."""
+    subclass = element.get("subClass")
+    if subclass is not None and subclass not in allowed:
+        msg = f"Unsupported <{element.tag}> subClass {subclass!r}"
+        raise ValueError(msg)
+    return subclass
+
+
+def _dtype(name: str) -> str:
+    """Map a GDAL data type name to NumPy's."""
+    try:
+        return _DTYPES[name]
+    except KeyError:
+        msg = f"Unsupported GDAL data type {name!r}; expected one of {sorted(_DTYPES)}."
+        raise ValueError(msg) from None
+
+
+def _lookup[T](table: Mapping[str, T], name: str, what: str) -> T:
+    """Look ``name`` up case-insensitively."""
+    try:
+        return table[name.strip().lower()]
+    except KeyError:
+        msg = f"Unsupported {what} {name!r}"
+        raise ValueError(msg) from None
+
+
+def _metadata(element: ET.Element) -> dict[str, str]:
+    """Parse a ``<Metadata>`` element."""
+    items: dict[str, str] = {}
+    for item in _children(element):
+        if item.tag != "MDI":
+            raise _unsupported(item)
+        items[_attribute(item, "key")] = _text(item)
+    return items
+
+
+def _band(  # noqa: C901, PLR0912  # one case per element, as in the writer
+    element: ET.Element,
+    *,
+    base: UPath | None,
+    storage_options: Mapping[str, Any] | None,
+) -> Band:
+    """Parse a ``<VRTRasterBand>``."""
+    subclass = _subclass(element, _DERIVED_BAND, _WARPED_BAND)
+    derived = subclass == _DERIVED_BAND
+    band = Band(_dtype(_attribute(element, "dataType")))
+    function: dict[str, Any] = {}
+    for child in _children(element):
+        match child.tag:
+            case "Metadata":
+                band.metadata = _metadata(child)
+            case "NoDataValue":
+                band.nodata = float(_text(child))
+            case "Description":
+                band.description = _text(child)
+            case "UnitType":
+                band.unit = _text(child)
+            case "ColorInterp":
+                band.color_interp = _lookup(_COLOR_INTERPS, _text(child), "colour interpretation")
+            case "PixelFunctionType" if derived:
+                function["name"] = _text(child)
+            case "PixelFunctionArguments" if derived:
+                function["args"] = dict(child.attrib)
+            case "SourceTransferType" if derived:
+                function["transfer_type"] = _dtype(_text(child))
+            case "SimpleSource" | "ComplexSource" if subclass != _WARPED_BAND:
+                band.sources.append(_source(child, base=base, storage_options=storage_options))
+            case _:
+                raise _unsupported(child)
+    if derived:
+        if "name" not in function:
+            msg = f"<{_DERIVED_BAND}> lacks <PixelFunctionType>"
+            raise ValueError(msg)
+        band.pixel_function = PixelFunction(**function)
+    return band
+
+
+def _source(  # noqa: C901  # one case per element, as in the writer
+    element: ET.Element,
+    *,
+    base: UPath | None,
+    storage_options: Mapping[str, Any] | None,
+) -> Source:
+    """Parse a ``<SimpleSource>`` or ``<ComplexSource>``."""
+    complex_ = element.tag == "ComplexSource"
+    path: SourceRef | None = None
+    fields: dict[str, Any] = {}
+    if (resampling := element.get("resampling")) is not None:
+        fields["resampling"] = _lookup(_RESAMPLINGS, resampling, "resampling")
+    for child in _children(element):
+        match child.tag:
+            case "SourceFilename":
+                path = _source_ref(child, base=base, storage_options=storage_options)
+            case "VRTDataset":
+                # Inline VRTs hold absolute paths but inherit the S3 options.
+                path = from_element(
+                    child, base=None, storage_options=inherited_options(base, storage_options)
+                )
+            case "SourceBand":
+                fields["band"] = int(_text(child))
+            case "SourceProperties":
+                fields["properties"] = SourceProperties(
+                    int(_attribute(child, "RasterXSize")),
+                    int(_attribute(child, "RasterYSize")),
+                    _dtype(_attribute(child, "DataType")),
+                    int(_attribute(child, "BlockXSize")),
+                    int(_attribute(child, "BlockYSize")),
+                )
+            case "SrcRect":
+                fields["src_window"] = _window(child)
+            case "DstRect":
+                fields["dst_window"] = _window(child)
+            case "NODATA" if complex_:
+                fields["nodata"] = float(_text(child))
+            case "LUT" if complex_:
+                fields["lut"] = [
+                    (float(value), float(output))
+                    for value, output in (pair.split(":") for pair in _text(child).split(","))
+                ]
+            case _:
+                raise _unsupported(child)
+    if path is None:
+        msg = f"<{element.tag}> lacks <SourceFilename>"
+        raise ValueError(msg)
+    return Source(path, **fields)
+
+
+def _source_ref(
+    element: ET.Element,
+    *,
+    base: UPath | None,
+    storage_options: Mapping[str, Any] | None,
+) -> SourceRef:
+    """Parse a ``<SourceFilename>`` or ``<SourceDataset>``: a path, or a VRT as escaped XML."""
+    text = _text(element)
+    if text.lstrip().startswith("<VRTDataset"):
+        # GDAL names an in-memory VRT by its XML, which has no location to resolve against.
+        return from_xml(text, storage_options=inherited_options(base, storage_options))
+    return parse_gdal_path(
+        text,
+        relative=element.get("relativeToVRT") == "1",
+        base=base,
+        storage_options=storage_options,
+    )
+
+
+def _window(element: ET.Element) -> Window:
+    """Parse a ``<SrcRect>`` or ``<DstRect>``."""
+    return Window(
+        float(_attribute(element, "xOff")),
+        float(_attribute(element, "yOff")),
+        float(_attribute(element, "xSize")),
+        float(_attribute(element, "ySize")),
+    )
+
+
+def _warp(
+    options: ET.Element | None,
+    block: Mapping[str, int],
+    *,
+    base: UPath | None,
+    storage_options: Mapping[str, Any] | None,
+) -> Warp:
+    """Parse the warp from ``<GDALWarpOptions>`` and the dataset's block size."""
+    if options is None:
+        msg = "A warped VRT needs <GDALWarpOptions>"
+        raise ValueError(msg)
+    for tag in ("BlockXSize", "BlockYSize"):
+        if tag not in block:
+            msg = f"A warped VRT needs <{tag}>"
+            raise ValueError(msg)
+    options = copy.deepcopy(options)
+    source = options.find("SourceDataset")
+    if source is None:
+        msg = "<GDALWarpOptions> lacks <SourceDataset>"
+        raise ValueError(msg)
+    _check_attributes(source)
+    path = _source_ref(source, base=base, storage_options=storage_options)
+    options.remove(source)
+    # Indentation depends on where the options sat; drop it so equal warps compare equal.
+    for node in options.iter():
+        if node.text is not None and not node.text.strip():
+            node.text = None
+        if node.tail is not None and not node.tail.strip():
+            node.tail = None
+    xml = ET.tostring(options, encoding="unicode")
+    return Warp(path, xml, (block["BlockXSize"], block["BlockYSize"]))
