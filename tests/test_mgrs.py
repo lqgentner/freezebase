@@ -389,6 +389,19 @@ class TestMGRSGridInExceptionZones:
         assert len(zone_31) > 0
         assert (zone_31.easting < 500_000).all()
 
+    @pytest.mark.parametrize(("zone", "west"), [(32, 9.0), (34, 21.0), (36, 33.0)])
+    def test_zones_without_band_x_name_squares_at_72n_in_band_w(
+        self,
+        zone: int,
+        west: float,
+    ) -> None:
+        # Previously named one square per zone in band X, which `from_mgrs` rejected.
+        gdf = MGRSGrid(box(west, 71.8, west + 3, 72.0)).to_geodataframe()
+        codes = gdf[gdf.zone == zone].mgrs_code
+
+        assert len(codes) > 0
+        assert not codes.str[2].eq("X").any()
+
     def test_zone_31_squares_crossing_64n_keep_a_31v_code(self) -> None:
         # Their SW corner lies in 31V's truncated part, but they overlap zone 31 north of 64 N.
         gdf = MGRSGrid(box(2.5, 63.5, 3.5, 64.5)).to_geodataframe()
@@ -407,6 +420,7 @@ class TestMGRSGridInExceptionZones:
         box(166.0, -80.3, 167.5, -79.6),  # band C, at 80 S
         box(2.5, 55.5, 3.5, 64.5),  # Norway, both ends of zone 31V
         box(14.0, 79.5, 16.0, 80.5),  # Svalbard, band X
+        box(9.0, 71.8, 12.0, 72.0),  # zone 32 at 72 N, where band X is absent
     ],
 )
 def test_grid_squares_round_trip_through_from_mgrs(aoi: Polygon) -> None:

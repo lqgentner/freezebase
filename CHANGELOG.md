@@ -12,19 +12,22 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 - `mgrs` is no longer a dependency. MGRS references are now computed with NumPy
   and pyproj, giving the same codes and squares as `mgrs` (GeoTrans) except for
-  the zone-31 fix below. `MGRSGrid` builds about a third faster.
-- **Breaking:** `MGRSGeoBox.from_mgrs` raises `ValueError` for every reference
-  that names no square of its zone and latitude band. Before, GeoTrans rejected
-  some with `mgrs.core.MGRSError` (band X in zones 32, 34 and 36; letters not
-  used in the zone; squares past the equator) and only warned about the rest:
+  the fixes below. `MGRSGrid` builds about a third faster.
+- **Breaking:** `MGRSGeoBox.from_mgrs` raises `ValueError` for references that
+  use letters their zone lacks or lie outside their latitude band; it still does
+  not check the zone's longitudes. Before, GeoTrans rejected some with
+  `mgrs.core.MGRSError` (band X in zones 32, 34 and 36; letters not used in the
+  zone; squares past the equator) and only warned about the rest:
   `from_mgrs("32TMA00")`, a square outside band T, emitted a `RuntimeWarning`
   and returned it. Now both raise `ValueError`; catch that instead of
   `MGRSError`.
 
 ### Removed
 
-- `MGRSGrid.utm_to_mgrs`, an undocumented vectorised `mgrs` converter that grid
-  construction left on the instance.
+- **Breaking:** `MGRSGrid.utm_to_mgrs`, an undocumented `np.vectorize` wrapper
+  around `mgrs.MGRS().UTMToMGRS` that grid construction left on the instance.
+  Before: `grid.utm_to_mgrs(zones, hemispheres, eastings, northings,
+  MGRSPrecision=1)`. After: read `grid.mgrs_codes`, which holds the grid's codes.
 
 ### Fixed
 
@@ -34,6 +37,10 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   the zone-31 square at easting 500000, so codes repeated and `from_mgrs`
   rebuilt the wrong square. Now those squares are dropped, and zone-31 squares
   that reach past 64°N keep a `31V` code.
+- **Breaking:** `MGRSGrid` no longer names squares in band X in zones 32, 34 and
+  36, which have no band X. Before, the one square per zone straddling 72°N was
+  coded from its SW corner just north of it, e.g. `32XNE69`, and `from_mgrs`
+  rejected that code. Now it is `32WNE69`.
 
 ## [0.8.0] - 2026-09-21
 

@@ -278,7 +278,9 @@ def _mgrs_10km_codes(
     # The nudge puts a corner on a band edge into the northern band, as GeoTrans does;
     # clipping folds corners just south of 80 S into C and stretches X to the pole.
     band_index = np.floor((np.asarray(latitudes) + 80) / 8 + 1e-12)
-    band_index = np.clip(band_index, 0, len(_LATITUDE_BANDS) - 1).astype(np.intp)
+    # Zones 32, 34 and 36 end at 72 N, so their squares straddling it stay in band W.
+    top_band = len(_LATITUDE_BANDS) - (2 if zone in (_ZONE_32, _ZONE_34, _ZONE_36) else 1)
+    band_index = np.clip(band_index, 0, top_band).astype(np.intp)
     bands = np.array(list(_LATITUDE_BANDS))[band_index]
     columns = np.array(list(_COLUMN_LETTERS[(zone - 1) % 3]))[eastings // _100KM_SIZE - 1]
     rows = np.array(list(_ROW_LETTERS))[
@@ -369,7 +371,8 @@ class MGRSGeoBox(GeoBox):
         ValueError
             If ``resolution`` is not positive, does not evenly divide the 10 km
             grid square, or ``mgrs_code`` is not a 10 km reference (two location
-            digits, e.g. ``"32TMT64"``) to a square of its zone and latitude band.
+            digits, e.g. ``"32TMT64"``), uses letters its zone lacks, or lies outside
+            its latitude band.
         """
         if resolution <= 0:
             msg = f"resolution must be positive, got {resolution}."
@@ -616,33 +619,37 @@ class MGRSGrid:
     def _materialize(self) -> None:
         filter_geom = self._filter_tree.geometries
         matched_utm_zones = self.utm_zones.find_intersecting(filter_geom)
-        parts = []
+        codes: list[NDArray[np.str_]] = []
+        eastings: list[NDArray[np.int32]] = []
+        northings: list[NDArray[np.int32]] = []
+        zones: list[NDArray[np.uint8]] = []
+        hemispheres: list[NDArray[np.str_]] = []
+        geometries: list[GeoArray] = []
         for _, zone_row in matched_utm_zones.iterrows():
             zone: int = zone_row["zone"]
             hemisphere: Hemisphere = zone_row["hemisphere"]
-            eastings, northings, geometries = self._materialize_zone(zone, hemisphere)
-            n = len(eastings)
-            parts.append(
-                (
-                    _mgrs_10km_codes(zone, hemisphere, eastings, northings),
-                    eastings,
-                    northings,
-                    np.full(n, zone, dtype=np.uint8),
-                    np.full(n, hemisphere, dtype=np.str_),
-                    geometries,
-                ),
+            zone_eastings, zone_northings, zone_geometries = self._materialize_zone(
+                zone,
+                hemisphere,
             )
+            n = len(zone_eastings)
+            codes.append(_mgrs_10km_codes(zone, hemisphere, zone_eastings, zone_northings))
+            eastings.append(zone_eastings)
+            northings.append(zone_northings)
+            zones.append(np.full(n, zone, dtype=np.uint8))
+            hemispheres.append(np.full(n, hemisphere, dtype=np.str_))
+            geometries.append(zone_geometries)
 
-        if not parts:
+        if not codes:
             return
-        self.mgrs_codes = np.concat([part[0] for part in parts])
+        self.mgrs_codes = np.concat(codes)
         idxs = np.argsort(self.mgrs_codes)
         self.mgrs_codes = self.mgrs_codes[idxs]
-        self.eastings = np.concat([part[1] for part in parts])[idxs]
-        self.northings = np.concat([part[2] for part in parts])[idxs]
-        self.zones = np.concat([part[3] for part in parts])[idxs]
-        self.hemispheres = np.concat([part[4] for part in parts])[idxs]
-        self.geometries = np.concat([part[5] for part in parts])[idxs]
+        self.eastings = np.concat(eastings)[idxs]
+        self.northings = np.concat(northings)[idxs]
+        self.zones = np.concat(zones)[idxs]
+        self.hemispheres = np.concat(hemispheres)[idxs]
+        self.geometries = np.concat(geometries)[idxs]
 
     def _materialize_zone(
         self,
@@ -660,7 +667,10 @@ class MGRSGrid:
             coarse_y + _100KM_SIZE,
         )
         coarse_boxes_wgs = transform_shapely(coarse_boxes_utm, utm_crs, WGS84)
-        mask = self._squares_to_keep(coarse_boxes_wgs, zone_geom_wgs)
+        # 100 km squares only prune; slivers are dropped at 10 km, where the cutoff applies.
+        shapely.prepare(zone_geom_wgs)
+        mask = self._intersects_any(coarse_boxes_wgs)
+        mask &= shapely.intersects(zone_geom_wgs, coarse_boxes_wgs)
 
         fine_x, fine_y = self._subdivide_coarse_coords(coarse_x[mask], coarse_y[mask])
         fine_boxes_utm = shapely.box(
@@ -670,14 +680,9 @@ class MGRSGrid:
             fine_y + _10KM_SIZE,
         )
         fine_boxes_wgs = transform_shapely(fine_boxes_utm, utm_crs, WGS84)
-        mask = self._squares_to_keep(fine_boxes_wgs, zone_geom_wgs)
+        mask = self._intersects_any(fine_boxes_wgs)
+        mask[mask] = _overlaps_zone(fine_boxes_wgs[mask], zone_geom_wgs)
         return fine_x[mask], fine_y[mask], fine_boxes_wgs[mask]
-
-    def _squares_to_keep(self, boxes: GeoArray, zone_geom: BaseGeometry) -> NDArray[np.bool_]:
-        """Return which squares intersect the filter geometry and overlap the zone."""
-        mask = self._intersects_any(boxes)
-        mask[mask] = _overlaps_zone(boxes[mask], zone_geom)
-        return mask
 
     def _build_coarse_coords(
         self,
