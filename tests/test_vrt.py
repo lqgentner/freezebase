@@ -625,14 +625,11 @@ def make_complex_tiff(path: Path) -> None:
 
 
 class TestComplexInputs:
-    def test_decibel_vrt_matches_0_8(self, tmp_path: Path) -> None:
+    def test_decibel_vrt_rejects_complex_input(self, tmp_path: Path) -> None:
         make_complex_tiff(tmp_path / "slc.tif")
-        # Previously raised "Unsupported dtype 'complex64'"; 0.8 took dB of the real part.
-        create_decibel_vrt(tmp_path / "slc.tif", tmp_path / "db.vrt")
-        with rasterio.open(tmp_path / "db.vrt") as ds:
-            np.testing.assert_allclose(
-                ds.read(1), [[10 * np.log10(3), 0.0], [-np.inf, 10.0]], rtol=1e-6
-            )
+        # 0.8 gave the dB of the real part.
+        with pytest.raises(ValueError, match="complex data types are not supported"):
+            create_decibel_vrt(tmp_path / "slc.tif", tmp_path / "db.vrt")
 
     def test_warped_vrt_matches_rasterio(self, tmp_path: Path) -> None:
         make_complex_tiff(tmp_path / "slc.tif")
@@ -658,7 +655,7 @@ class TestComplexInputs:
     def test_rgb_vrt_rejects_complex_inputs(self, tmp_path: Path) -> None:
         make_complex_tiff(tmp_path / "vv.tif")
         make_complex_tiff(tmp_path / "vh.tif")
-        with pytest.raises(ValueError, match="complex"):
+        with pytest.raises(ValueError, match="complex data types are not supported"):
             create_rgb_vrt(tmp_path / "vv.tif", tmp_path / "vh.tif", tmp_path / "rgb.vrt")
 
 

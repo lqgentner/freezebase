@@ -786,15 +786,12 @@ class TestComplex:
         with v.open() as ds:
             np.testing.assert_array_equal(ds.read(1), [[3 + 4j, 1], [2j, 10]])
 
-    def test_derive_takes_the_modulus(self, tmp_path: Path) -> None:
+    def test_derive_rejects_complex_inputs(self, tmp_path: Path) -> None:
         src = _complex(tmp_path / "c.tif")
-        # Previously raised; a float32 transfer type would keep only the real part.
-        with derive(src, PixelFunction.db()).open() as ds:
-            np.testing.assert_allclose(ds.read(1), 10 * np.log10([[5, 1], [2, 10]]), rtol=1e-6)
-        with derive(src, PixelFunction("intensity")).open() as ds:
-            np.testing.assert_allclose(ds.read(1), [[25, 1], [4, 100]], rtol=1e-6)
-
-    def test_derive_rejects_functions_without_complex_support(self, tmp_path: Path) -> None:
-        src = _complex(tmp_path / "c.tif")
-        with pytest.raises(ValueError, match="complex"):
-            derive([src, src], PixelFunction.div())
+        for build in (
+            lambda: derive(src, PixelFunction.db()),
+            lambda: derive([src, src], PixelFunction.div()),
+            lambda: derive(src, PixelFunction("dB", transfer_type="float32")),
+        ):
+            with pytest.raises(ValueError, match=r"complex data types are not supported.*c\.tif"):
+                build()
