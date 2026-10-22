@@ -94,6 +94,15 @@ class TestUTMZoneGenerator:
         gdf = UTMZones().gdf
         assert len(gdf) == 120
 
+    def test_instances_do_not_share_their_zones(self) -> None:
+        edited = UTMZones()
+        edited.gdf.loc[0, "name"] = "edited"
+        edited.gdf.drop(index=1, inplace=True)
+
+        fresh = UTMZones().gdf
+        assert fresh.loc[0, "name"] == "1S"
+        assert len(fresh) == 120
+
     def test_correct_columns(self) -> None:
         gdf = UTMZones().gdf
         assert list(gdf.columns) == ["name", "zone", "hemisphere", "epsg", "geometry"]

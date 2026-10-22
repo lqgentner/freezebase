@@ -431,7 +431,8 @@ class UTMZones:
     """All UTM zones in WGS84, including Norway and Svalbard exceptions."""
 
     def __init__(self) -> None:
-        self.gdf = self._build_zones()
+        # The zones never change, so each instance gets a copy of one cached build.
+        self.gdf = self._built_zones().copy()
 
     def get_zone_geometry(self, zone: int, hemisphere: Hemisphere) -> BaseGeometry:
         """Return the WGS84 geometry of a single UTM zone.
@@ -459,7 +460,14 @@ class UTMZones:
 
         return self.gdf[mask.to_numpy()]
 
-    def _build_zones(self) -> gpd.GeoDataFrame:
+    @classmethod
+    @functools.cache
+    def _built_zones(cls) -> gpd.GeoDataFrame:
+        """Return the zones built once per class; callers must copy before handing out."""
+        return cls._build_zones()
+
+    @classmethod
+    def _build_zones(cls) -> gpd.GeoDataFrame:
         """Generate a GeoDataFrame containing all UTM zones."""
         parts: list[dict[str, Any]] = []
 
@@ -478,7 +486,7 @@ class UTMZones:
             )
 
             if zone in _NORTHERN_EXCEPTION_ZONES:
-                geom = self._build_north_exception(zone, west, east)
+                geom = cls._build_north_exception(zone, west, east)
             else:
                 geom = box(west, 0, east, 84)
 
