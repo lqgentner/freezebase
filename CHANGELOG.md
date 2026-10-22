@@ -24,12 +24,14 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   model cannot hold, or repeated ones GDAL would read only the first of, raise
   `ValueError`. `Band` and `Source` compare NaN nodata as equal.
   A band without `<ColorInterp>` reads as `ColorInterp.undefined`, as GDAL reads it.
-- `VRT.sources`, `VRT.source_files()`, `VRT.env()` and `VRT.open()`: inspect the files a VRT
-  reads, enter the local, S3 or HTTP environment they need (`ValueError` for sources needing
-  different credentials), and open a VRT from memory. They follow `.vrt` files down a
-  chain, scanning them only for source paths, so foreign elements such as `<UseMaskBand>`
-  don't stop them. `storage_options` applies to the S3 sources of followed files, and a
-  followed file without options inherits those of the VRT that references it.
+- `VRT.sources`, `VRT.source_files()`, `VRT.env()` and `VRT.open()`: list a VRT's direct
+  sources without I/O, list the files it reads, enter the local, S3 or HTTP environment
+  they need (`ValueError` for sources needing different credentials), and open a VRT from
+  memory. `source_files()`, `env()` and `open()` follow `.vrt` files down a chain,
+  scanning them only for source paths, so foreign elements such as `<UseMaskBand>` don't
+  stop them; paths on other GDAL virtual file systems, such as `/vsizip/`, are skipped.
+  Their `storage_options` applies to the S3 sources of followed files, and a followed
+  file without options inherits those of the VRT that references it.
 - `freezebase.vrt.from_raster(path)` builds a 1:1 VRT over a raster, and
   `freezebase.vrt.stack(sources, bands=, band_names=, color_interp=)` stacks the bands of
   rasters or VRTs on one grid (`ValueError` pointing at `warp` when the grids differ).

@@ -467,8 +467,9 @@ class VRT:
         """Return the leaf files the VRT reads, recursing into nested VRTs.
 
         Followed VRT files are scanned for ``<SourceFilename>`` and ``<SourceDataset>``
-        only, so they may hold elements ``read`` refuses; sources of any other kind are
-        not found.
+        only, so they may hold elements ``read`` refuses; sources of any other kind, and
+        paths on GDAL virtual file systems other than ``/vsis3/`` and ``/vsicurl/``, are
+        not listed.
 
         Parameters
         ----------
@@ -487,7 +488,7 @@ class VRT:
         Raises
         ------
         ValueError
-            If a followed VRT file names a source GDAL path ``read`` does not support.
+            If a followed VRT file names a relative source path inside an in-memory VRT.
         ImportError
             If a followed VRT file is ``http(s)://`` and aiohttp is not installed.
         """

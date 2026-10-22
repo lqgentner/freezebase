@@ -187,6 +187,9 @@ class _Discovery:
                 # An in-memory VRT, named by its escaped XML.
                 self.walk(ET.fromstring(text), None, options)  # noqa: S314  # see from_xml
                 continue
+            if text.startswith("/vsi") and not text.startswith(("/vsis3/", "/vsicurl/")):
+                # A GDAL virtual file system with no UPath equivalent: not followed or listed.
+                continue
             relative = element.get("relativeToVRT") == "1"
             path = parse_gdal_path(text, relative=relative, base=base, storage_options=options)
             self.add(path, options)
