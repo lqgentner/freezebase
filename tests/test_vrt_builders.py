@@ -414,6 +414,23 @@ class TestMosaicMixedResolution:
         assert source.src_window == Window(-0.5, 0, 6, 4)
         assert source.resampling == Resampling.nearest
 
+    def test_touching_half_pixel_tiles_leave_no_seam(self, tmp_path: Path) -> None:
+        r, x0, y0 = 2.3, 345678.9, 5200000.1
+        a = make_tiff(tmp_path / "a.tif", origin=(x0, y0), res=(r, r), fill=1.0)
+        # Half a pixel off a's grid, so the pixel centres fall exactly on b's and c's edges.
+        b = make_tiff(tmp_path / "b.tif", origin=(x0 + 6.5 * r, y0), res=(r, r), fill=2.0)
+        c = make_tiff(tmp_path / "c.tif", origin=(x0 + 12.5 * r, y0), res=(r, r), fill=3.0)
+        m = mosaic([a, b, c], resolution=(r, r))
+        # Previously float noise moved c's first centre outside it, leaving a NaN column.
+        assert [s.dst_window for s in m.bands[0].sources[1:]] == [
+            Window(6, 0, 6, 4),
+            Window(12, 0, 6, 4),
+        ]
+        with m.open() as ds:
+            data = ds.read(1)
+        expected = np.repeat([1.0, 2.0, 3.0], 6)
+        np.testing.assert_array_equal(data[:, :18], np.tile(expected, (4, 1)))
+
     def test_tile_holding_no_pixel_centre_is_dropped(self, tmp_path: Path) -> None:
         a = make_tiff(tmp_path / "a.tif")
         # Spans x 500061-500064, short of the pixel centre at 500065.
@@ -444,6 +461,14 @@ class TestMosaicMixedResolution:
         a = make_tiff(tmp_path / "a.tif")
         with pytest.raises(ValueError, match="resampling"):
             mosaic([a], resolution="finest", resampling=resampling)
+
+    def test_accepts_rms_resampling(self, tmp_path: Path) -> None:
+        a = make_tiff(tmp_path / "a.tif")
+        b = make_tiff(tmp_path / "b.tif", origin=(500065.0, 5200000.0))
+        m = mosaic([a, b], resolution="finest", resampling=Resampling.rms)
+        assert 'resampling="rms"' in m.to_xml()
+        with m.open() as ds:
+            assert ds.read(1).shape == (4, 13)
 
     def test_rejects_non_positive_resolution(self, tmp_path: Path) -> None:
         a = make_tiff(tmp_path / "a.tif")

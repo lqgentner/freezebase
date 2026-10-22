@@ -41,6 +41,7 @@ _SOURCE_RESAMPLINGS = frozenset(
         Resampling.average,
         Resampling.mode,
         Resampling.gauss,
+        Resampling.rms,
     }
 )
 
@@ -206,11 +207,12 @@ def _mosaic_source(
         src_window = Window(0, 0, info.width, info.height)
         dst_window = Window(round(col), round(row), info.width, info.height)
     else:
-        # Only pixels whose centre is in the tile; left and top edges count as inside.
-        col0 = math.ceil(col - 0.5)
-        col1 = math.ceil((tile.right - grid.c) / rx - 0.5)
-        row0 = math.ceil(row - 0.5)
-        row1 = math.ceil((grid.f - tile.bottom) / ry - 0.5)
+        # Only pixels whose centre is in the tile; a centre within the alignment tolerance
+        # of an edge is on it, inside on the left and top, outside on the right and bottom.
+        col0 = math.ceil(col - 0.5 - _ALIGNMENT_TOL)
+        col1 = math.ceil((tile.right - grid.c) / rx - 0.5 - _ALIGNMENT_TOL)
+        row0 = math.ceil(row - 0.5 - _ALIGNMENT_TOL)
+        row1 = math.ceil((grid.f - tile.bottom) / ry - 0.5 - _ALIGNMENT_TOL)
         if col1 <= col0 or row1 <= row0:
             return None
         dst_window = Window(col0, row0, col1 - col0, row1 - row0)
@@ -297,7 +299,7 @@ def mosaic(
     resampling : Resampling, optional
         Resampling for tiles not on the output grid, which are placed exactly rather than
         snapped to it and fill only the output pixels whose centre they contain. One of
-        nearest, bilinear, cubic, cubic_spline, lanczos, average, mode or gauss.
+        nearest, bilinear, cubic, cubic_spline, lanczos, average, rms, mode or gauss.
     nodata : float | None, optional
         NODATA of every band and source, replacing the first tile's.
     band_names : Sequence[str] | None, optional
