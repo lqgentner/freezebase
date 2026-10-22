@@ -12,13 +12,13 @@ import rasterio
 from rasterio.transform import Affine, from_origin
 
 from freezebase.vrt import (
-    _nodata_equal,
     build_vrt_mosaic,
     create_decibel_vrt,
     create_rgb_vrt,
     create_rgba_vrt,
     create_warped_vrt,
 )
+from freezebase.vrt._legacy import _nodata_equal
 
 WIDTH, HEIGHT = 6, 4
 
