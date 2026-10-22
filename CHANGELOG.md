@@ -56,6 +56,18 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ### Changed
 
+- `build_vrt_mosaic` accepts multi-band tiles and writes sources on the VRT's store relative
+  to it, even outside its directory (`other/b.tif`, not an absolute path).
+- `create_decibel_vrt` writes nodata, not `-inf`, where a source with non-NaN NODATA holds
+  that value.
+- `create_warped_vrt` takes `resolution` as a float, an `(x, y)` tuple or `None`.
+- **Breaking:** `create_warped_vrt` is built on `freezebase.vrt.warp` and no longer ignores
+  datum differences. Before, a missing PROJ datum grid fell back silently to a ballpark
+  transformation with a zero shift, and heights were never shifted or converted. Now PROJ
+  raises `ValueError` when it has no exact transformation (install the grids, e.g. via
+  `PROJ_DATA`). A vertical source with a 2D target, or the reverse, raises `ValueError`
+  (pass a 2D `src_crs` through `warp` to keep heights unconverted), and heights are shifted
+  and converted between units when both CRSs are compound or 3D.
 - `mgrs` is no longer a dependency. MGRS references are now computed with NumPy
   and pyproj, giving the same codes and squares as `mgrs` (GeoTrans) except for
   the fixes below. `MGRSGrid` builds about five times faster, and far faster

@@ -34,7 +34,6 @@ __all__ = [
     "_assert_grid_aligned",
     "_label",
     "_mosaic_grid",
-    "_nodata_equal",
     "_snap_out",
     "_validate_tiles",
     "raster_info",

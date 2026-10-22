@@ -110,9 +110,35 @@ class TestDecibelVrt:
         create_decibel_vrt(vv_tiff, vrt_path)
 
         root = ET.parse(vrt_path).getroot()  # noqa: S314 -- parsing our own just-written fixture
-        source = find(root, "VRTRasterBand/SimpleSource/SourceFilename")
+        source = find(root, "VRTRasterBand/ComplexSource/SourceFilename")
         assert source.text == "vv.tif"
         assert source.get("relativeToVRT") == "1"
+
+    def test_decibel_of_nonnan_nodata_is_nodata(self, tmp_path: Path) -> None:
+        src_path = tmp_path / "counts.tif"
+        data = np.arange(1, WIDTH * HEIGHT + 1, dtype="uint16").reshape(HEIGHT, WIDTH)
+        data[0, 0] = 0
+        with rasterio.open(
+            src_path,
+            "w",
+            driver="GTiff",
+            width=WIDTH,
+            height=HEIGHT,
+            count=1,
+            dtype="uint16",
+            crs="EPSG:32632",
+            transform=from_origin(500000, 5200000, 10, 10),
+            nodata=0,
+        ) as dst:
+            dst.write(data, 1)
+        vrt_path = tmp_path / "counts_db.vrt"
+
+        create_decibel_vrt(src_path, vrt_path)
+
+        with rasterio.open(vrt_path) as src:
+            out = src.read(1)
+        assert np.isnan(out[0, 0])
+        assert np.isfinite(out[0, 1:]).all()
 
 
 class TestRgbVrt:
@@ -208,7 +234,7 @@ class TestVrtXmlSafety:
 
         # Must parse as well-formed XML with the exact (unescaped) filename.
         root = ET.parse(vrt_path).getroot()  # noqa: S314 -- parsing our own just-written fixture
-        source = root.find("VRTRasterBand/SimpleSource/SourceFilename")
+        source = root.find("VRTRasterBand/ComplexSource/SourceFilename")
         assert source is not None
         assert source.text == "a&b<test>.tif"
 
@@ -316,7 +342,7 @@ class TestBuildVrtMosaic:
         with pytest.raises(ValueError, match="dtype"):
             build_vrt_mosaic([tile_a, tile_b], tmp_path / "mosaic.vrt")
 
-    def test_tile_outside_vrt_directory_is_referenced_absolutely(self, tmp_path: Path) -> None:
+    def test_tile_outside_vrt_directory_is_referenced_relatively(self, tmp_path: Path) -> None:
         other = tmp_path / "other"
         other.mkdir()
         tile_a = tmp_path / "a.tif"
@@ -331,12 +357,14 @@ class TestBuildVrtMosaic:
         sources = root.findall("VRTRasterBand/ComplexSource/SourceFilename")
         assert [(s.text, s.get("relativeToVRT")) for s in sources] == [
             ("a.tif", "1"),
-            (str(tile_b), "0"),
+            ("other/b.tif", "1"),
         ]
         with rasterio.open(vrt_path) as src:
             assert src.width == 2 * WIDTH
 
-    def test_relative_source_outside_vrt_directory_resolves_absolute(self, tmp_path: Path) -> None:
+    def test_relative_source_outside_vrt_directory_resolves_from_any_cwd(
+        self, tmp_path: Path
+    ) -> None:
         other = tmp_path / "other"
         other.mkdir()
         make_tiff(tmp_path / "a.tif", fill=1.0)
@@ -351,12 +379,6 @@ class TestBuildVrtMosaic:
             os.chdir(cwd)
 
         vrt_path = tmp_path / "mosaic.vrt"
-        root = ET.parse(vrt_path).getroot()  # noqa: S314 -- parsing our own just-written fixture
-        sources = root.findall("VRTRasterBand/ComplexSource/SourceFilename")
-        text = sources[1].text
-        assert text is not None
-        assert Path(text).is_absolute()
-
         elsewhere = tmp_path / "elsewhere"
         elsewhere.mkdir()
         os.chdir(elsewhere)
@@ -407,24 +429,21 @@ class TestBuildVrtMosaic:
         with pytest.raises(ValueError, match="aligned"):
             build_vrt_mosaic([tile_a, tile_b], tmp_path / "mosaic.vrt")
 
-    def test_rejects_multiband_reference_tile(self, tmp_path: Path) -> None:
+    def test_accepts_multiband_tiles(self, tmp_path: Path) -> None:
         tile_a = tmp_path / "a.tif"
         tile_b = tmp_path / "b.tif"
         make_tiff(tile_a, fill=1.0, count=2)
         make_tiff(tile_b, origin=(500000 + WIDTH * 10, 5200000), fill=2.0, count=2)
+        vrt_path = tmp_path / "mosaic.vrt"
 
-        with pytest.raises(ValueError, match="single-band"):
-            build_vrt_mosaic([tile_a, tile_b], tmp_path / "mosaic.vrt")
+        build_vrt_mosaic([tile_a, tile_b], vrt_path)
 
-    def test_rejects_multiband_non_reference_tile(self, tmp_path: Path) -> None:
-        # A later multi-band tile hits the per-tile check, not the up-front one.
-        tile_a = tmp_path / "a.tif"
-        tile_b = tmp_path / "b.tif"
-        make_tiff(tile_a, fill=1.0)
-        make_tiff(tile_b, origin=(500000 + WIDTH * 10, 5200000), fill=2.0, count=2)
-
-        with pytest.raises(ValueError, match="single-band"):
-            build_vrt_mosaic([tile_a, tile_b], tmp_path / "mosaic.vrt")
+        with rasterio.open(vrt_path) as src:
+            assert src.count == 2
+            for band in (1, 2):
+                data = src.read(band)
+                assert (data[:, :WIDTH] == 1.0).all()
+                assert (data[:, WIDTH:] == 2.0).all()
 
     def test_rejects_unsupported_dtype(self, tmp_path: Path) -> None:
         tile_a = tmp_path / "a.tif"
@@ -512,6 +531,27 @@ class TestWarpedVrt:
             assert ds.transform.e == pytest.approx(-20.0)
             # Snapped outward, so the origin sits on the resolution grid.
             assert ds.transform.c % 20.0 == pytest.approx(0.0)
+
+    def test_accepts_xy_resolution(self, tmp_path: Path) -> None:
+        src = tmp_path / "utm.tif"
+        make_tiff(src, fill=1.0)
+        vrt_path = tmp_path / "warped.vrt"
+
+        create_warped_vrt(src, vrt_path, crs="EPSG:3857", resolution=(20.0, 40.0))
+
+        with rasterio.open(vrt_path) as ds:
+            assert ds.transform.a == pytest.approx(20.0)
+            assert ds.transform.e == pytest.approx(-40.0)
+
+    def test_accepts_default_resolution(self, tmp_path: Path) -> None:
+        src = tmp_path / "utm.tif"
+        make_tiff(src, fill=1.0)
+        vrt_path = tmp_path / "warped.vrt"
+
+        create_warped_vrt(src, vrt_path, crs="EPSG:3857", resolution=None)
+
+        with rasterio.open(vrt_path) as ds:
+            assert ds.crs.to_epsg() == 3857
 
     def test_bounds_fix_the_extent_exactly(self, tmp_path: Path) -> None:
         src = tmp_path / "utm.tif"

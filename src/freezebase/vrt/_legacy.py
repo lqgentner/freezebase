@@ -2,105 +2,27 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, NamedTuple
-from xml.etree import ElementTree as ET
+from typing import TYPE_CHECKING
 
-from rasterio.enums import Resampling
-from rasterio.io import MemoryFile
-import rasterio.shutil
-from rasterio.transform import Affine
-from rasterio.vrt import WarpedVRT
-from rasterio.warp import transform_bounds
+from rasterio.enums import ColorInterp, Resampling
 from upath import UPath
 
-from freezebase import raster
-from freezebase.raster import _to_vsi_uri, rasterio_open
-from freezebase.vrt._grid import (
-    _DENSIFY_PTS,
-    _assert_extent_aligned,
-    _assert_grid_aligned,
-    _label,
-    _snap_out,
-    _validate_tiles,
-    raster_info,
-)
-from freezebase.vrt._model import _GDAL_DTYPE_NAMES
+from freezebase.vrt._builders import derive, mosaic, stack
+from freezebase.vrt._grid import raster_info
+from freezebase.vrt._model import VRT, Band, PixelFunction, Source
+from freezebase.vrt._warp import warp
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
+    from affine import Affine
     from rasterio.coords import BoundingBox
     from rasterio.crs import CRS
 
 type AnyPath = str | Path | UPath
 
 _RGB_BANDS = 3
-
-
-class _GridMeta(NamedTuple):
-    x_size: int
-    y_size: int
-    geo_transform: str
-    projection: str
-    crs: CRS
-    transform_a: float
-    transform_e: float
-
-
-def _read_grid_meta(path: AnyPath) -> _GridMeta:
-    """Read GDAL-compatible raster grid metadata."""
-    with rasterio_open(path) as ds:
-        return _GridMeta(
-            x_size=ds.width,
-            y_size=ds.height,
-            geo_transform=", ".join(str(v) for v in ds.transform.to_gdal()),
-            projection=ds.crs.to_wkt(),
-            crs=ds.crs,
-            transform_a=ds.transform.a,
-            transform_e=ds.transform.e,
-        )
-
-
-def _write_vrt(root: ET.Element, dst: AnyPath) -> None:
-    """Serialize a VRT element tree."""
-    ET.indent(root)
-    xml = ET.tostring(root, encoding="unicode")
-    dst = UPath(dst)
-    if dst.protocol == "s3":
-        raster._upload(xml.encode(), dst)  # noqa: SLF001  # patched via the module in tests
-    else:
-        dst.write_text(xml)
-
-
-def _source_ref(src: AnyPath, dst_vrt: AnyPath) -> tuple[str, str]:
-    """How a VRT should name one of its sources: the text and ``relativeToVRT``.
-
-    A source beside the VRT is referenced by bare filename, for relocatability;
-    anything else is referenced by an absolute GDAL path, so the VRT can read
-    tiles it does not sit next to.
-    """
-    # Resolved so a relative input can't masquerade as adjacent, or leak
-    # unresolved into the "absolute" branch.
-    src, dst_vrt = UPath(src).resolve(), UPath(dst_vrt).resolve()
-    if src.protocol == dst_vrt.protocol and str(src.parent) == str(dst_vrt.parent):
-        return src.name, "1"
-    return _to_vsi_uri(src), "0"
-
-
-def _add_simple_source(
-    band: ET.Element,
-    src: AnyPath,
-    dst_vrt: AnyPath,
-    *,
-    source_band: int = 1,
-) -> None:
-    """Append a SimpleSource, referenced relative to the VRT where possible."""
-    text, relative = _source_ref(src, dst_vrt)
-    source = ET.SubElement(band, "SimpleSource")
-    filename = ET.SubElement(source, "SourceFilename", relativeToVRT=relative)
-    filename.text = text
-    ET.SubElement(source, "SourceBand").text = str(source_band)
 
 
 def create_decibel_vrt(
@@ -120,34 +42,13 @@ def create_decibel_vrt(
     from_intensity : bool, optional
         Use ``10*log10`` for intensity; otherwise use ``20*log10``.
     """
-    src_path = UPath(src_path)
-    meta = _read_grid_meta(src_path)
-    fact = 10 if from_intensity else 20
+    derived = derive(src_path, PixelFunction.db(10 if from_intensity else 20), description="dB")
+    derived.write(output_vrt)
 
-    root = ET.Element(
-        "VRTDataset",
-        rasterXSize=str(meta.x_size),
-        rasterYSize=str(meta.y_size),
-    )
-    ET.SubElement(root, "SRS").text = meta.projection
-    ET.SubElement(root, "GeoTransform").text = meta.geo_transform
 
-    band = ET.SubElement(
-        root,
-        "VRTRasterBand",
-        dataType="Float32",
-        band="1",
-        subClass="VRTDerivedRasterBand",
-    )
-    ET.SubElement(band, "ColorInterp").text = "Gray"
-    ET.SubElement(band, "Description").text = "dB"
-    ET.SubElement(band, "NoDataValue").text = "nan"
-    ET.SubElement(band, "PixelFunctionType").text = "dB"
-    ET.SubElement(band, "PixelFunctionArguments", fact=str(fact))
-    ET.SubElement(band, "SourceTransferType").text = "Float32"
-    _add_simple_source(band, src_path, output_vrt)
-
-    _write_vrt(root, output_vrt)
+def _geotransform(transform: Affine) -> str:
+    """Format an affine transform as GDAL's geotransform string."""
+    return ", ".join(str(v) for v in transform.to_gdal())
 
 
 def create_rgb_vrt(
@@ -177,65 +78,39 @@ def create_rgb_vrt(
     ValueError
         If the inputs have different grids.
     """
-    vv_path, vh_path = UPath(vv_path), UPath(vh_path)
-    vv = _read_grid_meta(vv_path)
-    vh = _read_grid_meta(vh_path)
+    vv = raster_info(vv_path)
+    vh = raster_info(vh_path)
 
-    if (vv.x_size, vv.y_size) != (vh.x_size, vh.y_size):
+    if (vv.width, vv.height) != (vh.width, vh.height):
         msg = (
             f"VV and VH rasters must have the same size, got "
-            f"{vv.x_size}x{vv.y_size} and {vh.x_size}x{vh.y_size}."
+            f"{vv.width}x{vv.height} and {vh.width}x{vh.height}."
         )
         raise ValueError(msg)
     if vv.crs != vh.crs:
         msg = f"VV and VH rasters must share a CRS, got {vv.crs} and {vh.crs}."
         raise ValueError(msg)
-    if vv.geo_transform != vh.geo_transform:
+    if vv.transform.to_gdal() != vh.transform.to_gdal():
         msg = (
             f"VV and VH rasters must share a geotransform, got "
-            f"'{vv.geo_transform}' and '{vh.geo_transform}'."
+            f"'{_geotransform(vv.transform)}' and '{_geotransform(vh.transform)}'."
         )
         raise ValueError(msg)
 
-    band_desc = ["VV_dB", "VH_dB", "VV_dB-VH_dB"] if decibel_scale else ["VV", "VH", "VV/VH"]
-    operator = "diff" if decibel_scale else "div"
-
-    root = ET.Element(
-        "VRTDataset",
-        rasterXSize=str(vv.x_size),
-        rasterYSize=str(vv.y_size),
+    names = ("VV_dB", "VH_dB", "VV_dB-VH_dB") if decibel_scale else ("VV", "VH", "VV/VH")
+    vrt = stack(
+        [vv_path, vh_path],
+        band_names=names[:2],
+        color_interp=(ColorInterp.red, ColorInterp.green),
     )
-    ET.SubElement(root, "SRS").text = vv.projection
-    ET.SubElement(root, "GeoTransform").text = vv.geo_transform
-
-    red = ET.SubElement(root, "VRTRasterBand", dataType="Float32", band="1")
-    ET.SubElement(red, "ColorInterp").text = "Red"
-    ET.SubElement(red, "Description").text = band_desc[0]
-    ET.SubElement(red, "NoDataValue").text = "nan"
-    _add_simple_source(red, vv_path, output_vrt)
-
-    green = ET.SubElement(root, "VRTRasterBand", dataType="Float32", band="2")
-    ET.SubElement(green, "ColorInterp").text = "Green"
-    ET.SubElement(green, "Description").text = band_desc[1]
-    ET.SubElement(green, "NoDataValue").text = "nan"
-    _add_simple_source(green, vh_path, output_vrt)
-
-    blue = ET.SubElement(
-        root,
-        "VRTRasterBand",
-        dataType="Float32",
-        band="3",
-        subClass="VRTDerivedRasterBand",
-    )
-    ET.SubElement(blue, "ColorInterp").text = "Blue"
-    ET.SubElement(blue, "Description").text = band_desc[2]
-    ET.SubElement(blue, "NoDataValue").text = "nan"
-    ET.SubElement(blue, "PixelFunctionType").text = operator
-    ET.SubElement(blue, "SourceTransferType").text = "Float32"
-    _add_simple_source(blue, vv_path, output_vrt)
-    _add_simple_source(blue, vh_path, output_vrt)
-
-    _write_vrt(root, output_vrt)
+    blue = derive(
+        [vv_path, vh_path],
+        PixelFunction.diff() if decibel_scale else PixelFunction.div(),
+        description=names[2],
+    ).bands[0]
+    blue.color_interp = ColorInterp.blue
+    vrt.bands.append(blue)
+    vrt.write(output_vrt)
 
 
 def build_vrt_mosaic(
@@ -244,15 +119,15 @@ def build_vrt_mosaic(
     *,
     bounds: BoundingBox | tuple[float, float, float, float] | None = None,
 ) -> None:
-    """Mosaic aligned, single-band tiles into a VRT.
+    """Mosaic aligned tiles into a VRT.
 
-    Sources beside the VRT are referenced by bare filename, which keeps the pair
-    relocatable; sources elsewhere are referenced by absolute GDAL path.
+    Sources on the VRT's store are referenced relative to it, which keeps the pair
+    relocatable.
 
     Parameters
     ----------
     files : Sequence[str | Path | UPath]
-        Source tiles, sharing a CRS, pixel size, dtype and NODATA value.
+        Source tiles, sharing a CRS, pixel size, band count, dtype and NODATA value.
     dst_vrt : str | Path | UPath
         Output VRT.
     bounds : rasterio.coords.BoundingBox or tuple of float or None, optional
@@ -269,72 +144,7 @@ def build_vrt_mosaic(
     if not files:
         msg = "files must not be empty"
         raise ValueError(msg)
-
-    dst_vrt = UPath(dst_vrt)
-    paths = [UPath(f) for f in files]
-    tiles = [raster_info(p) for p in paths]
-    for i, t in enumerate(tiles):
-        if t.count != 1:
-            msg = f"Only single-band tiles supported, got {t.count} bands in '{_label(t, i)}'."
-            raise ValueError(msg)
-    _validate_tiles(tiles)
-
-    px, py = tiles[0].px, tiles[0].py
-    if bounds is None:
-        minx = min(t.bounds.left for t in tiles)
-        maxy = max(t.bounds.top for t in tiles)
-        maxx = max(t.bounds.right for t in tiles)
-        miny = min(t.bounds.bottom for t in tiles)
-    else:
-        minx, miny, maxx, maxy = (float(v) for v in bounds)
-        _assert_extent_aligned(px, py, left=minx, bottom=miny, right=maxx, top=maxy)
-    _assert_grid_aligned(tiles, minx, maxy)
-    mosaic_w = round((maxx - minx) / px)
-    mosaic_h = round((maxy - miny) / py)
-
-    gdal_dtype = _GDAL_DTYPE_NAMES[tiles[0].dtypes[0]]
-    nodata = tiles[0].nodatavals[0]
-
-    root = ET.Element("VRTDataset", rasterXSize=str(mosaic_w), rasterYSize=str(mosaic_h))
-    if tiles[0].crs is not None:
-        ET.SubElement(root, "SRS").text = tiles[0].crs.to_wkt()
-    ET.SubElement(root, "GeoTransform").text = f"{minx}, {px}, 0, {maxy}, 0, {-py}"
-
-    band = ET.SubElement(root, "VRTRasterBand", dataType=gdal_dtype, band="1")
-    if nodata is not None:
-        ET.SubElement(band, "NoDataValue").text = str(nodata)
-    ET.SubElement(band, "ColorInterp").text = "Gray"
-    ET.SubElement(band, "Description").text = tiles[0].descriptions[0] or ""
-
-    source_tag = "ComplexSource" if nodata is not None else "SimpleSource"
-    for path, t in zip(paths, tiles, strict=True):
-        xoff = round((t.bounds.left - minx) / px)
-        yoff = round((maxy - t.bounds.top) / py)
-        source = ET.SubElement(band, source_tag)
-        text, relative = _source_ref(path, dst_vrt)
-        filename = ET.SubElement(source, "SourceFilename", relativeToVRT=relative)
-        filename.text = text
-        ET.SubElement(source, "SourceBand").text = "1"
-        ET.SubElement(
-            source,
-            "SrcRect",
-            xOff="0",
-            yOff="0",
-            xSize=str(t.width),
-            ySize=str(t.height),
-        )
-        ET.SubElement(
-            source,
-            "DstRect",
-            xOff=str(xoff),
-            yOff=str(yoff),
-            xSize=str(t.width),
-            ySize=str(t.height),
-        )
-        if nodata is not None:
-            ET.SubElement(source, "NODATA").text = str(nodata)
-
-    _write_vrt(root, dst_vrt)
+    mosaic(files, bounds=bounds).write(dst_vrt)
 
 
 def create_warped_vrt(
@@ -342,7 +152,7 @@ def create_warped_vrt(
     output_vrt: AnyPath,
     *,
     crs: CRS | str,
-    resolution: float,
+    resolution: float | tuple[float, float] | None,
     bounds: BoundingBox | tuple[float, float, float, float] | None = None,
     resampling: Resampling = Resampling.average,
     snap: bool = True,
@@ -350,6 +160,8 @@ def create_warped_vrt(
     nodata: float | None = None,
 ) -> None:
     """Create a warped VRT reprojecting a raster onto a fixed target grid.
+
+    Heights are shifted between vertical datums when both CRSs are compound or 3D.
 
     With ``snap``, the grid origin grows outward to a multiple of
     ``resolution``, so warps of several sources land on one common grid.
@@ -363,8 +175,9 @@ def create_warped_vrt(
         anywhere.
     crs : rasterio.crs.CRS or str
         Target CRS.
-    resolution : float
-        Target pixel size, in units of ``crs``.
+    resolution : float or tuple of float or None
+        Target pixel size, or ``(x, y)`` sizes, in units of ``crs``. ``None`` takes the
+        grid ``rasterio.warp.calculate_default_transform`` derives.
     bounds : rasterio.coords.BoundingBox or tuple of float or None, optional
         Target extent as ``(left, bottom, right, top)``, in ``crs``. Defaults to
         the reprojected extent of the source.
@@ -384,60 +197,20 @@ def create_warped_vrt(
     Raises
     ------
     ValueError
-        If ``resolution`` is not positive, or if ``bounds`` is given and does
-        not lie on the ``resolution`` grid.
+        If ``resolution`` is not positive, ``bounds`` is given and does not lie on the
+        ``resolution`` grid, no exact transformation is available (e.g. a datum grid is
+        missing), or only one of the source CRS and ``crs`` has a vertical datum.
     """
-    if resolution <= 0:
-        msg = f"resolution must be positive, got {resolution}."
-        raise ValueError(msg)
-
-    src_path, output_vrt = UPath(src_path), UPath(output_vrt)
-    with rasterio_open(src_path) as src:
-        if bounds is None:
-            extent = transform_bounds(src.crs, crs, *src.bounds, densify_pts=_DENSIFY_PTS)
-            left, bottom, right, top = (
-                _snap_out(extent, resolution, resolution) if snap else extent
-            )
-        else:
-            left, bottom, right, top = (float(v) for v in bounds)
-            _assert_extent_aligned(
-                resolution, resolution, left=left, bottom=bottom, right=right, top=top
-            )
-        width = round((right - left) / resolution)
-        height = round((top - bottom) / resolution)
-        transform = Affine(resolution, 0.0, left, 0.0, -resolution, top)
-        extra: dict[str, Any] = {}
-        if dtype is not None:
-            extra["dtype"] = dtype
-        if nodata is not None:
-            # The source keeps its own sentinel; only the warped band changes.
-            extra["src_nodata"] = src.nodata
-            extra["nodata"] = nodata
-        with (
-            WarpedVRT(
-                src,
-                crs=crs,
-                transform=transform,
-                width=width,
-                height=height,
-                resampling=resampling,
-                **extra,
-            ) as vrt,
-        ):
-            if output_vrt.protocol != "s3":
-                # Written with the source as an absolute path, so it reopens anywhere.
-                rasterio.shutil.copy(vrt, _to_vsi_uri(output_vrt), driver="VRT")
-                return
-            # An S3 VRT is serialized in memory and uploaded whole.
-            with MemoryFile(ext=".vrt") as memfile:
-                rasterio.shutil.copy(vrt, memfile.name, driver="VRT")
-                xml = bytes(memfile.getbuffer())
-    raster._upload(xml, output_vrt)  # noqa: SLF001  # patched via the module in tests
-
-
-def _add_lut(source: ET.Element, lut: Sequence[tuple[float, int]]) -> None:
-    """Append a piecewise-linear source value to output value table."""
-    ET.SubElement(source, "LUT").text = ",".join(f"{value}:{out}" for value, out in lut)
+    warp(
+        src_path,
+        crs=crs,
+        resolution=resolution,
+        bounds=bounds,
+        resampling=resampling,
+        snap=snap,
+        dtype=dtype,
+        nodata=nodata,
+    ).write(output_vrt, relative=False)
 
 
 def create_rgba_vrt(
@@ -479,34 +252,33 @@ def create_rgba_vrt(
         )
         raise ValueError(msg)
 
-    src_path, output_vrt = UPath(src_path), UPath(output_vrt)
-    meta = _read_grid_meta(src_path)
-    with rasterio_open(src_path) as ds:
-        nodatavals = ds.nodatavals
-
-    root = ET.Element(
-        "VRTDataset",
-        rasterXSize=str(meta.x_size),
-        rasterYSize=str(meta.y_size),
+    info = raster_info(src_path)
+    colors = (ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha)
+    # Alpha is 255 except at NODATA, which is skipped and so stays transparent.
+    tables = [*luts, ((0.0, 255), (1.0, 255))]
+    bands = [
+        src_bands[0] if color is ColorInterp.alpha else src_bands[i]
+        for i, color in enumerate(colors)
+    ]
+    vrt = VRT(
+        crs=info.crs,
+        transform=info.transform,
+        width=info.width,
+        height=info.height,
+        bands=[
+            Band(
+                dtype="uint8",
+                sources=[
+                    Source(
+                        path=info.ref,
+                        band=band,
+                        nodata=info.nodatavals[band - 1],
+                        lut=[(float(value), float(out)) for value, out in table],
+                    )
+                ],
+                color_interp=color,
+            )
+            for color, table, band in zip(colors, tables, bands, strict=True)
+        ],
     )
-    ET.SubElement(root, "SRS").text = meta.projection
-    ET.SubElement(root, "GeoTransform").text = meta.geo_transform
-
-    colors = ("Red", "Green", "Blue", "Alpha")
-    for index, color in enumerate(colors):
-        band = ET.SubElement(root, "VRTRasterBand", dataType="Byte", band=str(index + 1))
-        ET.SubElement(band, "ColorInterp").text = color
-        # Bands init to 0, so a skipped NODATA pixel reads as transparent black.
-        source = ET.SubElement(band, "ComplexSource")
-        text, relative = _source_ref(src_path, output_vrt)
-        filename = ET.SubElement(source, "SourceFilename", relativeToVRT=relative)
-        filename.text = text
-        is_alpha = index == len(colors) - 1
-        src_band = src_bands[0] if is_alpha else src_bands[index]
-        ET.SubElement(source, "SourceBand").text = str(src_band)
-        _add_lut(source, ((0.0, 255), (1.0, 255)) if is_alpha else luts[index])
-        nodata = nodatavals[src_band - 1]
-        if nodata is not None:
-            ET.SubElement(source, "NODATA").text = str(nodata)
-
-    _write_vrt(root, output_vrt)
+    vrt.write(output_vrt)
