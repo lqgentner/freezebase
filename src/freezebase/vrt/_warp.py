@@ -115,7 +115,7 @@ def warp(
     VRT
         A warped VRT; nothing is written. Heights are shifted between vertical datums, and
         converted between vertical units, when the source CRS and ``crs`` differ and both
-        are compound or 3D.
+        are compound or 3D; the source must then have one band.
 
     Raises
     ------
@@ -124,9 +124,10 @@ def warp(
         ``resolution`` or ``bounds``, ``bounds`` comes without ``resolution``,
         ``resolution`` is not positive, ``bounds`` does not lie on the ``resolution`` grid,
         ``tolerance`` is negative or NaN, the source has no CRS and no ``src_crs`` is given,
-        only one of the source CRS and the target CRS has a vertical datum, no exact
-        transformation is available and ``allow_ballpark`` is false, or the source has a
-        scale/offset or colour table the model cannot hold.
+        only one of the source CRS and the target CRS has a vertical datum, heights would
+        be shifted in a source of more than one band, no exact transformation is available
+        and ``allow_ballpark`` is false, or the source has a scale/offset or colour table
+        the model cannot hold.
     RuntimeError
         If GDAL's serialized transformer cannot be made exact or ballpark-free.
     """
@@ -139,11 +140,14 @@ def warp(
             raise ValueError(msg)
         if crs is not None and like is None:
             # Check before PROJ derives the target grid.
-            _vertical_shift(source_crs, CRS.from_user_input(crs))
+            _check_vertical_bands(
+                src, vertical=_vertical_shift(source_crs, CRS.from_user_input(crs))
+            )
         dst_crs, transform, width, height = _target_grid(
             src, source_crs, crs=crs, resolution=resolution, bounds=bounds, like=like, snap=snap
         )
         vertical = _vertical_shift(source_crs, dst_crs)
+        _check_vertical_bands(src, vertical=vertical)
         tolerance = _resolve_tolerance(tolerance, vertical=vertical)
         extras: dict[str, Any] = (
             _vertical_shift_options(src.units[0], source_crs, dst_crs) if vertical else {}
@@ -242,6 +246,16 @@ def _vertical_shift(source_crs: CRS, dst_crs: CRS) -> bool:
         )
         raise ValueError(msg)
     return source_vertical
+
+
+def _check_vertical_bands(src: DatasetReader, *, vertical: bool) -> None:
+    """Raise if heights would shift in a multi-band raster, as gdalwarp only shifts one band."""
+    if vertical and src.count > 1:
+        msg = (
+            f"Vertical shifts apply to single-band rasters, and the source has {src.count} "
+            "bands; warp the height band alone, or pass a 2D src_crs to keep values unshifted."
+        )
+        raise ValueError(msg)
 
 
 def _vertical_shift_options(
