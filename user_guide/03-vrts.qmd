@@ -74,6 +74,55 @@ web = vrt.warp(zone, crs="EPSG:3857", resolution=20.0).write("web.vrt")
 Nested VRTs need GDAL 3.11 or newer. Use the written form when other tools open the file
 or when the chain is long.
 
+## Writing a VRT out
+
+`write_cog` streams a `VRT`, or a raster path, to a Cloud Optimized GeoTIFF through GDAL,
+without loading it into memory. `profile` is optional for these inputs.
+
+```python
+from freezebase import vrt
+from freezebase.raster import write_cog
+
+tiles = ["a.tif", "b.tif"]
+write_cog(vrt.mosaic(tiles), "mosaic.tif", {"compress": "zstd"})
+```
+
+`rewrite_tiff` takes a `VRT` too, for a driver other than COG. Its `tags` and `band_tags`
+merge into the VRT's, while `band_names`, `units` and `color_interp` replace them. The
+profile's `dtype` and `nodata` are ignored; use `write_cog` to change them. `move=True`
+needs a source file, so it raises `ValueError` for a `VRT`.
+
+```python
+from freezebase import vrt
+from freezebase.raster import rewrite_tiff
+
+rewrite_tiff(vrt.mosaic(["a.tif", "b.tif"]), "mosaic.tif", {"compress": "deflate"})
+```
+
+A `nodata` in the profile that differs from a band's moves that band's old nodata pixels to
+the new value, whatever the VRT holds: a mosaic, a warp or a derived band. `nodata: None`
+keeps the VRT's. A `dtype` casts every band, and `write_cog` raises `ValueError` if a band's nodata does
+not fit the new dtype. A cast rounds and clamps out-of-range values, so a valid value can
+become the nodata value: 300 cast to `uint8` with nodata 255 reads as nodata. A raster file
+holds one dtype and one nodata, so bands that differ need `dtype` or `nodata` in the
+profile, or `ValueError`.
+
+```python
+from freezebase import vrt
+from freezebase.raster import write_cog
+
+dem = vrt.mosaic(["a.tif", "b.tif"])  # float32, nodata NaN
+write_cog(dem, "dem.tif", {"dtype": "int16", "nodata": -9999})
+```
+
+::: {.callout-note}
+## Migrating from `merge_tiffs`
+
+`merge_tiffs` is gone. `mosaic` lets later tiles win and `merge_tiffs` let the first win, so
+reverse the list: `write_cog(vrt.mosaic(list(reversed(files))), "out.tif")`. Pass
+`band_names=` and `nodata=` to `mosaic` to keep the first file's, which `merge_tiffs` used.
+:::
+
 ## Path policy
 
 `VRT.write` writes a source relative to the VRT when both are on the same store: local, or

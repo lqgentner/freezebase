@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager, contextmanager
-import hashlib
+import copy
 import logging
 from pathlib import Path
 from secrets import token_hex
 import tempfile
 from typing import TYPE_CHECKING, Any, Literal, overload
 
+import numpy as np
 from pyproj import CRS
 from pyproj.exceptions import CRSError
 import rasterio
 import rasterio.env
 from rasterio.io import MemoryFile
-from rasterio.merge import merge
 import rasterio.shutil
 from upath import UPath
 
@@ -25,9 +25,10 @@ from freezebase.utils import file_sha256
 if TYPE_CHECKING:
     from collections.abc import Generator, Mapping, Sequence
 
-    import numpy as np
     from rasterio.enums import ColorInterp
     from rasterio.io import DatasetReader, DatasetWriter
+
+    from freezebase.vrt import VRT
 
 logger = logging.getLogger(__name__)
 
@@ -494,105 +495,8 @@ def group_tiffs_by_crs(src_tiffs: Sequence[AnyPath]) -> dict[str, list[UPath]]:
     return groups
 
 
-def merge_tiffs(
-    src_files: Sequence[AnyPath],
-    dst_file: AnyPath,
-    *,
-    method: str = "first",
-    mem_limit_mb: int = 10_000,
-    profile: dict[str, Any] | None = None,
-) -> None:
-    """Merge GeoTIFFs, preserving band names from the first source.
-
-    Parameters
-    ----------
-    src_files : Sequence[str | Path | UPath]
-        Source files, all in the same CRS.
-    dst_file : str | Path | UPath
-        Output file.
-    method : str, default "first"
-        Overlap method accepted by ``rasterio.merge.merge``.
-    mem_limit_mb : int, default 10000
-        Merge memory limit in megabytes.
-    profile : dict[str, Any] or None, optional
-        Output profile overrides.
-
-    Raises
-    ------
-    ValueError
-        If ``src_files`` is empty or contains different CRSs.
-    FileNotFoundError
-        If any source file does not exist.
-    RuntimeError
-        If merging fails.
-    """
-    if not src_files:
-        msg = "src_files list cannot be empty"
-        raise ValueError(msg)
-
-    dst_file = UPath(dst_file)
-    src_paths = [UPath(f) for f in src_files]
-
-    for src_path in src_paths:
-        if not src_path.exists():
-            msg = f"Source file not found: {src_path}"
-            raise FileNotFoundError(msg)
-
-    logger.info("Merging %d GeoTIFFs into '%s'", len(src_files), dst_file.name)
-
-    # rasterio.merge does not reject mismatched CRSs.
-    ref_crs = None
-    src_profile: dict[str, Any] = {}
-    descriptions: tuple[str | None, ...] = ()
-    for i, src_path in enumerate(src_paths):
-        with rasterio_open(src_path) as src:
-            if i == 0:
-                src_profile = dict(src.profile)
-                descriptions = src.descriptions
-                ref_crs = src.crs
-            elif src.crs != ref_crs:
-                msg = (
-                    f"All source files must share a CRS; '{src_path.name}' has {src.crs}, "
-                    f"expected {ref_crs}."
-                )
-                raise ValueError(msg)
-
-    # Preserve descriptions only when every band has one.
-    if descriptions and all(d is not None for d in descriptions):
-        band_names: list[str] | None = [d for d in descriptions if d is not None]
-    else:
-        band_names = None
-
-    dst_profile = build_rasterio_profile(src_profile, profile)
-    is_s3 = dst_file.protocol == "s3"
-
-    try:
-        with tempfile.TemporaryDirectory(prefix="freezebase-") as tmp:
-            # An S3 destination is merged locally and uploaded whole.
-            local_dst = Path(tmp) / dst_file.name
-            work_dst: AnyPath = local_dst if is_s3 else dst_file
-            # Credentials come from an S3 source, if any; the destination is local here.
-            env_path = next((p for p in src_paths if p.protocol == "s3"), src_paths[0])
-            with _env_for_path(env_path):
-                merge(
-                    [str(p) for p in src_paths],
-                    method=method,
-                    mem_limit=mem_limit_mb,
-                    dst_path=str(work_dst),
-                    dst_kwds=dst_profile,
-                )
-            _inject_band_metadata(work_dst, band_names=band_names)
-            if is_s3:
-                _upload(local_dst, dst_file)
-    except Exception as e:
-        msg = f"Failed to merge GeoTIFFs: {e}"
-        raise RuntimeError(msg) from e
-
-    logger.info("Successfully merged into '%s'", dst_file.name)
-
-
 def rewrite_tiff(
-    src_file: AnyPath,
+    src_file: AnyPath | VRT,
     dst_file: AnyPath,
     profile: dict[str, Any] | None = None,
     band_names: list[str] | None = None,
@@ -603,14 +507,14 @@ def rewrite_tiff(
     units: list[str] | None = None,
     move: bool = False,
 ) -> None:
-    """Rewrite a GeoTIFF locally or on S3 while preserving metadata.
+    """Rewrite a raster file or ``VRT`` locally or on S3 while preserving metadata.
 
     The staged write leaves an existing destination untouched on failure.
 
     Parameters
     ----------
-    src_file : str | Path | UPath
-        Source file.
+    src_file : str | Path | UPath | VRT
+        Source file or VRT.
     dst_file : str | Path | UPath
         Destination file. May equal ``src_file`` for an in-place rewrite.
     profile : dict[str, Any] or None, optional
@@ -630,12 +534,18 @@ def rewrite_tiff(
 
     Raises
     ------
+    ValueError
+        If ``move`` is set for a ``VRT`` source, or a per-band sequence for a ``VRT`` does
+        not hold one entry per band, or its bands differ in dtype or nodata.
     RuntimeError
         If the rewrite fails.
     """
-    src_file = UPath(src_file)
+    from freezebase.vrt import VRT  # noqa: PLC0415  # freezebase.vrt imports raster
+
+    if isinstance(src_file, VRT) and move:
+        msg = "move needs a source file"
+        raise ValueError(msg)
     dst_file = UPath(dst_file)
-    in_place = src_file == dst_file
 
     dst_profile = build_rasterio_profile(profile)
     driver = dst_profile.pop("driver", "GTiff")
@@ -647,6 +557,23 @@ def rewrite_tiff(
         for _k in ("tiled", "blockxsize", "blockysize", "interleave"):
             dst_profile.pop(_k, None)
 
+    if isinstance(src_file, VRT):
+        _rewrite_vrt(
+            src_file,
+            dst_file,
+            driver=driver,
+            dst_profile=dst_profile,
+            band_names=band_names,
+            color_interp=color_interp,
+            tags=tags,
+            band_tags=band_tags,
+            units=units,
+        )
+        logger.debug("Rewrote a VRT to '%s'", dst_file.name)
+        return
+
+    src_file = UPath(src_file)
+    in_place = src_file == dst_file
     # The stage helpers configure each backend independently.
     stage = _rewrite_via_memory if dst_file.protocol == "s3" else _rewrite_via_tempfile
     try:
@@ -669,6 +596,40 @@ def rewrite_tiff(
         src_file.unlink()
 
     logger.debug("Rewrote GeoTIFF from '%s' to '%s'", src_file.name, dst_file.name)
+
+
+def _rewrite_vrt(
+    vrt: VRT,
+    dst_file: UPath,
+    *,
+    driver: str,
+    dst_profile: dict[str, Any],
+    band_names: list[str] | None,
+    color_interp: list[ColorInterp] | None,
+    tags: Mapping[str, str] | None,
+    band_tags: Sequence[Mapping[str, str]] | None,
+    units: list[str] | None,
+) -> None:
+    """Apply the metadata to a copy of ``vrt`` and encode it in one staged copy."""
+    vrt = copy.deepcopy(vrt)
+    # Outside the try: a bad argument is the caller's ValueError, as in write_cog.
+    _apply_vrt_metadata(
+        vrt,
+        band_names=band_names,
+        color_interp=color_interp,
+        tags=tags,
+        band_tags=band_tags,
+        units=units,
+    )
+    # profile dtype and nodata are ignored here, so mixed bands would be coerced.
+    _require_uniform_bands(vrt)
+    try:
+        # Entered in the main thread: credentials set in a worker don't reach GDAL's readers.
+        with vrt.env():
+            _encode_cog(vrt.to_xml(), dst_file, {"driver": driver, **dst_profile}, checksum=False)
+    except Exception as e:
+        msg = f"Failed to rewrite GeoTIFF: {e}"
+        raise RuntimeError(msg) from e
 
 
 def _rewrite_via_memory(
@@ -758,11 +719,206 @@ def _rewrite_via_tempfile(
             work_stage.unlink(missing_ok=True)
 
 
+def _cog_creation_options(profile: Mapping[str, Any]) -> dict[str, Any]:
+    """Merge the profile's COG creation options over ``COG_PROFILE``."""
+    options = COG_PROFILE | {key: profile[key] for key in _COG_CREATION_OPTIONS if key in profile}
+    # LERC does not use predictors.
+    if str(options.get("compress", "")).lower().startswith("lerc"):
+        options.pop("predictor", None)
+        options.pop("overview_predictor", None)
+    return options
+
+
+def _require_profile(profile: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the profile an array write needs."""
+    if profile is None:
+        msg = "profile is required when writing an array."
+        raise ValueError(msg)
+    return profile
+
+
+def _wrap_for_nodata(vrt: VRT, nodata: float | None) -> VRT:
+    """Nest ``vrt`` under bands with a new nodata, mapping its old nodata pixels to it."""
+    from freezebase.vrt import stack  # noqa: PLC0415  # freezebase.vrt imports raster
+    from freezebase.vrt._model import _nodata_equal  # noqa: PLC0415
+
+    if nodata is None or all(_nodata_equal(band.nodata, nodata) for band in vrt.bands):
+        return vrt
+    wrapper = stack([vrt])
+    wrapper.metadata = dict(vrt.metadata)
+    wrapper.metadata_domains = copy.deepcopy(vrt.metadata_domains)
+    for band, inner in zip(wrapper.bands, vrt.bands, strict=True):
+        # Masked pixels fall through to the band's init value, the new nodata.
+        band.sources[0].nodata = inner.nodata
+        band.nodata = nodata
+    return wrapper
+
+
+def _dtype_name(dtype: Any) -> str:
+    """Normalise a dtype spelling like rasterio, keeping the complex integers NumPy lacks."""
+    if str(dtype).startswith("complex_int"):
+        return str(dtype)
+    try:
+        return np.dtype(dtype).name
+    except TypeError as e:
+        msg = f"Unsupported dtype {dtype!r}."
+        raise ValueError(msg) from e
+
+
+def _cast_and_check(vrt: VRT, dtype: Any) -> None:
+    """Set every band's dtype, if given, and refuse a nodata value it cannot hold."""
+    from freezebase.vrt._model import _check_nodata_fits  # noqa: PLC0415
+
+    # Normalised like rasterio does, except for the complex integers NumPy lacks.
+    name = None if dtype is None else _dtype_name(dtype)
+    for band in vrt.bands:
+        if name is not None:
+            band.dtype = name
+        try:
+            _check_nodata_fits(band.dtype, band.nodata)
+        except ValueError as e:
+            if name is None:
+                raise
+            msg = f"casting to {name} needs a nodata value that fits it: {e}"
+            raise ValueError(msg) from e
+
+
+def _require_uniform_bands(vrt: VRT) -> None:
+    """Refuse bands of differing dtype or nodata, which a raster file cannot hold."""
+    from freezebase.vrt._model import _nodata_equal  # noqa: PLC0415
+
+    first = vrt.bands[0]
+    if any(band.dtype != first.dtype for band in vrt.bands):
+        msg = (
+            f"the bands have different dtypes ({sorted({b.dtype for b in vrt.bands})}) "
+            "but a raster file holds one: pass dtype in profile."
+        )
+        raise ValueError(msg)
+    if not all(_nodata_equal(band.nodata, first.nodata) for band in vrt.bands):
+        msg = (
+            f"the bands have different nodata values ({[b.nodata for b in vrt.bands]}) "
+            "but a raster file holds one: pass nodata in profile."
+        )
+        raise ValueError(msg)
+
+
+def _apply_vrt_metadata(
+    vrt: VRT,
+    *,
+    band_names: list[str] | None,
+    color_interp: list[ColorInterp] | None,
+    tags: Mapping[str, str] | None,
+    band_tags: Sequence[Mapping[str, str]] | None,
+    units: list[str] | None,
+) -> None:
+    """Set the metadata on the VRT model, one entry per band."""
+    _check_band_lengths(
+        len(vrt.bands),
+        band_names=band_names,
+        color_interp=color_interp,
+        band_tags=band_tags,
+        units=units,
+    )
+    for i, band in enumerate(vrt.bands):
+        if band_names is not None:
+            band.description = band_names[i]
+        if color_interp is not None:
+            band.color_interp = color_interp[i]
+        if units is not None:
+            band.unit = units[i]
+        if band_tags is not None:
+            band.metadata.update(band_tags[i])
+    if tags is not None:
+        vrt.metadata.update(tags)
+
+
+def _is_vrt_input(data: object) -> bool:
+    """Whether ``data`` is a VRT or a path rather than an array."""
+    from freezebase.vrt import VRT  # noqa: PLC0415  # freezebase.vrt imports raster
+
+    # Non-local UPaths have no __fspath__, so they are named; other path-likes have one.
+    return isinstance(data, VRT | str | UPath) or hasattr(data, "__fspath__")
+
+
+def _encode_cog(
+    src: str, dst_file: UPath, options: Mapping[str, Any], *, checksum: bool
+) -> str | None:
+    """Encode ``src`` as a COG at ``dst_file``, locally or in one S3 upload; return the digest."""
+    digest: str | None = None
+    if dst_file.protocol == "s3":
+        # Encoded to a temporary file and uploaded in one put, never through /vsis3/.
+        with tempfile.TemporaryDirectory(prefix="freezebase-") as tmp:
+            encoded = Path(tmp) / dst_file.name
+            rasterio.shutil.copy(src, str(encoded), **options)
+            if checksum:
+                digest = _SHA256_MULTIHASH_PREFIX + file_sha256(encoded)
+            _upload(encoded, dst_file)
+        return digest
+    # A local write is an atomic rename of a hidden file beside the destination.
+    work_dst = dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.tmp")
+    try:
+        rasterio.shutil.copy(src, _to_vsi_uri(work_dst), **options)
+        if checksum:
+            digest = _SHA256_MULTIHASH_PREFIX + file_sha256(work_dst)
+        work_dst.replace(dst_file)
+    except BaseException:
+        work_dst.unlink(missing_ok=True)
+        raise
+    return digest
+
+
+def _write_cog_from_vrt(
+    data: VRT | AnyPath,
+    dst_file: UPath,
+    profile: dict[str, Any] | None,
+    *,
+    band_names: list[str] | None,
+    color_interp: list[ColorInterp] | None,
+    tags: Mapping[str, str] | None,
+    band_tags: Sequence[Mapping[str, str]] | None,
+    units: list[str] | None,
+    checksum: bool,
+) -> str | None:
+    """Stream a VRT or raster file into a COG at ``dst_file``."""
+    from freezebase.vrt import VRT, from_raster  # noqa: PLC0415  # freezebase.vrt imports raster
+
+    profile = profile or {}
+    vrt = copy.deepcopy(data) if isinstance(data, VRT) else from_raster(data)
+    _apply_vrt_metadata(
+        vrt,
+        band_names=band_names,
+        color_interp=color_interp,
+        tags=tags,
+        band_tags=band_tags,
+        units=units,
+    )
+    try:
+        # Opens the VRT to nest it, so I/O errors belong to the write.
+        vrt = _wrap_for_nodata(vrt, profile.get("nodata"))
+    except OSError as e:
+        msg = f"Failed to write COG: {e}"
+        raise RuntimeError(msg) from e
+    if profile.get("dtype") is not None or profile.get("nodata") is not None:
+        _cast_and_check(vrt, profile.get("dtype"))
+    _require_uniform_bands(vrt)
+    xml = vrt.to_xml()
+    try:
+        # Entered in the main thread: credentials set in a worker don't reach GDAL's readers.
+        with vrt.env():
+            digest = _encode_cog(xml, dst_file, _cog_creation_options(profile), checksum=checksum)
+    except Exception as e:
+        msg = f"Failed to write COG: {e}"
+        raise RuntimeError(msg) from e
+
+    logger.debug("Wrote COG to '%s'", dst_file.name)
+    return digest
+
+
 @overload
 def write_cog(
-    data: np.ndarray,
+    data: np.ndarray | VRT | AnyPath,
     dst_file: AnyPath,
-    profile: dict[str, Any],
+    profile: dict[str, Any] | None = ...,
     *,
     band_names: list[str] | None = ...,
     color_interp: list[ColorInterp] | None = ...,
@@ -773,9 +929,9 @@ def write_cog(
 ) -> None: ...
 @overload
 def write_cog(
-    data: np.ndarray,
+    data: np.ndarray | VRT | AnyPath,
     dst_file: AnyPath,
-    profile: dict[str, Any],
+    profile: dict[str, Any] | None = ...,
     *,
     band_names: list[str] | None = ...,
     color_interp: list[ColorInterp] | None = ...,
@@ -786,9 +942,9 @@ def write_cog(
 ) -> str: ...
 @overload
 def write_cog(
-    data: np.ndarray,
+    data: np.ndarray | VRT | AnyPath,
     dst_file: AnyPath,
-    profile: dict[str, Any],
+    profile: dict[str, Any] | None = ...,
     *,
     band_names: list[str] | None = ...,
     color_interp: list[ColorInterp] | None = ...,
@@ -798,9 +954,9 @@ def write_cog(
     checksum: bool,
 ) -> str | None: ...
 def write_cog(
-    data: np.ndarray,
+    data: np.ndarray | VRT | AnyPath,
     dst_file: AnyPath,
-    profile: dict[str, Any],
+    profile: dict[str, Any] | None = None,
     *,
     band_names: list[str] | None = None,
     color_interp: list[ColorInterp] | None = None,
@@ -809,16 +965,25 @@ def write_cog(
     units: list[str] | None = None,
     checksum: bool = False,
 ) -> str | None:
-    """Write an in-memory array as a Cloud Optimized GeoTIFF.
+    """Write an array, a ``VRT`` or a raster file as a Cloud Optimized GeoTIFF.
+
+    A ``VRT`` or raster path is streamed through GDAL without loading it into memory. A
+    path is read with ``freezebase.vrt.from_raster``, which refuses colour tables and
+    south-up rasters.
 
     Parameters
     ----------
-    data : numpy.ndarray
-        Single- or multi-band array.
+    data : numpy.ndarray | VRT | str | Path | UPath
+        Single- or multi-band array (or array-like), a VRT, or a raster file.
     dst_file : str | Path | UPath
         Destination COG (local or S3).
-    profile : dict[str, Any]
-        Raster metadata and native GDAL ``COG`` creation options.
+    profile : dict[str, Any] or None, optional
+        Raster metadata and native GDAL ``COG`` creation options; required for an array. For
+        a VRT or path only ``dtype``, ``nodata`` and the creation options apply: ``dtype``
+        casts every band, and a ``nodata`` value that differs from a band's moves the pixels
+        holding the old one to it. ``nodata=None`` keeps the VRT's nodata, as leaving it out.
+        A cast rounds and clamps out-of-range values, so a valid value can become the nodata
+        value. Bands that differ in dtype or nodata need ``dtype`` or ``nodata`` here.
     band_names : list[str] or None, optional
         Band descriptions, one per band.
     color_interp : list[ColorInterp] or None, optional
@@ -830,8 +995,8 @@ def write_cog(
     units : list[str] or None, optional
         Band unit strings, one per band.
     checksum : bool, default False
-        Encode the COG into memory and hash those exact bytes before
-        uploading, instead of streaming the encode straight to ``dst_file``.
+        Hash the encoded COG file, the exact bytes that land at ``dst_file``, and return
+        the digest.
 
     Returns
     -------
@@ -841,14 +1006,30 @@ def write_cog(
 
     Raises
     ------
+    ValueError
+        If ``profile`` is missing for an array, a per-band sequence has the wrong length, the
+        dtype is unknown, a nodata value does not fit the dtype, a raster path has a
+        colour table or is south-up, or the bands differ in dtype or nodata without
+        ``profile`` setting it.
     RuntimeError
         If the write fails.
     """
     dst_file = UPath(dst_file)
-    # S3 PutObject is atomic; local writes use an atomic rename.
-    is_s3 = dst_file.protocol == "s3"
-    work_dst = dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.tmp")
-
+    if _is_vrt_input(data):
+        return _write_cog_from_vrt(
+            data,  # pyrefly: ignore[bad-argument-type]  # narrowed by _is_vrt_input
+            dst_file,
+            profile,
+            band_names=band_names,
+            color_interp=color_interp,
+            tags=tags,
+            band_tags=band_tags,
+            units=units,
+            checksum=checksum,
+        )
+    # Keeps a masked array's mask, which rasterio fills with nodata.
+    array = np.asanyarray(data)
+    profile = _require_profile(profile)
     mem_profile = build_rasterio_profile(profile)
     mem_profile.pop("driver", None)
     # Keep the staging image lossless to avoid double quantisation.
@@ -856,22 +1037,13 @@ def write_cog(
         mem_profile.pop(key, None)
     mem_profile["compress"] = "deflate"
 
-    cog_profile = COG_PROFILE | {
-        key: profile[key] for key in _COG_CREATION_OPTIONS if key in profile
-    }
-    # LERC does not use predictors.
-    if str(cog_profile.get("compress", "")).lower().startswith("lerc"):
-        cog_profile.pop("predictor", None)
-        cog_profile.pop("overview_predictor", None)
-
-    digest: str | None = None
     try:
         with MemoryFile() as memfile:
             with memfile.open(driver="GTiff", **mem_profile) as mem_ds:
-                if data.ndim == 2:  # noqa: PLR2004
-                    mem_ds.write(data, 1)
+                if array.ndim == 2:  # noqa: PLR2004
+                    mem_ds.write(array, 1)
                 else:
-                    mem_ds.write(data)
+                    mem_ds.write(array)
                 # Post-write metadata updates break COG layout.
                 _apply_band_metadata(
                     mem_ds,
@@ -881,31 +1053,10 @@ def write_cog(
                     band_tags=band_tags,
                     units=units,
                 )
-
-            if is_s3:
-                # Encoded to a temporary file and uploaded in one put, never
-                # through /vsis3/; hashed from that file, the bytes that go up.
-                with tempfile.TemporaryDirectory(prefix="freezebase-") as tmp:
-                    encoded = Path(tmp) / dst_file.name
-                    rasterio.shutil.copy(memfile.name, str(encoded), **cog_profile)
-                    if checksum:
-                        digest = _SHA256_MULTIHASH_PREFIX + file_sha256(encoded)
-                    _upload(encoded, dst_file)
-            elif checksum:
-                # Hash the encoded bytes before they are renamed into place.
-                with MemoryFile() as cog_memfile:
-                    rasterio.shutil.copy(memfile.name, cog_memfile.name, **cog_profile)
-                    buf = bytes(cog_memfile.getbuffer())
-                digest = _SHA256_MULTIHASH_PREFIX + hashlib.sha256(buf).hexdigest()
-                work_dst.write_bytes(buf)
-            else:
-                rasterio.shutil.copy(memfile.name, _to_vsi_uri(work_dst), **cog_profile)
-
-        if not is_s3:
-            work_dst.replace(dst_file)
+            digest = _encode_cog(
+                memfile.name, dst_file, _cog_creation_options(profile), checksum=checksum
+            )
     except Exception as e:
-        if not is_s3:
-            work_dst.unlink(missing_ok=True)
         msg = f"Failed to write COG: {e}"
         raise RuntimeError(msg) from e
 

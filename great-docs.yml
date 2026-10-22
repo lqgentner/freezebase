@@ -87,7 +87,6 @@ reference:
         - raster.rasterio_open
         - raster.rewrite_tiff
         - raster.write_cog
-        - raster.merge_tiffs
         - raster.build_rasterio_profile
         - raster.group_tiffs_by_crs
         - raster.get_utm_zone_string
