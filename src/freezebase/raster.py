@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager, contextmanager
 import copy
-import hashlib
 import logging
 from pathlib import Path
 from secrets import token_hex
@@ -779,29 +778,44 @@ def _require_profile(profile: dict[str, Any] | None) -> dict[str, Any]:
     return profile
 
 
-def _cast_and_remap(vrt: VRT, profile: Mapping[str, Any]) -> None:
-    """Apply the profile's ``dtype`` and ``nodata`` to every band."""
-    from freezebase.vrt._model import _check_nodata_fits, _nodata_equal  # noqa: PLC0415
+def _wrap_for_nodata(vrt: VRT, nodata: float | None) -> VRT:
+    """Nest ``vrt`` under bands with a new nodata, mapping its old nodata pixels to it."""
+    from freezebase.vrt import stack  # noqa: PLC0415  # freezebase.vrt imports raster
+    from freezebase.vrt._model import _nodata_equal  # noqa: PLC0415
 
-    dtype = profile.get("dtype")
-    if dtype is not None and not isinstance(dtype, str):
-        dtype = np.dtype(dtype).name
+    if nodata is None or all(_nodata_equal(band.nodata, nodata) for band in vrt.bands):
+        return vrt
+    wrapper = stack([vrt])
+    wrapper.metadata = dict(vrt.metadata)
+    wrapper.metadata_domains = copy.deepcopy(vrt.metadata_domains)
+    for band, inner in zip(wrapper.bands, vrt.bands, strict=True):
+        # Masked pixels fall through to the band's init value, the new nodata.
+        band.sources[0].nodata = inner.nodata
+        band.nodata = nodata
+    return wrapper
+
+
+def _cast_and_check(vrt: VRT, dtype: Any) -> None:
+    """Set every band's dtype, if given, and refuse a nodata value it cannot hold."""
+    from freezebase.vrt._model import _check_nodata_fits  # noqa: PLC0415
+
+    # Normalised like rasterio does, except for the complex integers NumPy lacks.
+    name = (
+        None
+        if dtype is None
+        else dtype
+        if str(dtype).startswith("complex_int")
+        else np.dtype(dtype).name
+    )
     for band in vrt.bands:
-        if "nodata" in profile and not _nodata_equal(band.nodata, profile["nodata"]):
-            # Sources carry the old value so GDAL maps it to the new one.
-            for source in band.sources:
-                source.nodata = band.nodata
-            band.nodata = profile["nodata"]
-        if dtype is not None:
-            band.dtype = dtype
-        if dtype is None and "nodata" not in profile:
-            continue
+        if name is not None:
+            band.dtype = name
         try:
             _check_nodata_fits(band.dtype, band.nodata)
         except ValueError as e:
-            if dtype is None:
+            if name is None:
                 raise
-            msg = f"casting to {dtype} needs a nodata value that fits it: {e}"
+            msg = f"casting to {name} needs a nodata value that fits it: {e}"
             raise ValueError(msg) from e
 
 
@@ -835,6 +849,40 @@ def _apply_vrt_metadata(
         vrt.metadata.update(tags)
 
 
+def _is_vrt_input(data: object) -> bool:
+    """Whether ``data`` is a VRT or a path rather than an array."""
+    from freezebase.vrt import VRT  # noqa: PLC0415  # freezebase.vrt imports raster
+
+    return isinstance(data, VRT | str | Path | UPath)
+
+
+def _encode_cog(
+    src: str, dst_file: UPath, options: Mapping[str, Any], *, checksum: bool
+) -> str | None:
+    """Encode ``src`` as a COG at ``dst_file``, locally or in one S3 upload; return the digest."""
+    digest: str | None = None
+    if dst_file.protocol == "s3":
+        # Encoded to a temporary file and uploaded in one put, never through /vsis3/.
+        with tempfile.TemporaryDirectory(prefix="freezebase-") as tmp:
+            encoded = Path(tmp) / dst_file.name
+            rasterio.shutil.copy(src, str(encoded), **options)
+            if checksum:
+                digest = _SHA256_MULTIHASH_PREFIX + file_sha256(encoded)
+            _upload(encoded, dst_file)
+        return digest
+    # A local write is an atomic rename of a hidden file beside the destination.
+    work_dst = dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.tmp")
+    try:
+        rasterio.shutil.copy(src, _to_vsi_uri(work_dst), **options)
+        if checksum:
+            digest = _SHA256_MULTIHASH_PREFIX + file_sha256(work_dst)
+        work_dst.replace(dst_file)
+    except BaseException:
+        work_dst.unlink(missing_ok=True)
+        raise
+    return digest
+
+
 def _write_cog_from_vrt(
     data: VRT | AnyPath,
     dst_file: UPath,
@@ -860,33 +908,15 @@ def _write_cog_from_vrt(
         band_tags=band_tags,
         units=units,
     )
-    _cast_and_remap(vrt, profile)
-    options = _cog_creation_options(profile)
+    vrt = _wrap_for_nodata(vrt, profile.get("nodata"))
+    if profile.get("dtype") is not None or profile.get("nodata") is not None:
+        _cast_and_check(vrt, profile.get("dtype"))
     xml = vrt.to_xml()
-    # S3 PutObject is atomic; local writes use an atomic rename.
-    is_s3 = dst_file.protocol == "s3"
-    work_dst = dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.tmp")
-    digest: str | None = None
     try:
         # Entered in the main thread: credentials set in a worker don't reach GDAL's readers.
         with vrt.env():
-            if is_s3:
-                # Encoded locally and uploaded in one put, never through /vsis3/.
-                with tempfile.TemporaryDirectory(prefix="freezebase-") as tmp:
-                    encoded = Path(tmp) / dst_file.name
-                    rasterio.shutil.copy(xml, str(encoded), **options)
-                    if checksum:
-                        digest = _SHA256_MULTIHASH_PREFIX + file_sha256(encoded)
-                    _upload(encoded, dst_file)
-            else:
-                rasterio.shutil.copy(xml, _to_vsi_uri(work_dst), **options)
-                if checksum:
-                    digest = _SHA256_MULTIHASH_PREFIX + file_sha256(work_dst)
-        if not is_s3:
-            work_dst.replace(dst_file)
+            digest = _encode_cog(xml, dst_file, _cog_creation_options(profile), checksum=checksum)
     except Exception as e:
-        if not is_s3:
-            work_dst.unlink(missing_ok=True)
         msg = f"Failed to write COG: {e}"
         raise RuntimeError(msg) from e
 
@@ -954,13 +984,14 @@ def write_cog(
     Parameters
     ----------
     data : numpy.ndarray | VRT | str | Path | UPath
-        Single- or multi-band array, a VRT, or a raster file.
+        Single- or multi-band array (or array-like), a VRT, or a raster file.
     dst_file : str | Path | UPath
         Destination COG (local or S3).
     profile : dict[str, Any] or None, optional
         Raster metadata and native GDAL ``COG`` creation options; required for an array. For
         a VRT or path only ``dtype``, ``nodata`` and the creation options apply: ``dtype``
-        casts every band, and a ``nodata`` change remaps the pixels holding the old value.
+        casts every band, and a ``nodata`` value that differs from a band's moves the pixels
+        holding the old one to it. ``nodata=None`` keeps the VRT's nodata, as leaving it out.
     band_names : list[str] or None, optional
         Band descriptions, one per band.
     color_interp : list[ColorInterp] or None, optional
@@ -972,8 +1003,8 @@ def write_cog(
     units : list[str] or None, optional
         Band unit strings, one per band.
     checksum : bool, default False
-        Encode the COG into memory and hash those exact bytes before
-        uploading, instead of streaming the encode straight to ``dst_file``.
+        Hash the encoded COG file, the exact bytes that land at ``dst_file``, and return
+        the digest.
 
     Returns
     -------
@@ -984,15 +1015,16 @@ def write_cog(
     Raises
     ------
     ValueError
-        If ``profile`` is missing for an array, a per-band sequence has the wrong length, or
-        a cast needs a nodata value the new dtype cannot hold.
+        If ``profile`` is missing for an array, a per-band sequence has the wrong length, a
+        nodata value does not fit the dtype, or a raster path has a colour table or is
+        south-up.
     RuntimeError
         If the write fails.
     """
     dst_file = UPath(dst_file)
-    if not isinstance(data, np.ndarray):
+    if _is_vrt_input(data):
         return _write_cog_from_vrt(
-            data,
+            data,  # pyrefly: ignore[bad-argument-type]  # narrowed by _is_vrt_input
             dst_file,
             profile,
             band_names=band_names,
@@ -1002,11 +1034,8 @@ def write_cog(
             units=units,
             checksum=checksum,
         )
+    array = np.asarray(data)
     profile = _require_profile(profile)
-    # S3 PutObject is atomic; local writes use an atomic rename.
-    is_s3 = dst_file.protocol == "s3"
-    work_dst = dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.tmp")
-
     mem_profile = build_rasterio_profile(profile)
     mem_profile.pop("driver", None)
     # Keep the staging image lossless to avoid double quantisation.
@@ -1014,16 +1043,13 @@ def write_cog(
         mem_profile.pop(key, None)
     mem_profile["compress"] = "deflate"
 
-    cog_profile = _cog_creation_options(profile)
-
-    digest: str | None = None
     try:
         with MemoryFile() as memfile:
             with memfile.open(driver="GTiff", **mem_profile) as mem_ds:
-                if data.ndim == 2:  # noqa: PLR2004
-                    mem_ds.write(data, 1)
+                if array.ndim == 2:  # noqa: PLR2004
+                    mem_ds.write(array, 1)
                 else:
-                    mem_ds.write(data)
+                    mem_ds.write(array)
                 # Post-write metadata updates break COG layout.
                 _apply_band_metadata(
                     mem_ds,
@@ -1033,31 +1059,10 @@ def write_cog(
                     band_tags=band_tags,
                     units=units,
                 )
-
-            if is_s3:
-                # Encoded to a temporary file and uploaded in one put, never
-                # through /vsis3/; hashed from that file, the bytes that go up.
-                with tempfile.TemporaryDirectory(prefix="freezebase-") as tmp:
-                    encoded = Path(tmp) / dst_file.name
-                    rasterio.shutil.copy(memfile.name, str(encoded), **cog_profile)
-                    if checksum:
-                        digest = _SHA256_MULTIHASH_PREFIX + file_sha256(encoded)
-                    _upload(encoded, dst_file)
-            elif checksum:
-                # Hash the encoded bytes before they are renamed into place.
-                with MemoryFile() as cog_memfile:
-                    rasterio.shutil.copy(memfile.name, cog_memfile.name, **cog_profile)
-                    buf = bytes(cog_memfile.getbuffer())
-                digest = _SHA256_MULTIHASH_PREFIX + hashlib.sha256(buf).hexdigest()
-                work_dst.write_bytes(buf)
-            else:
-                rasterio.shutil.copy(memfile.name, _to_vsi_uri(work_dst), **cog_profile)
-
-        if not is_s3:
-            work_dst.replace(dst_file)
+            digest = _encode_cog(
+                memfile.name, dst_file, _cog_creation_options(profile), checksum=checksum
+            )
     except Exception as e:
-        if not is_s3:
-            work_dst.unlink(missing_ok=True)
         msg = f"Failed to write COG: {e}"
         raise RuntimeError(msg) from e
 

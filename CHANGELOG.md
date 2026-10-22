@@ -72,9 +72,11 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   `stack`, `mosaic` and `warp` carry them from their inputs; `mosaic` tiles must share
   them. A colour table, which the model cannot hold, raises `ValueError` in all four.
 - `write_cog` accepts a `VRT` or a raster path and streams it to a COG through GDAL, without
-  loading it into memory; `profile` is now optional for those inputs. A `nodata` in
-  `profile` remaps the pixels holding the old value, and a `dtype` casts every band, raising
-  `ValueError` when the nodata value cannot be held by an integer `dtype`.
+  loading it into memory; `profile` is optional for those inputs. A `nodata` in `profile`
+  that differs from a band's moves that band's old nodata pixels to the new value, for any
+  VRT (mosaic, warped, derived), by nesting it; `nodata=None` keeps the VRT's. A `dtype`
+  casts every band. `ValueError` if a nodata value does not fit the dtype. Other
+  array-likes still go through `np.asarray`.
 
 ### Changed
 
