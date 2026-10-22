@@ -413,6 +413,35 @@ class TestWrite:
         with rasterio.open(moved / "vrts" / "m.vrt") as ds:
             assert ds.read(1).shape == (4, 6)
 
+    def test_vrt_in_a_symlinked_directory_opens(self, tmp_path: Path) -> None:
+        (tmp_path / "scratch").mkdir()
+        (tmp_path / "proj" / "tiles").mkdir(parents=True)
+        (tmp_path / "proj" / "out").symlink_to(tmp_path / "scratch")
+        tile = make_tiff(tmp_path / "proj" / "tiles" / "a.tif")
+        out = vrt_over(tile).write(tmp_path / "proj" / "out" / "m.vrt")
+        # Previously relative to the symlink's target, which GDAL does not resolve.
+        name = find(parse(out.read_text()), ".//SourceFilename")
+        assert (name.text, name.get("relativeToVRT")) == ("../tiles/a.tif", "1")
+        with rasterio.open(out.path) as ds:
+            assert ds.read(1).shape == (4, 6)
+        again = read(out).write(tmp_path / "proj" / "out" / "again.vrt")
+        with rasterio.open(again.path) as ds:
+            assert ds.read(1).shape == (4, 6)
+
+    def test_source_on_another_drive_is_absolute(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def other_drive(_path: str, _start: str) -> str:
+            msg = "path is on mount 'D:', start on mount 'C:'"
+            raise ValueError(msg)
+
+        monkeypatch.setattr("freezebase.vrt._paths.os.path.relpath", other_drive)
+        tile = tmp_path / "a.tif"
+        assert gdal_path(UPath(tile), relative_to=UPath(tmp_path / "m.vrt")) == (
+            str(tile),
+            False,
+        )
+
     def test_relative_false_writes_absolute(self, tmp_path: Path) -> None:
         tile = make_tiff(tmp_path / "a.tif")
         vrt_over(tile).write(tmp_path / "m.vrt", relative=False)
