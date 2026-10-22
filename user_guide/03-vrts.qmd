@@ -4,7 +4,8 @@ title: "VRTs"
 
 A GDAL VRT is an XML file that describes a raster built from other rasters. `freezebase.vrt`
 reads, builds, edits and writes them as plain Python objects, so no GDAL Python bindings are
-needed and nothing is read until you open the result.
+needed. Building a VRT reads the headers of its sources; no pixels are read until you open
+the result.
 
 ## The model
 
@@ -35,6 +36,8 @@ absolute `UPath`s; relative paths exist only in the written XML.
   `PixelFunction.db()` or `PixelFunction.div()`.
 
 ```python
+from freezebase import vrt
+
 tiles = ["a.tif", "b.tif"]
 web = vrt.warp(vrt.mosaic(tiles), crs="EPSG:3857", resolution=20.0)
 db = vrt.derive(web, vrt.PixelFunction.db())
@@ -49,7 +52,11 @@ Every verb accepts a path or a `VRT`, and returns a `VRT`. A `VRT` passed as a s
 nested inside the new one, so a chain stays in memory until you write it.
 
 ```python
-chain = vrt.derive(vrt.warp(vrt.mosaic(tiles), crs="EPSG:3857", resolution=20.0), ...)
+from freezebase import vrt
+
+tiles = ["a.tif", "b.tif"]
+warped = vrt.warp(vrt.mosaic(tiles), crs="EPSG:3857", resolution=20.0)
+chain = vrt.derive(warped, vrt.PixelFunction.db())
 with chain.open() as ds:  # no file written
     data = ds.read(1)
 ```
@@ -57,6 +64,9 @@ with chain.open() as ds:  # no file written
 To keep a step as a file, write it and use the returned path as the next source:
 
 ```python
+from freezebase import vrt
+
+tiles = ["a.tif", "b.tif"]
 zone = vrt.mosaic(tiles).write("zone.vrt")
 web = vrt.warp(zone, crs="EPSG:3857", resolution=20.0).write("web.vrt")
 ```
@@ -75,6 +85,7 @@ On `vrt.read`, relative paths resolve against the VRT's location and `/vsis3/` p
 become `s3://` paths. They take the storage options of an `s3://` VRT, or those you pass:
 
 ```python
+from freezebase import vrt
 from freezebase.s3 import make_s3_upath
 
 root = make_s3_upath("s3://bucket/run", profile="research")
@@ -93,7 +104,10 @@ files, the credentialed S3 environment for S3, the HTTP one for public HTTP(S). 
 `rasterio.open` on the in-memory VRT.
 
 ```python
-with chain.env(), rasterio.open(path_to_written_vrt) as ds:
+import rasterio
+
+path = chain.write("chain.vrt")
+with chain.env(), rasterio.open(path) as ds:
     data = ds.read(1)
 ```
 
@@ -114,7 +128,8 @@ for example `EPSG:2056+5728` to `EPSG:4979`. Nothing else needs to be requested.
 - Ballpark transformations are refused by default, so a missing grid raises `ValueError`.
   `allow_ballpark=True` opts out.
 - A vertical source into a 2D target raises, and so does a 2D source into a vertical
-  target. Pass a 2D `src_crs` to keep heights unconverted.
+  target. For the first, pass a 2D `src_crs` to keep heights unconverted. For the second,
+  pass a 3D or compound `src_crs`, or a 2D `crs`.
 - Vertical units such as feet are converted as `gdalwarp` converts them.
 
 Making the grids reachable is up to you. Download them, then point PROJ at them:
@@ -128,6 +143,9 @@ Either set `PROJ_NETWORK=ON` before the process starts, or enter
 grids:
 
 ```python
+import rasterio
+
+proj_dir = "/path/to/proj_data"  # rasterio's PROJ data plus the synced grids
 with rasterio.Env(PROJ_DATA=proj_dir):
     shifted = vrt.warp("dem.tif", crs="EPSG:4979", src_crs="EPSG:2056+5728")
 ```
