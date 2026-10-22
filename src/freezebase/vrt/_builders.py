@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from affine import Affine
 from rasterio.enums import Resampling
 from rasterio.windows import Window
+from upath import UPath
 
 from freezebase.vrt._grid import (
     _ALIGNMENT_TOL,
@@ -15,11 +17,12 @@ from freezebase.vrt._grid import (
     RasterInfo,
     _assert_extent_aligned,
     _assert_grid_aligned,
+    _label,
     _mosaic_grid,
     _validate_tiles,
     raster_info,
 )
-from freezebase.vrt._model import VRT, Band, Source, SourceProperties
+from freezebase.vrt._model import VRT, Band, PixelFunction, Source, SourceProperties
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -95,25 +98,28 @@ def from_raster(path: AnyPath) -> VRT:
 def _check_same_grid(infos: Sequence[RasterInfo]) -> None:
     """Raise unless every input shares the first input's CRS, transform and size."""
     first = infos[0]
-    for info in infos[1:]:
+    for index, info in enumerate(infos[1:], start=1):
         if (
             info.crs != first.crs
             or (info.width, info.height) != (first.width, first.height)
             or not info.transform.almost_equals(first.transform, _ALMOST_EQUAL_PRECISION)
         ):
             msg = (
-                f"Sources must share one grid (CRS, transform, size); use warp to align {info.ref}"
+                "Sources must share one grid (CRS, transform, size); "
+                f"use warp to align {_label(info, index)}"
             )
             raise ValueError(msg)
 
 
-def _selected_bands(info: RasterInfo, wanted: Sequence[int] | None) -> Sequence[int]:
+def _selected_bands(
+    info: RasterInfo, wanted: Sequence[int] | None, index: int = 0
+) -> Sequence[int]:
     """Return the 1-based bands to take from ``info``, validated."""
     if wanted is None:
         return range(1, info.count + 1)
     for band in wanted:
         if not 1 <= band <= info.count:
-            msg = f"Source {info.ref} has no band {band} ({info.count} bands)."
+            msg = f"Source {_label(info, index)} has no band {band} ({info.count} bands)."
             raise ValueError(msg)
     return wanted
 
@@ -161,7 +167,7 @@ def stack(
     out = [
         _band(info, band - 1)
         for i, info in enumerate(infos)
-        for band in _selected_bands(info, None if bands is None else bands[i])
+        for band in _selected_bands(info, None if bands is None else bands[i], i)
     ]
     if band_names is not None and len(band_names) != len(out):
         msg = f"band_names has {len(band_names)} entries for {len(out)} bands."
@@ -355,3 +361,87 @@ def mosaic(
             band.color_interp = color_interp[i]
         out.append(band)
     return VRT(crs=first.crs, transform=grid, width=width, height=height, bands=out)
+
+
+def derive(
+    sources: AnyPath | VRT | Sequence[AnyPath | VRT],
+    function: PixelFunction,
+    *,
+    dtype: str = "float32",
+    nodata: float | None = math.nan,
+    description: str = "",
+    band: int | None = None,
+) -> VRT:
+    """Derive bands from rasters or VRTs with a GDAL pixel function.
+
+    Parameters
+    ----------
+    sources : str | Path | UPath | VRT | Sequence[str | Path | UPath | VRT]
+        One input, or several on an identical grid. A ``VRT`` is nested whole, so the
+        function sees its mosaicked pixels.
+    function : PixelFunction
+        Function applied to the sources. ``propagateNoData`` is set to ``"true"`` unless
+        its arguments already set it, so a nodata input gives a nodata output.
+    dtype : str, optional
+        NumPy dtype name of the derived bands.
+    nodata : float | None, optional
+        NODATA of the derived bands.
+    description : str, optional
+        Description of every derived band.
+    band : int | None, optional
+        1-based band read from each input. With several inputs it defaults to 1; with one
+        input, it derives only that band instead of every band.
+
+    Returns
+    -------
+    VRT
+        With one input, a derived band per input band; with several, one derived band.
+        Each source carries its input's NODATA, and ``transfer_type`` defaults to ``dtype``.
+
+    Raises
+    ------
+    ValueError
+        If ``sources`` is empty, the grids differ (use ``warp`` first), or ``band`` is out
+        of range.
+    """
+    inputs = [sources] if isinstance(sources, (str, Path, UPath, VRT)) else list(sources)
+    if not inputs:
+        msg = "derive needs at least one source."
+        raise ValueError(msg)
+    infos = [raster_info(source) for source in inputs]
+    _check_same_grid(infos)
+    first = infos[0]
+    args = {"propagateNoData": "true", **function.args}
+
+    if len(infos) == 1:
+        wanted = _selected_bands(first, None if band is None else [band])
+        groups = [[(first, b)] for b in wanted]
+    else:
+        wanted = [band or 1]
+        for i, info in enumerate(infos):
+            _selected_bands(info, wanted, i)
+        groups = [[(info, wanted[0]) for info in infos]]
+    out = [
+        Band(
+            dtype=dtype,
+            sources=[_derive_source(info, b) for info, b in group],
+            nodata=nodata,
+            description=description,
+            pixel_function=PixelFunction(function.name, args, function.transfer_type or dtype),
+        )
+        for group in groups
+    ]
+    return VRT(
+        crs=first.crs,
+        transform=first.transform,
+        width=first.width,
+        height=first.height,
+        bands=out,
+    )
+
+
+def _derive_source(info: RasterInfo, band: int) -> Source:
+    """Build a whole-raster source of band ``band`` (1-based) carrying its input's nodata."""
+    source = _band(info, band - 1).sources[0]
+    source.nodata = info.nodatavals[band - 1]
+    return source
