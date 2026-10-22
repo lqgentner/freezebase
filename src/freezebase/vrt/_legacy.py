@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING, Any, NamedTuple
 from xml.etree import ElementTree as ET
 
@@ -16,7 +15,14 @@ from upath import UPath
 
 from freezebase import raster
 from freezebase.raster import _to_vsi_uri, rasterio_open
-from freezebase.vrt._model import _GDAL_DTYPE_NAMES
+from freezebase.vrt._grid import (
+    _ALIGNMENT_TOL,
+    _DENSIFY_PTS,
+    _PIXEL_SIZE_TOL,
+    _assert_extent_aligned,
+    _snap_out,
+)
+from freezebase.vrt._model import _GDAL_DTYPE_NAMES, _nodata_equal
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -27,10 +33,6 @@ if TYPE_CHECKING:
 
 type AnyPath = str | Path | UPath
 
-_PIXEL_SIZE_TOL = 1e-6
-_ALIGNMENT_TOL = 1e-3
-# Reprojected edges curve; four corners underestimate the envelope.
-_DENSIFY_PTS = 51
 _RGB_BANDS = 3
 
 
@@ -273,15 +275,6 @@ def _read_tile_info(path: UPath) -> _TileInfo:
         )
 
 
-def _nodata_equal(a: float | None, b: float | None) -> bool:
-    """Compare NODATA values, including None and NaN."""
-    if a is None or b is None:
-        return a is b
-    if math.isnan(a) and math.isnan(b):
-        return True
-    return a == b
-
-
 def _validate_mosaic_tiles(tiles: list[_TileInfo]) -> None:
     """Validate tiles for an axis-aligned, single-band mosaic.
 
@@ -328,24 +321,6 @@ def _validate_tile(t: _TileInfo, ref: _TileInfo) -> None:
         raise ValueError(msg)
     if abs(t.shear_x) > _PIXEL_SIZE_TOL or abs(t.shear_y) > _PIXEL_SIZE_TOL:
         msg = f"Rotated/sheared tiles cannot be mosaicked into an axis-aligned VRT: '{t.name}'."
-        raise ValueError(msg)
-
-
-def _assert_extent_aligned(
-    px: float,
-    py: float,
-    *,
-    left: float,
-    bottom: float,
-    right: float,
-    top: float,
-) -> None:
-    """Reject an extent whose width or height is not a whole number of pixels."""
-    w, h = (right - left) / px, (top - bottom) / py
-    if abs(w - round(w)) > _ALIGNMENT_TOL or abs(h - round(h)) > _ALIGNMENT_TOL:
-        msg = (
-            f"bounds ({left}, {bottom}, {right}, {top}) is not a whole number of {px}x{py} pixels."
-        )
         raise ValueError(msg)
 
 
@@ -514,7 +489,9 @@ def create_warped_vrt(
     with rasterio_open(src_path) as src:
         if bounds is None:
             extent = transform_bounds(src.crs, crs, *src.bounds, densify_pts=_DENSIFY_PTS)
-            left, bottom, right, top = _snap_out(extent, resolution) if snap else extent
+            left, bottom, right, top = (
+                _snap_out(extent, resolution, resolution) if snap else extent
+            )
         else:
             left, bottom, right, top = (float(v) for v in bounds)
             _assert_extent_aligned(
@@ -550,20 +527,6 @@ def create_warped_vrt(
                 rasterio.shutil.copy(vrt, memfile.name, driver="VRT")
                 xml = bytes(memfile.getbuffer())
     raster._upload(xml, output_vrt)  # noqa: SLF001  # patched via the module in tests
-
-
-def _snap_out(
-    bounds: tuple[float, float, float, float],
-    res: float,
-) -> tuple[float, float, float, float]:
-    """Grow ``bounds`` outward onto the grid of ``res``."""
-    left, bottom, right, top = bounds
-    return (
-        math.floor(left / res) * res,
-        math.floor(bottom / res) * res,
-        math.ceil(right / res) * res,
-        math.ceil(top / res) * res,
-    )
 
 
 def _add_lut(source: ET.Element, lut: Sequence[tuple[float, int]]) -> None:

@@ -25,6 +25,9 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 - `VRT.sources`, `VRT.source_files()`, `VRT.env()` and `VRT.open()`: inspect the files a VRT
   reads, enter the local, S3 or HTTP environment they need (`ValueError` for sources needing
   different credentials), and open a VRT from memory.
+- `freezebase.vrt.from_raster(path)` builds a 1:1 VRT over a raster, and
+  `freezebase.vrt.stack(sources, bands=, band_names=, color_interp=)` stacks the bands of
+  rasters or VRTs on one grid (`ValueError` pointing at `warp` when the grids differ).
 
 ### Changed
 
