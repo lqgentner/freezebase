@@ -13,6 +13,8 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 - Python 3.15 support, verified in CI.
 - `vectools.write_parquet` writes a GeoDataFrame atomically as zstd-compressed
   GeoParquet.
+- `http://` / `https://` paths in `rasterio_open` and every reader built on it, read
+  through `/vsicurl/` with `GDAL_HTTP_OPTIONS`; `http_env()`.
 
 ### Changed
 
