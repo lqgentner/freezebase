@@ -135,7 +135,7 @@ reference:
       contents:
         - vectordata.GeoVectorData
         - vectordata.DatasetMetadata
-        - vectools.save_and_read_parquet
+        - vectools.write_parquet
         - vectools.drop_z_if_zero
         - vectools.is_z_axis_zero
         - vectools.simplify_multipolygons
