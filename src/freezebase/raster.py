@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager, contextmanager
+import copy
 import hashlib
 import logging
 from pathlib import Path
@@ -10,6 +11,7 @@ from secrets import token_hex
 import tempfile
 from typing import TYPE_CHECKING, Any, Literal, overload
 
+import numpy as np
 from pyproj import CRS
 from pyproj.exceptions import CRSError
 import rasterio
@@ -25,9 +27,10 @@ from freezebase.utils import file_sha256
 if TYPE_CHECKING:
     from collections.abc import Generator, Mapping, Sequence
 
-    import numpy as np
     from rasterio.enums import ColorInterp
     from rasterio.io import DatasetReader, DatasetWriter
+
+    from freezebase.vrt import VRT
 
 logger = logging.getLogger(__name__)
 
@@ -758,11 +761,144 @@ def _rewrite_via_tempfile(
             work_stage.unlink(missing_ok=True)
 
 
+def _cog_creation_options(profile: Mapping[str, Any]) -> dict[str, Any]:
+    """Merge the profile's COG creation options over ``COG_PROFILE``."""
+    options = COG_PROFILE | {key: profile[key] for key in _COG_CREATION_OPTIONS if key in profile}
+    # LERC does not use predictors.
+    if str(options.get("compress", "")).lower().startswith("lerc"):
+        options.pop("predictor", None)
+        options.pop("overview_predictor", None)
+    return options
+
+
+def _require_profile(profile: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the profile an array write needs."""
+    if profile is None:
+        msg = "profile is required when writing an array."
+        raise ValueError(msg)
+    return profile
+
+
+def _cast_and_remap(vrt: VRT, profile: Mapping[str, Any]) -> None:
+    """Apply the profile's ``dtype`` and ``nodata`` to every band."""
+    from freezebase.vrt._model import _check_nodata_fits, _nodata_equal  # noqa: PLC0415
+
+    dtype = profile.get("dtype")
+    if dtype is not None and not isinstance(dtype, str):
+        dtype = np.dtype(dtype).name
+    for band in vrt.bands:
+        if "nodata" in profile and not _nodata_equal(band.nodata, profile["nodata"]):
+            # Sources carry the old value so GDAL maps it to the new one.
+            for source in band.sources:
+                source.nodata = band.nodata
+            band.nodata = profile["nodata"]
+        if dtype is not None:
+            band.dtype = dtype
+        if dtype is None and "nodata" not in profile:
+            continue
+        try:
+            _check_nodata_fits(band.dtype, band.nodata)
+        except ValueError as e:
+            if dtype is None:
+                raise
+            msg = f"casting to {dtype} needs a nodata value that fits it: {e}"
+            raise ValueError(msg) from e
+
+
+def _apply_vrt_metadata(
+    vrt: VRT,
+    *,
+    band_names: list[str] | None,
+    color_interp: list[ColorInterp] | None,
+    tags: Mapping[str, str] | None,
+    band_tags: Sequence[Mapping[str, str]] | None,
+    units: list[str] | None,
+) -> None:
+    """Set the metadata on the VRT model, one entry per band."""
+    _check_band_lengths(
+        len(vrt.bands),
+        band_names=band_names,
+        color_interp=color_interp,
+        band_tags=band_tags,
+        units=units,
+    )
+    for i, band in enumerate(vrt.bands):
+        if band_names is not None:
+            band.description = band_names[i]
+        if color_interp is not None:
+            band.color_interp = color_interp[i]
+        if units is not None:
+            band.unit = units[i]
+        if band_tags is not None:
+            band.metadata.update(band_tags[i])
+    if tags is not None:
+        vrt.metadata.update(tags)
+
+
+def _write_cog_from_vrt(
+    data: VRT | AnyPath,
+    dst_file: UPath,
+    profile: dict[str, Any] | None,
+    *,
+    band_names: list[str] | None,
+    color_interp: list[ColorInterp] | None,
+    tags: Mapping[str, str] | None,
+    band_tags: Sequence[Mapping[str, str]] | None,
+    units: list[str] | None,
+    checksum: bool,
+) -> str | None:
+    """Stream a VRT or raster file into a COG at ``dst_file``."""
+    from freezebase.vrt import VRT, from_raster  # noqa: PLC0415  # freezebase.vrt imports raster
+
+    profile = profile or {}
+    vrt = copy.deepcopy(data) if isinstance(data, VRT) else from_raster(data)
+    _apply_vrt_metadata(
+        vrt,
+        band_names=band_names,
+        color_interp=color_interp,
+        tags=tags,
+        band_tags=band_tags,
+        units=units,
+    )
+    _cast_and_remap(vrt, profile)
+    options = _cog_creation_options(profile)
+    xml = vrt.to_xml()
+    # S3 PutObject is atomic; local writes use an atomic rename.
+    is_s3 = dst_file.protocol == "s3"
+    work_dst = dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.tmp")
+    digest: str | None = None
+    try:
+        # Entered in the main thread: credentials set in a worker don't reach GDAL's readers.
+        with vrt.env():
+            if is_s3:
+                # Encoded locally and uploaded in one put, never through /vsis3/.
+                with tempfile.TemporaryDirectory(prefix="freezebase-") as tmp:
+                    encoded = Path(tmp) / dst_file.name
+                    rasterio.shutil.copy(xml, str(encoded), **options)
+                    if checksum:
+                        digest = _SHA256_MULTIHASH_PREFIX + file_sha256(encoded)
+                    _upload(encoded, dst_file)
+            else:
+                rasterio.shutil.copy(xml, _to_vsi_uri(work_dst), **options)
+                if checksum:
+                    digest = _SHA256_MULTIHASH_PREFIX + file_sha256(work_dst)
+        if not is_s3:
+            work_dst.replace(dst_file)
+    except Exception as e:
+        if not is_s3:
+            work_dst.unlink(missing_ok=True)
+        msg = f"Failed to write COG: {e}"
+        raise RuntimeError(msg) from e
+
+    logger.debug("Wrote COG to '%s'", dst_file.name)
+    return digest
+
+
 @overload
 def write_cog(
-    data: np.ndarray,
+    data: np.ndarray | VRT | AnyPath,
     dst_file: AnyPath,
-    profile: dict[str, Any],
+    profile: dict[str, Any] | None = ...,
     *,
     band_names: list[str] | None = ...,
     color_interp: list[ColorInterp] | None = ...,
@@ -773,9 +909,9 @@ def write_cog(
 ) -> None: ...
 @overload
 def write_cog(
-    data: np.ndarray,
+    data: np.ndarray | VRT | AnyPath,
     dst_file: AnyPath,
-    profile: dict[str, Any],
+    profile: dict[str, Any] | None = ...,
     *,
     band_names: list[str] | None = ...,
     color_interp: list[ColorInterp] | None = ...,
@@ -786,9 +922,9 @@ def write_cog(
 ) -> str: ...
 @overload
 def write_cog(
-    data: np.ndarray,
+    data: np.ndarray | VRT | AnyPath,
     dst_file: AnyPath,
-    profile: dict[str, Any],
+    profile: dict[str, Any] | None = ...,
     *,
     band_names: list[str] | None = ...,
     color_interp: list[ColorInterp] | None = ...,
@@ -798,9 +934,9 @@ def write_cog(
     checksum: bool,
 ) -> str | None: ...
 def write_cog(
-    data: np.ndarray,
+    data: np.ndarray | VRT | AnyPath,
     dst_file: AnyPath,
-    profile: dict[str, Any],
+    profile: dict[str, Any] | None = None,
     *,
     band_names: list[str] | None = None,
     color_interp: list[ColorInterp] | None = None,
@@ -809,16 +945,22 @@ def write_cog(
     units: list[str] | None = None,
     checksum: bool = False,
 ) -> str | None:
-    """Write an in-memory array as a Cloud Optimized GeoTIFF.
+    """Write an array, a ``VRT`` or a raster file as a Cloud Optimized GeoTIFF.
+
+    A ``VRT`` or raster path is streamed through GDAL without loading it into memory. A
+    path is read with ``freezebase.vrt.from_raster``, which refuses colour tables and
+    south-up rasters.
 
     Parameters
     ----------
-    data : numpy.ndarray
-        Single- or multi-band array.
+    data : numpy.ndarray | VRT | str | Path | UPath
+        Single- or multi-band array, a VRT, or a raster file.
     dst_file : str | Path | UPath
         Destination COG (local or S3).
-    profile : dict[str, Any]
-        Raster metadata and native GDAL ``COG`` creation options.
+    profile : dict[str, Any] or None, optional
+        Raster metadata and native GDAL ``COG`` creation options; required for an array. For
+        a VRT or path only ``dtype``, ``nodata`` and the creation options apply: ``dtype``
+        casts every band, and a ``nodata`` change remaps the pixels holding the old value.
     band_names : list[str] or None, optional
         Band descriptions, one per band.
     color_interp : list[ColorInterp] or None, optional
@@ -841,10 +983,26 @@ def write_cog(
 
     Raises
     ------
+    ValueError
+        If ``profile`` is missing for an array, a per-band sequence has the wrong length, or
+        a cast needs a nodata value the new dtype cannot hold.
     RuntimeError
         If the write fails.
     """
     dst_file = UPath(dst_file)
+    if not isinstance(data, np.ndarray):
+        return _write_cog_from_vrt(
+            data,
+            dst_file,
+            profile,
+            band_names=band_names,
+            color_interp=color_interp,
+            tags=tags,
+            band_tags=band_tags,
+            units=units,
+            checksum=checksum,
+        )
+    profile = _require_profile(profile)
     # S3 PutObject is atomic; local writes use an atomic rename.
     is_s3 = dst_file.protocol == "s3"
     work_dst = dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.tmp")
@@ -856,13 +1014,7 @@ def write_cog(
         mem_profile.pop(key, None)
     mem_profile["compress"] = "deflate"
 
-    cog_profile = COG_PROFILE | {
-        key: profile[key] for key in _COG_CREATION_OPTIONS if key in profile
-    }
-    # LERC does not use predictors.
-    if str(cog_profile.get("compress", "")).lower().startswith("lerc"):
-        cog_profile.pop("predictor", None)
-        cog_profile.pop("overview_predictor", None)
+    cog_profile = _cog_creation_options(profile)
 
     digest: str | None = None
     try:
