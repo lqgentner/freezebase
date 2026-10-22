@@ -13,14 +13,18 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 - `mgrs` is no longer a dependency. MGRS references are now computed with NumPy
   and pyproj, giving the same codes and squares as `mgrs` (GeoTrans) except for
   the fixes below. `MGRSGrid` builds about a third faster.
-- **Breaking:** `MGRSGeoBox.from_mgrs` raises `ValueError` for references that
-  use letters their zone lacks or lie outside their latitude band; it still does
-  not check the zone's longitudes. Before, GeoTrans rejected some with
-  `mgrs.core.MGRSError` (band X in zones 32, 34 and 36; letters not used in the
-  zone; squares past the equator) and only warned about the rest:
-  `from_mgrs("32TMA00")`, a square outside band T, emitted a `RuntimeWarning`
-  and returned it. Now both raise `ValueError`; catch that instead of
-  `MGRSError`.
+- **Breaking:** `MGRSGeoBox.from_mgrs` raises `ValueError` for every reference
+  that uses letters its zone lacks or names a square outside its latitude band
+  or UTM zone. Before, GeoTrans rejected some with `mgrs.core.MGRSError` (band X
+  in zones 32, 34 and 36; letters not used in the zone; squares past the
+  equator), only warned about squares outside their band
+  (`from_mgrs("32TMA00")` emitted a `RuntimeWarning`), and silently accepted
+  squares outside their zone (`from_mgrs("31VFH00")` returned a square at 5°E,
+  east of where zone 31V ends at 3°E). Now all of these raise `ValueError`;
+  catch that instead of `MGRSError`.
+- **Breaking:** `MGRSGeoBox.from_mgrs` stores the reference in the form
+  `MGRSGrid` uses: upper case, two-digit zone, no surrounding spaces. Before,
+  `from_mgrs("4QFJ15").mgrs_code` was `"4QFJ15"`; now it is `"04QFJ15"`.
 
 ### Removed
 
@@ -41,6 +45,11 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   36, which have no band X. Before, the one square per zone straddling 72°N was
   coded from its SW corner just north of it, e.g. `32XNE69`, and `from_mgrs`
   rejected that code. Now it is `32WNE69`.
+- **Breaking:** `MGRSGrid` geometries no longer wrap around the globe at the
+  antimeridian. Before, a square crossing 180° became a polygon spanning every
+  longitude, and squares beyond 180° were kept in zones 1–6 and 55–60 because
+  that polygon overlapped them. Now crossing squares are split at 180° into a
+  two-part `MultiPolygon`, and the spurious squares are gone.
 
 ## [0.8.0] - 2026-09-21
 

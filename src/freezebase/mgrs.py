@@ -242,9 +242,15 @@ _ROW_CYCLE = 2_000_000
 
 
 @functools.cache
+def _cached_utm_crs(zone: int, hemisphere: Hemisphere) -> CRS:
+    """Return the CRS of a UTM zone, built once per zone."""
+    return utm_to_crs(zone, hemisphere)
+
+
+@functools.cache
 def _utm_to_wgs84(zone: int, hemisphere: Hemisphere) -> Transformer:
     """Return a cached transformer from a UTM zone to WGS84 longitude/latitude."""
-    return Transformer.from_crs(utm_to_crs(zone, hemisphere), WGS84, always_xy=True)
+    return Transformer.from_crs(_cached_utm_crs(zone, hemisphere), WGS84, always_xy=True)
 
 
 def _row_offset(zone: int) -> int:
@@ -322,6 +328,12 @@ def _mgrs_10km_to_utm(match: re.Match[str]) -> tuple[int, Hemisphere, int, int]:
     if northing > _FALSE_NORTHING_SOUTH or not south <= latitude <= north:
         msg = f"MGRS reference {mgrs_code!r} lies outside latitude band {band}."
         raise ValueError(msg)
+    square = _utm_squares_to_wgs84(
+        zone, hemisphere, np.array([easting]), np.array([northing]), _10KM_SIZE
+    )
+    if not _overlaps_zone(square, _zone_geometry(zone, hemisphere))[0]:
+        msg = f"MGRS reference {mgrs_code!r} lies outside UTM zone {zone}{hemisphere}."
+        raise ValueError(msg)
     return zone, hemisphere, easting, northing
 
 
@@ -372,7 +384,7 @@ class MGRSGeoBox(GeoBox):
             If ``resolution`` is not positive, does not evenly divide the 10 km
             grid square, or ``mgrs_code`` is not a 10 km reference (two location
             digits, e.g. ``"32TMT64"``), uses letters its zone lacks, or lies outside
-            its latitude band.
+            its latitude band or UTM zone.
         """
         if resolution <= 0:
             msg = f"resolution must be positive, got {resolution}."
@@ -389,13 +401,16 @@ class MGRSGeoBox(GeoBox):
             raise ValueError(msg)
 
         zone, hemisphere, easting, northing = _mgrs_10km_to_utm(match)
-        crs = utm_to_crs(zone, hemisphere)
+        crs = _cached_utm_crs(zone, hemisphere)
 
         n_pixels = int(_10KM_SIZE / resolution)
         nw_northing = northing + _10KM_SIZE
         affine = Affine(resolution, 0, easting, 0, -resolution, nw_northing)
 
-        return cls(mgrs_code, (n_pixels, n_pixels), affine, crs)
+        canonical = (
+            f"{zone:02d}{match.group('band')}{match.group('square')}{match.group('digits')}"
+        )
+        return cls(canonical.upper(), (n_pixels, n_pixels), affine, crs)
 
     @override
     def __repr__(self) -> str:
@@ -530,6 +545,50 @@ def _overlaps_zone(boxes: GeoArray, zone_geom: BaseGeometry) -> NDArray[np.bool_
     return overlaps
 
 
+@functools.cache
+def _zone_geometry(zone: int, hemisphere: Hemisphere) -> BaseGeometry:
+    """Return the cached WGS84 geometry of a UTM zone."""
+    return UTMZones().get_zone_geometry(zone, hemisphere)
+
+
+def _split_at_antimeridian(geoms: GeoArray) -> GeoArray:
+    """Split polygons whose vertices wrap around 180 degrees into two-part multipolygons."""
+    bounds = shapely.bounds(geoms)
+    wraps = bounds[:, 2] - bounds[:, 0] > 180  # noqa: PLR2004
+    if not wraps.any():
+        return geoms
+    # Move western vertices east of 180, cut there, and move the eastern piece back.
+    unwrapped = shapely.transform(
+        geoms[wraps],
+        lambda xy: np.where(xy[:, :1] < 0, xy + np.array([360, 0]), xy),
+    )
+    west = shapely.intersection(unwrapped, box(0, -90, 180, 90))
+    east = shapely.transform(
+        shapely.intersection(unwrapped, box(180, -90, 360, 90)),
+        lambda xy: xy - np.array([360, 0]),
+    )
+    split = geoms.copy()
+    split[wraps] = shapely.union(west, east)
+    return split
+
+
+def _utm_squares_to_wgs84(
+    zone: int,
+    hemisphere: Hemisphere,
+    sw_x: NDArray[np.int32],
+    sw_y: NDArray[np.int32],
+    size: int,
+) -> GeoArray:
+    """Return UTM squares as WGS84 polygons, split at the antimeridian."""
+    squares = shapely.box(sw_x, sw_y, sw_x + size, sw_y + size)
+    transformer = _utm_to_wgs84(zone, hemisphere)
+    # `interleaved=False` selects the (x, y) -> (x, y) transformer overload, which
+    # shapely's stubs do not model.
+    # pyrefly: ignore [no-matching-overload]
+    projected = shapely.transform(squares, transformer.transform, interleaved=False)
+    return _split_at_antimeridian(projected)
+
+
 class MGRSGrid:
     """The 10 km MGRS squares intersecting an area of interest.
 
@@ -657,29 +716,22 @@ class MGRSGrid:
         hemisphere: Hemisphere,
     ) -> tuple[NDArray[np.int32], NDArray[np.int32], GeoArray]:
         """Return the SW corners and WGS84 boxes of one zone's squares."""
-        utm_crs = utm_to_crs(zone, hemisphere)
         zone_geom_wgs = self.utm_zones.get_zone_geometry(zone, hemisphere)
         coarse_x, coarse_y = self._build_coarse_coords(zone, hemisphere)
-        coarse_boxes_utm = shapely.box(
+        coarse_boxes_wgs = _utm_squares_to_wgs84(
+            zone,
+            hemisphere,
             coarse_x,
             coarse_y,
-            coarse_x + _100KM_SIZE,
-            coarse_y + _100KM_SIZE,
+            _100KM_SIZE,
         )
-        coarse_boxes_wgs = transform_shapely(coarse_boxes_utm, utm_crs, WGS84)
         # 100 km squares only prune; slivers are dropped at 10 km, where the cutoff applies.
         shapely.prepare(zone_geom_wgs)
         mask = self._intersects_any(coarse_boxes_wgs)
         mask &= shapely.intersects(zone_geom_wgs, coarse_boxes_wgs)
 
         fine_x, fine_y = self._subdivide_coarse_coords(coarse_x[mask], coarse_y[mask])
-        fine_boxes_utm = shapely.box(
-            fine_x,
-            fine_y,
-            fine_x + _10KM_SIZE,
-            fine_y + _10KM_SIZE,
-        )
-        fine_boxes_wgs = transform_shapely(fine_boxes_utm, utm_crs, WGS84)
+        fine_boxes_wgs = _utm_squares_to_wgs84(zone, hemisphere, fine_x, fine_y, _10KM_SIZE)
         mask = self._intersects_any(fine_boxes_wgs)
         mask[mask] = _overlaps_zone(fine_boxes_wgs[mask], zone_geom_wgs)
         return fine_x[mask], fine_y[mask], fine_boxes_wgs[mask]
@@ -801,7 +853,7 @@ class MGRSGrid:
         # `zones` holds numpy scalars; `utm_to_crs` is annotated for plain ints.
         zone = int(self.zones[index])
         hemisphere = self.hemispheres[index]
-        crs = utm_to_crs(zone, hemisphere)
+        crs = _cached_utm_crs(zone, hemisphere)
         n_pixels = int(_10KM_SIZE / resolution)
         sw_easting = self.eastings[index]
         nw_northing = self.northings[index] + _10KM_SIZE
