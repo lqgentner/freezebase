@@ -406,8 +406,8 @@ class VRT:
         Raises
         ------
         ValueError
-            If a band or source dtype has no GDAL equivalent, or a ``metadata_domains`` key
-            is empty.
+            If a band or source dtype has no GDAL equivalent, a ``metadata_domains`` key
+            is empty, or a band of a warped VRT has sources or a pixel function.
         RuntimeError
             If a source is a nested VRT and rasterio's GDAL is older than 3.11.
         """
@@ -438,7 +438,7 @@ class VRT:
         Raises
         ------
         ValueError
-            If a band or source dtype has no GDAL equivalent.
+            If ``path`` is neither local nor ``s3://``, or as ``to_xml``.
         RuntimeError
             If a source is a nested VRT and rasterio's GDAL is older than 3.11.
         """

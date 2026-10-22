@@ -84,6 +84,8 @@ _ATTRIBUTES = {
     "SrcRect": {"xOff", "yOff", "xSize", "ySize"},
     "DstRect": {"xOff", "yOff", "xSize", "ySize"},
 }
+# Elements that may repeat under one parent; Metadata may repeat once per domain.
+_REPEATABLE = frozenset({"VRTRasterBand", "SimpleSource", "ComplexSource", "MDI"})
 _WARPED_DATASET = "VRTWarpedDataset"
 _DERIVED_BAND = "VRTDerivedRasterBand"
 _WARPED_BAND = "VRTWarpedRasterBand"
@@ -164,6 +166,9 @@ def _add_band(
     element = ET.SubElement(
         root, "VRTRasterBand", dataType=_gdal_dtype(band.dtype), band=str(index)
     )
+    if warped and (band.sources or band.pixel_function is not None):
+        msg = f"Band {index} of a warped VRT can have no sources or pixel function."
+        raise ValueError(msg)
     if band.pixel_function is not None:
         element.set("subClass", "VRTDerivedRasterBand")
     elif warped:
@@ -358,11 +363,19 @@ def _check_attributes(element: ET.Element) -> None:
 
 
 def _children(element: ET.Element) -> Iterator[ET.Element]:
-    """Yield the children of ``element``, checking their attributes."""
+    """Yield the children of ``element``, checking their attributes and uniqueness."""
+    seen: set[tuple[str, str | None]] = set()
     for child in element:
         # Any name is a pixel function argument.
         if child.tag != "PixelFunctionArguments":
             _check_attributes(child)
+        if child.tag not in _REPEATABLE:
+            # GDAL reads the first of a repeated element; the model holds one.
+            key = (child.tag, child.get("domain"))
+            if key in seen:
+                msg = f"Duplicate VRT element <{child.tag}> in <{element.tag}>"
+                raise ValueError(msg)
+            seen.add(key)
         yield child
 
 
@@ -465,7 +478,7 @@ def _band(  # noqa: C901, PLR0912  # one case per element, as in the writer
     return band
 
 
-def _source(  # noqa: C901  # one case per element, as in the writer
+def _source(  # noqa: C901, PLR0912  # one case per element, as in the writer
     element: ET.Element,
     *,
     base: UPath | None,
@@ -479,6 +492,9 @@ def _source(  # noqa: C901  # one case per element, as in the writer
         fields["resampling"] = _lookup(_RESAMPLINGS, resampling, "resampling")
     for child in _children(element):
         match child.tag:
+            case "SourceFilename" | "VRTDataset" if path is not None:
+                msg = f"<{element.tag}> names more than one source"
+                raise ValueError(msg)
             case "SourceFilename":
                 path = _source_ref(child, base=base, storage_options=storage_options)
             case "VRTDataset":
@@ -560,6 +576,9 @@ def _warp(
             msg = f"A warped VRT needs <{tag}>"
             raise ValueError(msg)
     options = copy.deepcopy(options)
+    if len(options.findall("SourceDataset")) > 1:
+        msg = "Duplicate VRT element <SourceDataset> in <GDALWarpOptions>"
+        raise ValueError(msg)
     source = options.find("SourceDataset")
     if source is None:
         msg = "<GDALWarpOptions> lacks <SourceDataset>"
