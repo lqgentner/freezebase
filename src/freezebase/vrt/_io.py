@@ -23,7 +23,7 @@ def write(vrt: VRT, path: AnyPath, *, relative: bool = True) -> UPath:
         return dst
     tmp = dst.with_name(f".{dst.name}.{secrets.token_hex(8)}.tmp")
     try:
-        tmp.write_text(xml)
+        tmp.write_bytes(xml.encode())
         tmp.replace(dst)
     finally:
         if tmp.exists():

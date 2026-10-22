@@ -386,37 +386,30 @@ class TestWrite:
         got = gdal_path(UPath(tile), relative_to=UPath("s3://b/m.vrt"))
         assert got == (str(tile.resolve()), False)
 
-    def test_write_is_atomic_on_failure(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_write_is_atomic_on_failure(self, tmp_path: Path) -> None:
         tile = make_tiff(tmp_path / "a.tif")
         dst = tmp_path / "m.vrt"
         dst.write_text("old")
 
-        def boom(*_args: Any, **_kwargs: Any) -> str:
-            msg = "boom"
-            raise RuntimeError(msg)
-
-        monkeypatch.setattr(ET, "tostring", boom)
-        with pytest.raises(RuntimeError, match="boom"):
-            vrt_over(tile).write(dst)
-        assert dst.read_text() == "old"
-        assert list(tmp_path.glob("*.tmp")) == []
-
-    def test_failed_replace_leaves_no_temp_file(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        tile = make_tiff(tmp_path / "a.tif")
-
-        def boom(_self: Any, _target: Any) -> None:
+        def fail_replace(_self: Any, _target: Any) -> None:
             msg = "boom"
             raise OSError(msg)
 
-        monkeypatch.setattr(Path, "replace", boom)
-        with pytest.raises(OSError, match="boom"):
-            vrt_over(tile).write(tmp_path / "m.vrt")
-        assert not (tmp_path / "m.vrt").exists()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(Path, "replace", fail_replace)
+            with pytest.raises(OSError, match="boom"):
+                vrt_over(tile).write(dst)
+        assert dst.read_text() == "old"
         assert list(tmp_path.glob("*.tmp")) == []
+
+    def test_written_bytes_are_utf8(self, tmp_path: Path) -> None:
+        tiles = tmp_path / "ü"
+        tiles.mkdir()
+        vrt = vrt_over(make_tiff(tiles / "t.tif"))
+        out = vrt.write(tmp_path / "m.vrt", relative=False)
+        # Previously written with the locale encoding, unlike the S3 upload.
+        assert out.read_bytes() == vrt.to_xml().encode("utf-8")
+        assert "ü".encode() in out.read_bytes()
 
     def test_write_to_s3_uploads_once(self, tmp_path: Path, s3_uploads: dict[str, bytes]) -> None:
         tile = make_tiff(tmp_path / "a.tif")
