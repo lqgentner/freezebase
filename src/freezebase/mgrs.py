@@ -214,6 +214,7 @@ def mgrs_to_crs(mgrs_code: str) -> CRS:
 
 _100KM_SIZE = 100_000
 _10KM_SIZE = 10_000
+_SQUARES_PER_100KM = (_100KM_SIZE // _10KM_SIZE) ** 2
 _FALSE_EASTING = 500_000
 _FALSE_NORTHING_SOUTH = 10_000_000
 
@@ -540,7 +541,25 @@ def _overlaps_zone(boxes: GeoArray, zone: int, hemisphere: Hemisphere) -> NDArra
     rects = _zone_rectangles(zone, hemisphere)
     # Envelopes strictly inside one of the rectangles tiling the zone, or clear of all
     # of them, settle most boxes without GEOS; the rest are tested exactly.
-    bounds = shapely.bounds(boxes)[:, np.newaxis, :]
+    inside, near = _zone_envelope_relation(shapely.bounds(boxes), rects)
+    overlaps = inside
+    unsettled = np.flatnonzero(near & ~inside)
+    # Predicates only use the prepared geometry when it is the first argument.
+    shapely.prepare(zone_geom)
+    hits = unsettled[shapely.intersects(zone_geom, boxes[unsettled])]
+    overlaps[hits] = True
+    # Only squares on the zone boundary need the costlier area test.
+    edge = hits[~shapely.contains_properly(zone_geom, boxes[hits])]
+    overlaps[edge] = _shares_zone_area(boxes[edge], zone_geom, rects)
+    return overlaps
+
+
+def _zone_envelope_relation(
+    bounds: NDArray[np.float64],
+    rects: NDArray[np.float64],
+) -> tuple[NDArray[np.bool_], NDArray[np.bool_]]:
+    """Return which envelopes lie strictly inside a zone rectangle, and which touch any."""
+    bounds = bounds[:, np.newaxis, :]
     inside = (
         (bounds[..., 0] > rects[:, 0])
         & (bounds[..., 1] > rects[:, 1])
@@ -553,16 +572,7 @@ def _overlaps_zone(boxes: GeoArray, zone: int, hemisphere: Hemisphere) -> NDArra
         & (bounds[..., 2] >= rects[:, 0])
         & (bounds[..., 3] >= rects[:, 1])
     ).any(axis=1)
-    overlaps = inside
-    unsettled = np.flatnonzero(near & ~inside)
-    # Predicates only use the prepared geometry when it is the first argument.
-    shapely.prepare(zone_geom)
-    hits = unsettled[shapely.intersects(zone_geom, boxes[unsettled])]
-    overlaps[hits] = True
-    # Only squares on the zone boundary need the costlier area test.
-    edge = hits[~shapely.contains_properly(zone_geom, boxes[hits])]
-    overlaps[edge] = _shares_zone_area(boxes[edge], zone_geom, rects)
-    return overlaps
+    return inside, near
 
 
 def _shares_zone_area(
@@ -655,13 +665,13 @@ def _utm_squares_to_wgs84(
     return _split_at_antimeridian(projected)
 
 
-def _utm_10km_squares_to_wgs84(
+def _utm_10km_rings(
     zone: int,
     hemisphere: Hemisphere,
     sw_x: NDArray[np.int32],
     sw_y: NDArray[np.int32],
-) -> GeoArray:
-    """Return the 10 km squares of 100 km squares as WGS84 polygons, row by row."""
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Return the WGS84 rings and envelopes of the 10 km squares of 100 km squares, row by row."""
     # Neighbouring squares share corners, so each corner is projected only once.
     offsets = np.arange(0, _100KM_SIZE + 1, _10KM_SIZE, dtype=np.float64)
     x = sw_x[:, np.newaxis, np.newaxis] + offsets[np.newaxis, np.newaxis, :]
@@ -675,6 +685,13 @@ def _utm_10km_squares_to_wgs84(
     nw = corners[:, 1:, :-1]
     # Same vertex order as `shapely.box`, so the polygons match `_utm_squares_to_wgs84`.
     rings = np.stack([se, ne, nw, sw, se], axis=-2).reshape(-1, 5, 2)
+    lower = np.minimum(np.minimum(sw, se), np.minimum(ne, nw)).reshape(-1, 2)
+    upper = np.maximum(np.maximum(sw, se), np.maximum(ne, nw)).reshape(-1, 2)
+    return rings, np.concatenate([lower, upper], axis=1)
+
+
+def _rings_to_wgs84(rings: NDArray[np.float64]) -> GeoArray:
+    """Return closed WGS84 rings as polygons, split at the antimeridian."""
     # shapely's stubs type `polygons` as possibly scalar; `asarray` pins the array type.
     return _split_at_antimeridian(np.asarray(shapely.polygons(rings), dtype=np.object_))
 
@@ -771,6 +788,32 @@ class MGRSGrid:
         mask[square_idx[hits]] = True
         return mask
 
+    def _envelope_pairs(
+        self,
+        bounds: NDArray[np.float64],
+    ) -> tuple[NDArray[np.intp], NDArray[np.intp]]:
+        """Return the (square, filter geometry) index pairs whose envelopes intersect."""
+        # Query the tree once per 100 km square with the envelope of its 10 km squares,
+        # then compare the 10 km envelopes with those candidates directly.
+        blocks = bounds.reshape(-1, _SQUARES_PER_100KM, 4)
+        block_bounds = np.concatenate(
+            [blocks[..., :2].min(axis=1), blocks[..., 2:].max(axis=1)], axis=1
+        )
+        block_idx, filter_idx = self._filter_tree.query(shapely.box(*block_bounds.T))
+        square_idx = (
+            block_idx[:, np.newaxis] * _SQUARES_PER_100KM + np.arange(_SQUARES_PER_100KM)
+        ).ravel()
+        filter_idx = np.repeat(filter_idx, _SQUARES_PER_100KM)
+        square_bounds = bounds[square_idx]
+        filter_bounds = shapely.bounds(self._filter_tree.geometries)[filter_idx]
+        meets = (
+            (square_bounds[:, 0] <= filter_bounds[:, 2])
+            & (square_bounds[:, 1] <= filter_bounds[:, 3])
+            & (square_bounds[:, 2] >= filter_bounds[:, 0])
+            & (square_bounds[:, 3] >= filter_bounds[:, 1])
+        )
+        return square_idx[meets], filter_idx[meets]
+
     def _materialize(self) -> None:
         filter_geom = self._filter_tree.geometries
         matched_utm_zones = self.utm_zones.find_intersecting(filter_geom)
@@ -828,10 +871,28 @@ class MGRSGrid:
 
         coarse_x, coarse_y = coarse_x[mask], coarse_y[mask]
         fine_x, fine_y = self._subdivide_coarse_coords(coarse_x, coarse_y)
-        fine_boxes_wgs = _utm_10km_squares_to_wgs84(zone, hemisphere, coarse_x, coarse_y)
-        mask = self._intersects_any(fine_boxes_wgs)
-        mask[mask] = _overlaps_zone(fine_boxes_wgs[mask], zone, hemisphere)
-        return fine_x[mask], fine_y[mask], fine_boxes_wgs[mask]
+        rings, bounds = _utm_10km_rings(zone, hemisphere, coarse_x, coarse_y)
+        squares = np.empty(len(rings), dtype=np.object_)
+        # Squares split at the antimeridian take the envelope of their two parts.
+        wraps = bounds[:, 2] - bounds[:, 0] > 180  # noqa: PLR2004
+        squares[wraps] = _rings_to_wgs84(rings[wraps])
+        bounds[wraps] = shapely.bounds(squares[wraps])
+
+        # Only squares whose envelope meets the zone and a filter geometry become polygons.
+        square_idx, filter_idx = self._envelope_pairs(bounds)
+        _, near = _zone_envelope_relation(bounds, _zone_rectangles(zone, hemisphere))
+        near_zone = near[square_idx]
+        square_idx, filter_idx = square_idx[near_zone], filter_idx[near_zone]
+        needed = np.zeros(len(rings), dtype=np.bool_)
+        needed[square_idx] = True
+        needed &= ~wraps
+        squares[needed] = _rings_to_wgs84(rings[needed])
+
+        hits = shapely.intersects(self._filter_tree.geometries[filter_idx], squares[square_idx])
+        mask = np.zeros(len(rings), dtype=np.bool_)
+        mask[square_idx[hits]] = True
+        mask[mask] = _overlaps_zone(squares[mask], zone, hemisphere)
+        return fine_x[mask], fine_y[mask], squares[mask]
 
     def _build_coarse_coords(
         self,

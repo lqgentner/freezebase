@@ -362,6 +362,15 @@ class TestMGRSGridFilterGeometryInput:
         mixed = gpd.GeoSeries([Polygon(), ZURICH_AOI], crs="EPSG:4326")
         assert len(MGRSGrid(mixed)) == self.EXPECTED
 
+    def test_many_parts_select_exactly_the_squares_they_intersect(self) -> None:
+        parts = [box(8.0, 47.0, 8.2, 47.1), box(8.5, 47.6, 8.55, 47.65), box(5.9, 46.0, 6.3, 46.2)]
+        covering = MGRSGrid(box(5.5, 45.5, 9.0, 48.0))
+        hits = [any(square.intersects(part) for part in parts) for square in covering.geometries]
+
+        grid = MGRSGrid(gpd.GeoSeries(parts, crs="EPSG:4326"))
+
+        assert grid.mgrs_codes.tolist() == covering.mgrs_codes[hits].tolist()
+
     def test_leaves_the_callers_geometry_unprepared(self) -> None:
         aoi = box(8.4, 47.3, 8.6, 47.4)
         MGRSGrid(aoi)
