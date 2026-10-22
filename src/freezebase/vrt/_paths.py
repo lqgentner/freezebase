@@ -111,7 +111,8 @@ def parse_gdal_path(
     if text.startswith("/vsi"):
         msg = f"Unsupported GDAL path {text!r}"
         raise ValueError(msg)
-    if not relative:
+    # GDAL reads an absolute path as absolute, whatever relativeToVRT says.
+    if not relative or posixpath.isabs(text):
         return UPath(text)
     if base is None:
         msg = f"Source path {text!r} is relative to a VRT without a location"

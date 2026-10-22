@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 import math
 from pathlib import Path
+import re
 import shutil
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -290,6 +291,18 @@ class TestToXml:
         ]
         assert find(root, "GeoTransform").text == "500000.0, 10.0, 0.0, 5200000.0, 0.0, -10.0"
 
+    def test_warped_band_with_sources_or_function_raises(self, tmp_path: Path) -> None:
+        tile = make_tiff(tmp_path / "a.tif")
+        warped = from_xml(gdal_warped_xml(str(tile)))
+        warped.bands[0].sources.append(Source(UPath(tile)))
+        # Previously written, then refused by read().
+        with pytest.raises(ValueError, match="warped VRT"):
+            warped.to_xml()
+        warped.bands[0].sources = []
+        warped.bands[0].pixel_function = PixelFunction.db()
+        with pytest.raises(ValueError, match="warped VRT"):
+            warped.to_xml()
+
     def test_unsupported_dtype_raises(self, tmp_path: Path) -> None:
         v = vrt_over(make_tiff(tmp_path / "a.tif"))
         v.bands[0].dtype = "float16"
@@ -472,6 +485,12 @@ class TestWrite:
         tile = tmp_path / "a.tif"
         got = gdal_path(UPath(tile), relative_to=UPath("s3://b/m.vrt"))
         assert got == (str(tile.resolve()), False)
+
+    @pytest.mark.parametrize("path", ["gs://b/m.vrt", "https://ex.com/m.vrt"])
+    def test_write_to_other_protocols_raises(self, tmp_path: Path, path: str) -> None:
+        # Previously treated as local and failed obscurely.
+        with pytest.raises(ValueError, match="local or s3://"):
+            vrt_over(make_tiff(tmp_path / "a.tif")).write(path)
 
     def test_write_is_atomic_on_failure(self, tmp_path: Path) -> None:
         tile = make_tiff(tmp_path / "a.tif")
@@ -763,6 +782,45 @@ class TestRead:
         )
         assert from_xml(xml).bands[0].sources == [Source(inner)]
 
+    @pytest.mark.parametrize(
+        "xml",
+        [
+            one_band(dataset="<SRS>EPSG:4326</SRS><SRS>EPSG:32632</SRS>"),
+            one_band(dataset="<Metadata /><Metadata />"),
+            one_band("<NoDataValue>0</NoDataValue><NoDataValue>1</NoDataValue>"),
+            one_band(
+                f"<SimpleSource>{FILE_SOURCE}{FILE_SOURCE.replace('a.tif', 'b.tif')}"
+                "</SimpleSource>"
+            ),
+            one_band(
+                f"<SimpleSource>{FILE_SOURCE}<SourceBand>1</SourceBand>"
+                "<SourceBand>2</SourceBand></SimpleSource>"
+            ),
+        ],
+    )
+    def test_duplicate_elements_raise(self, xml: str) -> None:
+        # Previously the last one won, where GDAL reads the first.
+        with pytest.raises(ValueError, match="Duplicate VRT element"):
+            from_xml(xml)
+
+    def test_two_kinds_of_source_raise(self) -> None:
+        inline = '<VRTDataset rasterXSize="6" rasterYSize="4" />'
+        xml = one_band(f"<SimpleSource>{FILE_SOURCE}{inline}</SimpleSource>")
+        with pytest.raises(ValueError, match="more than one source"):
+            from_xml(xml)
+
+    def test_duplicate_warp_source_raises(self, tmp_path: Path) -> None:
+        xml = gdal_warped_xml(str(make_tiff(tmp_path / "a.tif")))
+        source = re.search(r"<SourceDataset.*?</SourceDataset>", xml, re.DOTALL)
+        assert source is not None
+        doubled = xml.replace(source.group(0), source.group(0) * 2)
+        with pytest.raises(ValueError, match="Duplicate VRT element <SourceDataset>"):
+            from_xml(doubled)
+
+    def test_metadata_of_different_domains_is_not_a_duplicate(self) -> None:
+        v = from_xml(one_band(dataset='<Metadata domain="A" /><Metadata domain="B" />'))
+        assert v.metadata_domains == {"A": {}, "B": {}}
+
     def test_unsupported_vsi_prefix_raises(self) -> None:
         with pytest.raises(ValueError, match="Unsupported GDAL path"):
             parse_gdal_path("/vsizip/a.zip/t.tif", relative=False, base=None, storage_options=None)
@@ -778,6 +836,8 @@ class TestRead:
             ("/data/a.tif", False, None, UPath("/data/a.tif")),
             ("../t/a.tif", True, UPath("/data/v/m.vrt"), UPath("/data/t/a.tif")),
             ("a.tif", True, UPath("https://ex.com/d/m.vrt"), UPath("https://ex.com/d/a.tif")),
+            # GDAL reads an absolute path as absolute even when marked relative.
+            ("/data/a.tif", True, UPath("s3://b/v/m.vrt"), UPath("/data/a.tif")),
         ],
     )
     def test_parse_gdal_path(

@@ -29,6 +29,9 @@ if TYPE_CHECKING:
 def write(vrt: VRT, path: AnyPath, *, relative: bool = True) -> UPath:
     """Write ``vrt`` to ``path``; see ``VRT.write``."""
     dst = UPath(path)
+    if dst.protocol not in {"", "s3"}:
+        msg = f"VRTs are written local or s3://, not {dst.protocol}://: {dst}"
+        raise ValueError(msg)
     xml = vrt.to_xml(relative_to=dst if relative else None)
     if dst.protocol == "s3":
         raster._upload(xml.encode(), dst)  # noqa: SLF001  # patched via the module in tests
