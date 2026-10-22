@@ -32,6 +32,7 @@ __all__ = [
     "RasterInfo",
     "_assert_extent_aligned",
     "_assert_grid_aligned",
+    "_check_north_up",
     "_label",
     "_mosaic_grid",
     "_snap_out",
@@ -143,6 +144,13 @@ def _label(info: RasterInfo, index: int) -> str:
     return f"VRT input #{index}" if isinstance(info.ref, VRT) else info.ref.name
 
 
+def _check_north_up(info: RasterInfo, name: str) -> None:
+    """Raise for a south-up raster, whose rows a north-up VRT grid would flip."""
+    if info.transform.e > 0:
+        msg = f"'{name}' is south-up (positive pixel height); warp it north-up first."
+        raise ValueError(msg)
+
+
 def _validate_tiles(infos: Sequence[RasterInfo], *, same_pixel_size: bool = True) -> None:
     """Raise unless the tiles can share one axis-aligned mosaic grid.
 
@@ -157,7 +165,7 @@ def _validate_tiles(infos: Sequence[RasterInfo], *, same_pixel_size: bool = True
     ------
     ValueError
         If CRS, band count, dtypes, NODATA or (with ``same_pixel_size``) pixel size differ,
-        a tile is rotated, or a dtype has no GDAL name.
+        a tile is rotated or south-up, or a dtype has no GDAL name.
     """
     ref = infos[0]
     ref_name = _label(ref, 0)
@@ -201,6 +209,7 @@ def _validate_tile(
     if abs(t.transform.b) > _PIXEL_SIZE_TOL or abs(t.transform.d) > _PIXEL_SIZE_TOL:
         msg = f"Rotated/sheared tiles cannot be mosaicked into an axis-aligned VRT: '{name}'."
         raise ValueError(msg)
+    _check_north_up(t, name)
 
 
 def _assert_grid_aligned(infos: Sequence[RasterInfo], minx: float, maxy: float) -> None:
