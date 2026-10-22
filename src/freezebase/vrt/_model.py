@@ -426,7 +426,7 @@ class VRT:
         Parameters
         ----------
         path : str | Path | UPath
-            Destination, local or ``s3://``.
+            Destination, local (a path or ``file://``) or ``s3://``.
         relative : bool, optional
             ``False`` writes every source path absolute.
 

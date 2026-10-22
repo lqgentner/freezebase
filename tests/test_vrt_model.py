@@ -492,6 +492,16 @@ class TestWrite:
         with pytest.raises(ValueError, match="local or s3://"):
             vrt_over(make_tiff(tmp_path / "a.tif")).write(path)
 
+    def test_write_to_a_file_url_is_local(self, tmp_path: Path) -> None:
+        tile = make_tiff(tmp_path / "a.tif")
+        # Previously refused as a protocol other than local and s3.
+        out = vrt_over(tile).write(f"file://{tmp_path / 'm.vrt'}")
+        assert out == UPath(tmp_path / "m.vrt")
+        name = find(parse(out.read_text()), ".//SourceFilename")
+        assert (name.text, name.get("relativeToVRT")) == ("a.tif", "1")
+        with rasterio.open(tmp_path / "m.vrt") as ds:
+            assert ds.read(1).shape == (4, 6)
+
     def test_write_is_atomic_on_failure(self, tmp_path: Path) -> None:
         tile = make_tiff(tmp_path / "a.tif")
         dst = tmp_path / "m.vrt"
