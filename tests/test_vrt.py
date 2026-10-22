@@ -9,16 +9,18 @@ from xml.etree import ElementTree as ET
 import numpy as np
 import pytest
 import rasterio
+from rasterio.enums import Resampling
 from rasterio.transform import Affine, from_origin
+from rasterio.vrt import WarpedVRT
 
 from freezebase.vrt import (
-    _nodata_equal,
     build_vrt_mosaic,
     create_decibel_vrt,
     create_rgb_vrt,
     create_rgba_vrt,
     create_warped_vrt,
 )
+from freezebase.vrt._model import _nodata_equal
 
 WIDTH, HEIGHT = 6, 4
 
@@ -61,6 +63,27 @@ def make_tiff(
         for band in range(1, count + 1):
             dst.write(data, band)
         dst.set_band_description(1, "VV")
+
+
+def make_uint16_tiff(path: Path, *, count: int = 1, nodata: int | None = 0) -> np.ndarray:
+    """Write a uint16 GTiff whose first pixel is 0; return band 1's data."""
+    data = np.arange(1, WIDTH * HEIGHT + 1, dtype="uint16").reshape(HEIGHT, WIDTH)
+    data[0, 0] = 0
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=WIDTH,
+        height=HEIGHT,
+        count=count,
+        dtype="uint16",
+        crs="EPSG:32632",
+        transform=from_origin(500000, 5200000, 10, 10),
+        nodata=nodata,
+    ) as dst:
+        for band in range(1, count + 1):
+            dst.write(data * band, band)
+    return data
 
 
 @pytest.fixture
@@ -110,12 +133,87 @@ class TestDecibelVrt:
         create_decibel_vrt(vv_tiff, vrt_path)
 
         root = ET.parse(vrt_path).getroot()  # noqa: S314 -- parsing our own just-written fixture
-        source = find(root, "VRTRasterBand/SimpleSource/SourceFilename")
+        source = find(root, "VRTRasterBand/ComplexSource/SourceFilename")
         assert source.text == "vv.tif"
         assert source.get("relativeToVRT") == "1"
 
+    def test_decibel_of_nonnan_nodata_is_nodata(self, tmp_path: Path) -> None:
+        src_path = tmp_path / "counts.tif"
+        data = np.arange(1, WIDTH * HEIGHT + 1, dtype="uint16").reshape(HEIGHT, WIDTH)
+        data[0, 0] = 0
+        with rasterio.open(
+            src_path,
+            "w",
+            driver="GTiff",
+            width=WIDTH,
+            height=HEIGHT,
+            count=1,
+            dtype="uint16",
+            crs="EPSG:32632",
+            transform=from_origin(500000, 5200000, 10, 10),
+            nodata=0,
+        ) as dst:
+            dst.write(data, 1)
+        vrt_path = tmp_path / "counts_db.vrt"
+
+        create_decibel_vrt(src_path, vrt_path)
+
+        with rasterio.open(vrt_path) as src:
+            out = src.read(1)
+        assert np.isnan(out[0, 0])
+        assert np.isfinite(out[0, 1:]).all()
+
+    def test_reads_band_one_only(self, tmp_path: Path) -> None:
+        src_path = tmp_path / "two.tif"
+        data = make_uint16_tiff(src_path, count=2)
+        vrt_path = tmp_path / "two_db.vrt"
+
+        create_decibel_vrt(src_path, vrt_path)
+
+        with rasterio.open(vrt_path) as src:
+            assert src.count == 1
+            out = src.read(1)
+        np.testing.assert_allclose(out[0, 1:], 10 * np.log10(data[0, 1:]), rtol=1e-5)
+
 
 class TestRgbVrt:
+    def test_rejects_south_up_inputs(self, tmp_path: Path) -> None:
+        south_up = Affine(10, 0, 500000, 0, 10, 5200000)
+        vv_path, vh_path = tmp_path / "vv.tif", tmp_path / "vh.tif"
+        make_tiff(vv_path, transform=south_up)
+        make_tiff(vh_path, transform=south_up)
+
+        with pytest.raises(ValueError, match="south-up"):
+            create_rgb_vrt(vv_path, vh_path, tmp_path / "rgb.vrt")
+
+    def test_reads_band_one_of_multiband_inputs(self, tmp_path: Path) -> None:
+        vv_path, vh_path = tmp_path / "vv.tif", tmp_path / "vh.tif"
+        data = make_uint16_tiff(vv_path, count=2, nodata=None)
+        make_uint16_tiff(vh_path, count=2, nodata=None)
+        vrt_path = tmp_path / "rgb.vrt"
+
+        create_rgb_vrt(vv_path, vh_path, vrt_path)
+
+        with rasterio.open(vrt_path) as src:
+            assert src.count == 3
+            np.testing.assert_array_equal(src.read(1), data)
+
+    def test_uint16_inputs_stay_float32_with_nan_nodata(self, tmp_path: Path) -> None:
+        vv_path, vh_path = tmp_path / "vv.tif", tmp_path / "vh.tif"
+        data = make_uint16_tiff(vv_path)
+        make_uint16_tiff(vh_path)
+        vrt_path = tmp_path / "rgb.vrt"
+
+        create_rgb_vrt(vv_path, vh_path, vrt_path)
+
+        with rasterio.open(vrt_path) as src:
+            assert src.dtypes == ("float32",) * 3
+            assert all(np.isnan(v) for v in src.nodatavals)
+            # The inputs' own nodata is not applied, so the zero pixel stays 0.
+            red = src.read(1)
+        assert red[0, 0] == 0
+        np.testing.assert_array_equal(red, data.astype("float32"))
+
     def test_linear_scale_band_layout(
         self,
         vv_tiff: Path,
@@ -208,7 +306,7 @@ class TestVrtXmlSafety:
 
         # Must parse as well-formed XML with the exact (unescaped) filename.
         root = ET.parse(vrt_path).getroot()  # noqa: S314 -- parsing our own just-written fixture
-        source = root.find("VRTRasterBand/SimpleSource/SourceFilename")
+        source = root.find("VRTRasterBand/ComplexSource/SourceFilename")
         assert source is not None
         assert source.text == "a&b<test>.tif"
 
@@ -316,7 +414,7 @@ class TestBuildVrtMosaic:
         with pytest.raises(ValueError, match="dtype"):
             build_vrt_mosaic([tile_a, tile_b], tmp_path / "mosaic.vrt")
 
-    def test_tile_outside_vrt_directory_is_referenced_absolutely(self, tmp_path: Path) -> None:
+    def test_tile_outside_vrt_directory_is_referenced_relatively(self, tmp_path: Path) -> None:
         other = tmp_path / "other"
         other.mkdir()
         tile_a = tmp_path / "a.tif"
@@ -331,12 +429,14 @@ class TestBuildVrtMosaic:
         sources = root.findall("VRTRasterBand/ComplexSource/SourceFilename")
         assert [(s.text, s.get("relativeToVRT")) for s in sources] == [
             ("a.tif", "1"),
-            (str(tile_b), "0"),
+            ("other/b.tif", "1"),
         ]
         with rasterio.open(vrt_path) as src:
             assert src.width == 2 * WIDTH
 
-    def test_relative_source_outside_vrt_directory_resolves_absolute(self, tmp_path: Path) -> None:
+    def test_relative_source_outside_vrt_directory_resolves_from_any_cwd(
+        self, tmp_path: Path
+    ) -> None:
         other = tmp_path / "other"
         other.mkdir()
         make_tiff(tmp_path / "a.tif", fill=1.0)
@@ -344,19 +444,12 @@ class TestBuildVrtMosaic:
         cwd = Path.cwd()
         os.chdir(tmp_path)
         try:
-            # Relative and outside the VRT's directory: a naive absolute-path
-            # branch would leave this relative, tying the VRT to the cwd.
+            # Relative inputs outside the VRT's directory must not tie it to the cwd.
             build_vrt_mosaic(["a.tif", "other/b.tif"], "mosaic.vrt")
         finally:
             os.chdir(cwd)
 
         vrt_path = tmp_path / "mosaic.vrt"
-        root = ET.parse(vrt_path).getroot()  # noqa: S314 -- parsing our own just-written fixture
-        sources = root.findall("VRTRasterBand/ComplexSource/SourceFilename")
-        text = sources[1].text
-        assert text is not None
-        assert Path(text).is_absolute()
-
         elsewhere = tmp_path / "elsewhere"
         elsewhere.mkdir()
         os.chdir(elsewhere)
@@ -407,32 +500,36 @@ class TestBuildVrtMosaic:
         with pytest.raises(ValueError, match="aligned"):
             build_vrt_mosaic([tile_a, tile_b], tmp_path / "mosaic.vrt")
 
-    def test_rejects_multiband_reference_tile(self, tmp_path: Path) -> None:
+    def test_accepts_multiband_tiles(self, tmp_path: Path) -> None:
         tile_a = tmp_path / "a.tif"
         tile_b = tmp_path / "b.tif"
         make_tiff(tile_a, fill=1.0, count=2)
         make_tiff(tile_b, origin=(500000 + WIDTH * 10, 5200000), fill=2.0, count=2)
+        vrt_path = tmp_path / "mosaic.vrt"
 
-        with pytest.raises(ValueError, match="single-band"):
-            build_vrt_mosaic([tile_a, tile_b], tmp_path / "mosaic.vrt")
+        build_vrt_mosaic([tile_a, tile_b], vrt_path)
 
-    def test_rejects_multiband_non_reference_tile(self, tmp_path: Path) -> None:
-        # A later multi-band tile hits the per-tile check, not the up-front one.
-        tile_a = tmp_path / "a.tif"
-        tile_b = tmp_path / "b.tif"
-        make_tiff(tile_a, fill=1.0)
-        make_tiff(tile_b, origin=(500000 + WIDTH * 10, 5200000), fill=2.0, count=2)
-
-        with pytest.raises(ValueError, match="single-band"):
-            build_vrt_mosaic([tile_a, tile_b], tmp_path / "mosaic.vrt")
+        with rasterio.open(vrt_path) as src:
+            assert src.count == 2
+            for band in (1, 2):
+                data = src.read(band)
+                assert (data[:, :WIDTH] == 1.0).all()
+                assert (data[:, WIDTH:] == 2.0).all()
 
     def test_rejects_unsupported_dtype(self, tmp_path: Path) -> None:
         tile_a = tmp_path / "a.tif"
-        make_tiff(tile_a, fill=1.0, dtype="complex64", nodata=None)
+        make_tiff(tile_a, fill=1.0, dtype="float16", nodata=None)
 
-        # Complex dtypes have no GDAL name; better than emitting a broken VRT.
+        # Float16 has no entry in the dtype table; better than emitting a broken VRT.
         with pytest.raises(ValueError, match="Unsupported tile dtype"):
             build_vrt_mosaic([tile_a], tmp_path / "mosaic.vrt")
+
+    def test_accepts_complex_tiles(self, tmp_path: Path) -> None:
+        make_tiff(tmp_path / "a.tif", fill=1.0, dtype="complex64", nodata=None)
+        build_vrt_mosaic([tmp_path / "a.tif"], tmp_path / "mosaic.vrt")
+        with rasterio.open(tmp_path / "mosaic.vrt") as ds:
+            assert ds.dtypes == ("complex64",)
+            assert (ds.read(1) == 1).all()
 
     def test_rejects_mismatched_nodata(self, tmp_path: Path) -> None:
         tile_a = tmp_path / "a.tif"
@@ -456,6 +553,14 @@ class TestBuildVrtMosaic:
 
         with pytest.raises(ValueError, match="Rotated/sheared"):
             build_vrt_mosaic([tile_a, tile_b], tmp_path / "mosaic.vrt")
+
+    def test_rejects_south_up_tile(self, tmp_path: Path) -> None:
+        tile = tmp_path / "a.tif"
+        make_tiff(tile, fill=1.0, transform=Affine(10, 0, 500000, 0, 10, 5200000))
+
+        # Previously the mosaic placed the tile's southern row at the top.
+        with pytest.raises(ValueError, match="south-up"):
+            build_vrt_mosaic([tile], tmp_path / "mosaic.vrt")
 
     def test_accepts_tiles_without_nodata(self, tmp_path: Path) -> None:
         tile_a = tmp_path / "a.tif"
@@ -498,6 +603,125 @@ class TestNodataEqual:
         assert not _nodata_equal(0.0, -9999.0)
 
 
+def make_paletted_tiff(path: Path) -> None:
+    make_tiff(path, fill=1, dtype="uint8", nodata=None)
+    with rasterio.open(path, "r+") as ds:
+        ds.write_colormap(1, {0: (255, 0, 0, 255), 1: (0, 255, 0, 255)})
+
+
+def make_complex_tiff(path: Path) -> None:
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=2,
+        height=2,
+        count=1,
+        dtype="complex64",
+        crs="EPSG:32632",
+        transform=Affine(10, 0, 500000, 0, -10, 5200020),
+    ) as dst:
+        dst.write(np.array([[[3 + 4j, 1 + 0j], [0 + 2j, 10 + 0j]]], dtype="complex64"))
+
+
+class TestComplexInputs:
+    def test_decibel_vrt_rejects_complex_input(self, tmp_path: Path) -> None:
+        make_complex_tiff(tmp_path / "slc.tif")
+        # 0.8 gave the dB of the real part.
+        with pytest.raises(ValueError, match="complex data types are not supported"):
+            create_decibel_vrt(tmp_path / "slc.tif", tmp_path / "db.vrt")
+
+    def test_warped_vrt_matches_rasterio(self, tmp_path: Path) -> None:
+        make_complex_tiff(tmp_path / "slc.tif")
+        # Previously raised "Unsupported GDAL data type 'CFloat32'".
+        create_warped_vrt(
+            tmp_path / "slc.tif", tmp_path / "w.vrt", crs="EPSG:3857", resolution=10.0
+        )
+        with rasterio.open(tmp_path / "w.vrt") as ds:
+            assert ds.dtypes == ("complex64",)
+            with (
+                rasterio.open(tmp_path / "slc.tif") as src,
+                WarpedVRT(
+                    src,
+                    crs="EPSG:3857",
+                    transform=ds.transform,
+                    width=ds.width,
+                    height=ds.height,
+                    resampling=Resampling.average,
+                ) as ref,
+            ):
+                np.testing.assert_array_equal(ds.read(1), ref.read(1))
+
+    def test_rgb_vrt_rejects_complex_inputs(self, tmp_path: Path) -> None:
+        make_complex_tiff(tmp_path / "vv.tif")
+        make_complex_tiff(tmp_path / "vh.tif")
+        with pytest.raises(ValueError, match="complex data types are not supported"):
+            create_rgb_vrt(tmp_path / "vv.tif", tmp_path / "vh.tif", tmp_path / "rgb.vrt")
+
+
+class TestScaleAndColourTables:
+    def test_warped_vrt_rejects_colour_table(self, tmp_path: Path) -> None:
+        make_paletted_tiff(tmp_path / "pal.tif")
+        with pytest.raises(ValueError, match="colour table"):
+            create_warped_vrt(
+                tmp_path / "pal.tif", tmp_path / "w.vrt", crs="EPSG:3857", resolution=20.0
+            )
+
+    def test_mosaic_rejects_colour_table(self, tmp_path: Path) -> None:
+        make_paletted_tiff(tmp_path / "pal.tif")
+        with pytest.raises(ValueError, match="colour table"):
+            build_vrt_mosaic([tmp_path / "pal.tif"], tmp_path / "m.vrt")
+
+    def test_decibel_vrt_rejects_scaled_input(self, tmp_path: Path) -> None:
+        make_tiff(tmp_path / "s.tif", dtype="int16", nodata=-1)
+        with rasterio.open(tmp_path / "s.tif", "r+") as ds:
+            ds.scales = (0.01,)
+        # 0.8 gave the dB of the raw stored values.
+        with pytest.raises(ValueError, match="scale or offset"):
+            create_decibel_vrt(tmp_path / "s.tif", tmp_path / "db.vrt")
+
+    def test_rgb_vrt_rejects_scaled_inputs(self, tmp_path: Path) -> None:
+        for name in ("vv.tif", "vh.tif"):
+            make_tiff(tmp_path / name, dtype="int16", nodata=-1)
+            with rasterio.open(tmp_path / name, "r+") as ds:
+                ds.scales = (0.01,)
+        # Previously red and green carried the scale and blue, a ratio of raw values, didn't.
+        with pytest.raises(ValueError, match="scale or offset"):
+            create_rgb_vrt(tmp_path / "vv.tif", tmp_path / "vh.tif", tmp_path / "rgb.vrt")
+
+    def test_warped_vrt_keeps_scale_and_offset(self, tmp_path: Path) -> None:
+        make_tiff(tmp_path / "s.tif", dtype="int16", nodata=-1)
+        with rasterio.open(tmp_path / "s.tif", "r+") as ds:
+            ds.scales, ds.offsets = (0.01,), (5.0,)
+        create_warped_vrt(tmp_path / "s.tif", tmp_path / "w.vrt", crs="EPSG:3857", resolution=20.0)
+        with rasterio.open(tmp_path / "w.vrt") as ds:
+            assert (ds.scales, ds.offsets) == ((0.01,), (5.0,))
+
+
+class TestWarpedVrtNodata:
+    def test_nan_source_into_integer_dtype_raises(self, tmp_path: Path) -> None:
+        make_tiff(tmp_path / "f.tif")
+        with pytest.raises(ValueError, match="nodata"):
+            create_warped_vrt(
+                tmp_path / "f.tif",
+                tmp_path / "w.vrt",
+                crs="EPSG:32632",
+                resolution=10,
+                dtype="uint8",
+            )
+
+    def test_nan_nodata_for_integer_source_raises(self, tmp_path: Path) -> None:
+        make_uint16_tiff(tmp_path / "u.tif")
+        with pytest.raises(ValueError, match="nodata"):
+            create_warped_vrt(
+                tmp_path / "u.tif",
+                tmp_path / "w.vrt",
+                crs="EPSG:32632",
+                resolution=10,
+                nodata=np.nan,
+            )
+
+
 class TestWarpedVrt:
     def test_reprojects_onto_the_requested_grid(self, tmp_path: Path) -> None:
         src = tmp_path / "utm.tif"
@@ -512,6 +736,27 @@ class TestWarpedVrt:
             assert ds.transform.e == pytest.approx(-20.0)
             # Snapped outward, so the origin sits on the resolution grid.
             assert ds.transform.c % 20.0 == pytest.approx(0.0)
+
+    def test_accepts_xy_resolution(self, tmp_path: Path) -> None:
+        src = tmp_path / "utm.tif"
+        make_tiff(src, fill=1.0)
+        vrt_path = tmp_path / "warped.vrt"
+
+        create_warped_vrt(src, vrt_path, crs="EPSG:3857", resolution=(20.0, 40.0))
+
+        with rasterio.open(vrt_path) as ds:
+            assert ds.transform.a == pytest.approx(20.0)
+            assert ds.transform.e == pytest.approx(-40.0)
+
+    def test_accepts_default_resolution(self, tmp_path: Path) -> None:
+        src = tmp_path / "utm.tif"
+        make_tiff(src, fill=1.0)
+        vrt_path = tmp_path / "warped.vrt"
+
+        create_warped_vrt(src, vrt_path, crs="EPSG:3857", resolution=None)
+
+        with rasterio.open(vrt_path) as ds:
+            assert ds.crs.to_epsg() == 3857
 
     def test_bounds_fix_the_extent_exactly(self, tmp_path: Path) -> None:
         src = tmp_path / "utm.tif"
@@ -594,6 +839,19 @@ class TestRgbaVrt:
             data = ds.read()
         # Skipped NODATA keeps the bands' zero initialisation, alpha included.
         assert np.all(data == 0)
+
+    def test_only_nodata_pixels_are_transparent(self, tmp_path: Path) -> None:
+        src = tmp_path / "src.tif"
+        make_uint16_tiff(src)
+        vrt_path = tmp_path / "rgba.vrt"
+        luts = [[(0.0, 0), (100.0, 255)] for _ in range(3)]
+
+        create_rgba_vrt(src, vrt_path, luts=luts)
+
+        with rasterio.open(vrt_path) as ds:
+            alpha = ds.read(4)
+        assert alpha[0, 0] == 0
+        assert (alpha.ravel()[1:] == 255).all()
 
     def test_data_is_opaque(self, tmp_path: Path) -> None:
         src = tmp_path / "src.tif"

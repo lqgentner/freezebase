@@ -124,6 +124,7 @@ exclude = [".gitignore"]
 line-length = 99
 src = ["src"]
 extension = { qmd = "markdown" }
+extend-exclude = ["docs/superpowers"]
 
 [tool.ruff.lint]
 extend-select = [
@@ -217,6 +218,8 @@ filterwarnings = [
     # Raised inside rasterio's compiled _io.pyx read() path under NumPy 2.5;
     # only a future rasterio release (>1.5.0) can fix it at the source.
     "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning",
+    # affine 3 deprecates `*` for matrix products, which rasterio still uses internally.
+    "ignore:Use `@` matmul instead of `\\*` mul operator:PendingDeprecationWarning:rasterio\\..*",
 ]
 
 [tool.coverage.run]
@@ -235,3 +238,5 @@ show_missing = true
 preset = "strict"
 # Check against the oldest supported Python, not the interpreter in .venv.
 python-version = "3.12"
+# Lets tests import the shared fixtures in `tests/rasters.py`.
+search-path = ["src", "."]

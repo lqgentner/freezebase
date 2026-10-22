@@ -16,7 +16,12 @@ from rasterio.session import AWSSession
 from s3fs.core import set_custom_error_handler
 from upath import UPath
 
-from freezebase.download import TRANSIENT_HTTP_STATUS_CODES
+from freezebase.raster import (
+    GDAL_HTTP_MAX_RETRY,  # noqa: F401  # Re-exported for compatibility.
+    GDAL_HTTP_OPTIONS,
+    GDAL_HTTP_RETRY_CODES,  # noqa: F401  # Re-exported for compatibility.
+    GDAL_HTTP_RETRY_DELAY_S,  # noqa: F401  # Re-exported for compatibility.
+)
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Mapping
@@ -30,10 +35,7 @@ TRANSIENT_S3_ERROR_CODES = frozenset(
 S3_MAX_ATTEMPTS = 10
 S3_RETRY_MODE = "adaptive"
 
-# GDAL retries independently from botocore/s3fs.
-GDAL_HTTP_RETRY_CODES = ",".join(str(code) for code in sorted({403, *TRANSIENT_HTTP_STATUS_CODES}))
-GDAL_HTTP_MAX_RETRY = 5
-GDAL_HTTP_RETRY_DELAY_S = 1
+_RETRY_KEYS = ("GDAL_HTTP_MAX_RETRY", "GDAL_HTTP_RETRY_DELAY", "GDAL_HTTP_RETRY_CODES")
 
 # GDAL configuration every /vsis3/ reader needs, whether it runs in this process
 # (`s3_env`) or in a child (`subprocess_s3_env`). One table so the two cannot
@@ -43,9 +45,7 @@ GDAL_S3_OPTIONS: Mapping[str, str] = {
     "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
     # /vsis3/ cannot write randomly without a temporary file.
     "CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE": "YES",
-    "GDAL_HTTP_MAX_RETRY": str(GDAL_HTTP_MAX_RETRY),
-    "GDAL_HTTP_RETRY_DELAY": str(GDAL_HTTP_RETRY_DELAY_S),
-    "GDAL_HTTP_RETRY_CODES": GDAL_HTTP_RETRY_CODES,
+    **{key: GDAL_HTTP_OPTIONS[key] for key in _RETRY_KEYS},
 }
 
 # These client kwargs bypass the credentials visible to s3_env.
