@@ -75,8 +75,8 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   loading it into memory; `profile` is optional for those inputs. A `nodata` in `profile`
   that differs from a band's moves that band's old nodata pixels to the new value, for any
   VRT (mosaic, warped, derived), by nesting it; `nodata=None` keeps the VRT's. A `dtype`
-  casts every band. `ValueError` if a nodata value does not fit the dtype. Other
-  array-likes still go through `np.asarray`.
+  casts every band. `ValueError` if a nodata value does not fit the dtype. Array-likes,
+  including masked arrays, still go through `np.asanyarray`.
 
 ### Changed
 

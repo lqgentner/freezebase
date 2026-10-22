@@ -795,18 +795,23 @@ def _wrap_for_nodata(vrt: VRT, nodata: float | None) -> VRT:
     return wrapper
 
 
+def _dtype_name(dtype: Any) -> str:
+    """Normalise a dtype spelling like rasterio, keeping the complex integers NumPy lacks."""
+    if str(dtype).startswith("complex_int"):
+        return str(dtype)
+    try:
+        return np.dtype(dtype).name
+    except TypeError as e:
+        msg = f"Unsupported dtype {dtype!r}."
+        raise ValueError(msg) from e
+
+
 def _cast_and_check(vrt: VRT, dtype: Any) -> None:
     """Set every band's dtype, if given, and refuse a nodata value it cannot hold."""
     from freezebase.vrt._model import _check_nodata_fits  # noqa: PLC0415
 
     # Normalised like rasterio does, except for the complex integers NumPy lacks.
-    name = (
-        None
-        if dtype is None
-        else dtype
-        if str(dtype).startswith("complex_int")
-        else np.dtype(dtype).name
-    )
+    name = None if dtype is None else _dtype_name(dtype)
     for band in vrt.bands:
         if name is not None:
             band.dtype = name
@@ -853,7 +858,8 @@ def _is_vrt_input(data: object) -> bool:
     """Whether ``data`` is a VRT or a path rather than an array."""
     from freezebase.vrt import VRT  # noqa: PLC0415  # freezebase.vrt imports raster
 
-    return isinstance(data, VRT | str | Path | UPath)
+    # Any path-like object, as os.fspath accepts; the bare ABC is the runtime check.
+    return isinstance(data, VRT | str) or hasattr(data, "__fspath__")
 
 
 def _encode_cog(
@@ -908,7 +914,12 @@ def _write_cog_from_vrt(
         band_tags=band_tags,
         units=units,
     )
-    vrt = _wrap_for_nodata(vrt, profile.get("nodata"))
+    try:
+        # Opens the VRT to nest it, so I/O errors belong to the write.
+        vrt = _wrap_for_nodata(vrt, profile.get("nodata"))
+    except OSError as e:
+        msg = f"Failed to write COG: {e}"
+        raise RuntimeError(msg) from e
     if profile.get("dtype") is not None or profile.get("nodata") is not None:
         _cast_and_check(vrt, profile.get("dtype"))
     xml = vrt.to_xml()
@@ -1015,9 +1026,9 @@ def write_cog(
     Raises
     ------
     ValueError
-        If ``profile`` is missing for an array, a per-band sequence has the wrong length, a
-        nodata value does not fit the dtype, or a raster path has a colour table or is
-        south-up.
+        If ``profile`` is missing for an array, a per-band sequence has the wrong length, the
+        dtype is unknown, a nodata value does not fit the dtype, or a raster path has a
+        colour table or is south-up.
     RuntimeError
         If the write fails.
     """
@@ -1034,7 +1045,8 @@ def write_cog(
             units=units,
             checksum=checksum,
         )
-    array = np.asarray(data)
+    # Keeps a masked array's mask, which rasterio fills with nodata.
+    array = np.asanyarray(data)
     profile = _require_profile(profile)
     mem_profile = build_rasterio_profile(profile)
     mem_profile.pop("driver", None)
