@@ -42,6 +42,15 @@ if TYPE_CHECKING:
 _APPROX_TOLERANCE = 0.125
 _NO_OPERATION = "Cannot find coordinate operations"
 _AXES_WITH_HEIGHT = 3
+# Metres per band unit, for the units gdalwarp recognises (case-insensitive).
+_BAND_UNIT_TO_METRE = {
+    "m": 1.0,
+    "meter": 1.0,
+    "metre": 1.0,
+    "ft": 0.3048,
+    "foot": 0.3048,
+    "us survey foot": 1200 / 3937,
+}
 # Elements GDAL writes for a source's scale, offset or colour table.
 _UNSUPPORTED_BAND_ELEMENT = re.compile(r"Unsupported VRT element <(Offset|Scale|ColorTable)>")
 
@@ -96,7 +105,7 @@ def warp(
         when the source's sentinel should not stay a valid-looking value, e.g. ``nan``.
     tolerance : float | {"auto"}, optional
         Error allowed when approximating the transformation, in source pixels; ``0`` is
-        exact. ``"auto"`` is 0.125, or 0 when a vertical shift applies.
+        exact. ``"auto"`` is 0.125, or 0 when heights are shifted.
     allow_ballpark : bool, optional
         Let PROJ fall back to a ballpark transformation, ignoring datum differences, when
         it lacks a grid or a datum link.
@@ -104,8 +113,9 @@ def warp(
     Returns
     -------
     VRT
-        A warped VRT; nothing is written. Heights are shifted between vertical datums when
-        both the source CRS and ``crs`` are compound or 3D.
+        A warped VRT; nothing is written. Heights are shifted between vertical datums, and
+        converted between vertical units, when the source CRS and ``crs`` differ and both
+        are compound or 3D.
 
     Raises
     ------
@@ -127,14 +137,17 @@ def warp(
         if source_crs is None:
             msg = f"{_label(raster_info(ref), 0)} has no CRS; pass src_crs."
             raise ValueError(msg)
+        if crs is not None and like is None:
+            # Check before PROJ derives the target grid.
+            _vertical_shift(source_crs, CRS.from_user_input(crs))
         dst_crs, transform, width, height = _target_grid(
             src, source_crs, crs=crs, resolution=resolution, bounds=bounds, like=like, snap=snap
         )
         vertical = _vertical_shift(source_crs, dst_crs)
         tolerance = _resolve_tolerance(tolerance, vertical=vertical)
-        extras: dict[str, Any] = {}
-        if vertical:
-            extras["APPLY_VERTICAL_SHIFT"] = "YES"
+        extras: dict[str, Any] = (
+            _vertical_shift_options(src.units[0], source_crs, dst_crs) if vertical else {}
+        )
         if dtype is not None:
             extras["dtype"] = dtype
         if nodata is not None:
@@ -195,17 +208,25 @@ def _resolve_tolerance(tolerance: float | Literal["auto"], *, vertical: bool) ->
     return float(tolerance)
 
 
+def _to_pyproj(crs: CRS) -> pyproj.CRS:
+    """Return ``crs`` as a pyproj CRS, keeping a third axis that WKT1 would drop."""
+    return pyproj.CRS.from_wkt(crs.to_wkt(version="WKT2_2019"))
+
+
 def _has_vertical(crs: CRS) -> bool:
-    """Whether ``crs`` carries heights: a vertical or compound CRS, or a 3D geographic one."""
-    proj_crs = pyproj.CRS.from_wkt(crs.to_wkt(version="WKT2_2019"))
+    """Whether ``crs`` carries heights: a vertical or compound CRS, or a 3D one."""
+    proj_crs = _to_pyproj(crs)
     # pyproj's is_vertical also looks into a compound CRS's parts.
     return proj_crs.is_vertical or (
-        proj_crs.is_geographic and len(proj_crs.axis_info) == _AXES_WITH_HEIGHT
+        (proj_crs.is_geographic or proj_crs.is_projected)
+        and len(proj_crs.axis_info) == _AXES_WITH_HEIGHT
     )
 
 
 def _vertical_shift(source_crs: CRS, dst_crs: CRS) -> bool:
     """Whether to shift heights; raise if only one CRS says which datum they refer to."""
+    if source_crs == dst_crs:
+        return False
     source_vertical, dst_vertical = _has_vertical(source_crs), _has_vertical(dst_crs)
     if source_vertical and not dst_vertical:
         msg = (
@@ -221,6 +242,22 @@ def _vertical_shift(source_crs: CRS, dst_crs: CRS) -> bool:
         )
         raise ValueError(msg)
     return source_vertical
+
+
+def _vertical_shift_options(
+    band_unit: str | None, source_crs: CRS, dst_crs: CRS
+) -> dict[str, str]:
+    """Return the warp options of a vertical shift, with gdalwarp's unit factors."""
+    # Metres per unit of each CRS's vertical axis, which is the last one.
+    source_axis = _to_pyproj(source_crs).axis_info[-1].unit_conversion_factor
+    dst_axis = _to_pyproj(dst_crs).axis_info[-1].unit_conversion_factor
+    # gdalwarp lets a recognised band unit override the source axis unit for pixel values.
+    source_values = _BAND_UNIT_TO_METRE.get((band_unit or "").lower(), source_axis)
+    return {
+        "APPLY_VERTICAL_SHIFT": "YES",
+        "MULT_FACTOR_VERTICAL_SHIFT": f"{source_values / dst_axis:.18g}",
+        "MULT_FACTOR_VERTICAL_SHIFT_PIPELINE": f"{source_axis / dst_axis:.18g}",
+    }
 
 
 def _absolute(path: UPath) -> UPath:

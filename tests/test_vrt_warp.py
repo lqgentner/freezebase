@@ -29,6 +29,15 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
+# LV95 with LN02 heights in US survey feet; no EPSG code exists for it.
+LN02_FTUS = (
+    f'COMPOUNDCRS["LV95 + LN02 height (ftUS)",{pyproj.CRS("EPSG:2056").to_wkt()},'
+    'VERTCRS["LN02 height (ftUS)",VDATUM["Landesnivellement 1902"],CS[vertical,1],'
+    'AXIS["gravity-related height (H)",up,LENGTHUNIT["US survey foot",0.304800609601219]]]]'
+)
+FTUS = 1200 / 3937
+
+
 @pytest.fixture
 def dem(tmp_path: Path) -> Path:
     """Write a DEM of zeros in LV95 with LN02 heights."""
@@ -48,17 +57,19 @@ def _grid_env(proj_grids: Path) -> rasterio.Env:
 
 
 def _pyproj_shift(
-    src: str, dst: str, xs: NDArray[np.float64], ys: NDArray[np.float64]
+    src: str, dst: str, xs: NDArray[np.float64], ys: NDArray[np.float64], z: float = 0.0
 ) -> NDArray[np.float64]:
-    """Return the height pyproj gives a zero height at ``(xs, ys)`` in ``src``, in ``dst``."""
+    """Return the height pyproj gives height ``z`` at ``(xs, ys)`` in ``src``, in ``dst``."""
     transformer = Transformer.from_crs(
         src, dst, always_xy=True, only_best=True, allow_ballpark=False
     )
-    _, _, z = transformer.transform(xs, ys, np.zeros_like(xs), errcheck=True)
-    return np.asarray(z)
+    _, _, h = transformer.transform(xs, ys, np.full_like(xs, z), errcheck=True)
+    return np.asarray(h)
 
 
-def _shift_matches_pyproj(w: VRT, source: Path, src: str, dst: str) -> NDArray[np.float32]:
+def _shift_matches_pyproj(
+    w: VRT, source: Path, src: str, dst: str, z: float = 0.0
+) -> NDArray[np.float32]:
     """Assert each warped pixel holds pyproj's shift at the source pixel it reads; return them."""
     with w.open() as ds:
         got = ds.read(1)
@@ -79,7 +90,7 @@ def _shift_matches_pyproj(w: VRT, source: Path, src: str, dst: str) -> NDArray[n
     assert inside.sum() > 1000
     cx = src_transform.c + (src_cols[inside] + 0.5) * src_transform.a
     cy = src_transform.f + (src_rows[inside] + 0.5) * src_transform.e
-    expected = _pyproj_shift(src, dst, cx, cy)
+    expected = _pyproj_shift(src, dst, cx, cy, z)
     np.testing.assert_allclose(got[inside], expected, atol=0.02, rtol=0)
     return got[inside]
 
@@ -443,7 +454,10 @@ class TestOptions:
         )
         assert w.crs == CRS.from_epsg(4979)
         with w.open() as ds:
-            assert ds.read(1).shape == (w.height, w.width)
+            data = ds.read(1)
+        # The silent zero shift that the default refuses.
+        assert np.isfinite(data).any()
+        assert np.nanmin(data) == np.nanmax(data) == 0.0
 
 
 class TestVerticalShift:
@@ -475,7 +489,14 @@ class TestVerticalShift:
             got = _shift_matches_pyproj(w, src, "EPSG:4979", "EPSG:2056+5728")
         assert -54.0 < got.min() < got.max() < -51.0
 
-    def test_vertical_source_into_2d_target_raises(self, dem: Path) -> None:
+    def test_vertical_source_into_2d_target_raises(
+        self, dem: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def no_grid(*_args: object) -> None:
+            """Fail if the target grid is derived before the CRS check."""
+            raise AssertionError
+
+        monkeypatch.setattr(_warp, "calculate_default_transform", no_grid)
         with pytest.raises(ValueError, match="vertical") as info:
             warp(dem, crs="EPSG:4326")
         assert "pass a 3D or compound crs, or a 2D src_crs" in str(info.value)
@@ -528,7 +549,129 @@ class TestVerticalShift:
             ("EPSG:4979", True),
             ("EPSG:4326", False),
             ("EPSG:2056", False),
+            ("EPSG:4978", False),
+            (LN02_FTUS, True),
+            (CRS.from_user_input("EPSG:2056+5728").to_wkt(version="WKT1_GDAL"), True),
+            (pyproj.CRS("EPSG:32632").to_3d().to_wkt(), True),
+            (
+                pyproj.CRS("+proj=longlat +ellps=bessel +towgs84=674.374,15.056,405.346 +type=crs")
+                .to_3d()
+                .to_wkt(),
+                True,
+            ),
+        ],
+        ids=[
+            "compound",
+            "vertical",
+            "geographic-3d",
+            "geographic-2d",
+            "projected-2d",
+            "geocentric",
+            "compound-without-code",
+            "wkt1-compd-cs",
+            "projected-3d",
+            "bound-geographic-3d",
         ],
     )
     def test_has_vertical(self, crs: str, expected: bool) -> None:
         assert _has_vertical(CRS.from_user_input(crs)) is expected
+
+    def test_same_crs_applies_no_shift(self, dem: Path) -> None:
+        w = warp(dem, crs="EPSG:2056+5728", resolution=200.0)
+        assert w.warp is not None
+        assert not w.warp.vertical_shift
+        assert "<MaxError>0.125</MaxError>" in w.warp.options_xml
+
+    def test_like_with_a_compound_grid(self, proj_grids: Path, dem: Path, tmp_path: Path) -> None:
+        like = make_tiff(
+            tmp_path / "like.tif",
+            origin=(2630000.0, 1150000.0),
+            res=(200.0, 200.0),
+            size=(50, 50),
+            crs="EPSG:2056+5729",
+        )
+        with _grid_env(proj_grids):
+            w = warp(dem, like=like, resampling=Resampling.nearest)
+            got = _shift_matches_pyproj(w, dem, "EPSG:2056+5728", "EPSG:2056+5729")
+        assert w.warp is not None
+        assert w.warp.vertical_shift
+        assert 0.05 < got.min() < got.max() < 1.0
+        flat = make_tiff(tmp_path / "flat.tif", crs="EPSG:2056")
+        with pytest.raises(ValueError, match="2D src_crs"):
+            warp(dem, like=flat)
+
+
+class TestVerticalUnits:
+    def test_feet_source_is_converted_to_metres(self, tmp_path: Path) -> None:
+        src = make_tiff(
+            tmp_path / "ftus.tif",
+            origin=(980000.0, 200000.0),
+            res=(100.0, 100.0),
+            size=(20, 20),
+            fill=100.0,
+            crs="EPSG:2263+6360",
+        )
+        # Ballpark makes the geoid shift zero, so only the unit conversion remains.
+        w = warp(src, crs="EPSG:4979", allow_ballpark=True)
+        reread = read(w.write(tmp_path / "w.vrt"))
+        assert reread == w
+        for vrt in (w, reread):
+            with vrt.open() as ds:
+                data = ds.read(1)
+            assert np.isfinite(data).any()
+            np.testing.assert_allclose(data[np.isfinite(data)], 100 * FTUS, rtol=1e-6)
+        options = ET.fromstring(reread.warp.options_xml if reread.warp else "")  # noqa: S314
+        factors = {
+            option.get("name"): float(option.text or "")
+            for option in options.iterfind("Option")
+            if (option.get("name") or "").startswith("MULT_FACTOR_VERTICAL_SHIFT")
+        }
+        assert factors == pytest.approx(
+            {"MULT_FACTOR_VERTICAL_SHIFT": FTUS, "MULT_FACTOR_VERTICAL_SHIFT_PIPELINE": FTUS}
+        )
+
+    def test_metre_source_into_a_feet_target(self, tmp_path: Path) -> None:
+        src = make_tiff(
+            tmp_path / "metres.tif",
+            origin=(-74.0, 40.8),
+            res=(0.001, 0.001),
+            size=(20, 20),
+            fill=100 * FTUS,
+            crs="EPSG:4979",
+        )
+        w = warp(src, crs="EPSG:2263+6360", allow_ballpark=True)
+        with w.open() as ds:
+            data = ds.read(1)
+        assert np.isfinite(data).any()
+        np.testing.assert_allclose(data[np.isfinite(data)], 100.0, rtol=1e-6)
+
+    def test_band_unit_overrides_the_axis_unit(self, tmp_path: Path) -> None:
+        src = make_tiff(
+            tmp_path / "ftus.tif",
+            origin=(980000.0, 200000.0),
+            res=(100.0, 100.0),
+            size=(20, 20),
+            fill=100.0,
+            crs="EPSG:2263+6360",
+        )
+        with rasterio.open(src, "r+") as ds:
+            ds.units = ("metre",)
+        w = warp(src, crs="EPSG:4979", allow_ballpark=True)
+        with w.open() as ds:
+            data = ds.read(1)
+        np.testing.assert_allclose(data[np.isfinite(data)], 100.0, rtol=1e-6)
+
+    def test_feet_shift_matches_pyproj(self, proj_grids: Path, tmp_path: Path) -> None:
+        src = make_tiff(
+            tmp_path / "ln02_ftus.tif",
+            origin=(2620000.0, 1160000.0),
+            res=(100.0, 100.0),
+            size=(300, 300),
+            fill=100.0,
+            crs="EPSG:2056",
+        )
+        with _grid_env(proj_grids):
+            w = warp(src, src_crs=LN02_FTUS, crs="EPSG:4979", resampling=Resampling.nearest)
+            got = _shift_matches_pyproj(w, src, LN02_FTUS, "EPSG:4979", z=100.0)
+        # 100 ftUS plus the 51-54 m geoid undulation.
+        assert 81.0 < got.min() < got.max() < 85.0
