@@ -74,8 +74,18 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ### Changed
 
-- `build_vrt_mosaic` accepts multi-band tiles and writes sources on the VRT's store relative
-  to it, even outside its directory (`other/b.tif`, not an absolute path).
+- **Breaking:** `build_vrt_mosaic`, `create_decibel_vrt`, `create_rgb_vrt` and
+  `create_rgba_vrt` write every source on the VRT's store (local, or the same S3 bucket)
+  relative to the VRT, `../` included. Before, only a source beside the VRT was relative
+  and any other was absolute: `/data/tiles/a.tif` from `/data/vrts/m.vrt` is now
+  `../tiles/a.tif`. A VRT moved together with its sources still opens; a VRT moved alone
+  no longer does, so move both, or build with `freezebase.vrt` and write with
+  `VRT.write(path, relative=False)`. `create_warped_vrt` still writes absolute paths.
+- `build_vrt_mosaic` accepts multi-band tiles, and tiles without a CRS (before, an
+  `AttributeError`).
+- **Breaking:** `build_vrt_mosaic` takes each band's colour interpretation from the first
+  tile. Before, it was always gray; now an RGB tile gives red, green and blue bands, and a
+  tile with none gives undefined. Set `Band.color_interp` through `mosaic` to override it.
 - **Breaking:** `build_vrt_mosaic` and `create_rgb_vrt` raise `ValueError` for a south-up
   input (positive pixel height). Before, they wrote a south-up VRT; now warp the input
   north-up first, e.g. with `freezebase.vrt.warp`. `mosaic`, `stack` and `from_raster`
