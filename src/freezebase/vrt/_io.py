@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 def write(vrt: VRT, path: AnyPath, *, relative: bool = True) -> UPath:
     """Write ``vrt`` to ``path``; see ``VRT.write``."""
     dst = UPath(path)
+    if dst.protocol == "file":
+        dst = UPath(dst.path)
     if dst.protocol not in {"", "s3"}:
         msg = f"VRTs are written local or s3://, not {dst.protocol}://: {dst}"
         raise ValueError(msg)
