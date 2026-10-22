@@ -12,7 +12,7 @@ import pandas as pd
 
 from freezebase.download import HTTPDownloader
 from freezebase.utils import file_sha256, get_cache_dir
-from freezebase.vectools import save_and_read_parquet
+from freezebase.vectools import write_parquet
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +95,7 @@ class GeoVectorData(ABC):
             self.processed_path.parent,
         )
         data = gpd.read_file(self.raw_path)
-        save_and_read_parquet(data, self.processed_path)
+        write_parquet(data, self.processed_path)
 
     def _download(self) -> None:
         """Download the raw dataset."""

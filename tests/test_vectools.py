@@ -4,14 +4,15 @@ from pathlib import Path
 import tempfile
 
 import geopandas as gpd
+import pyarrow.parquet as pq
 import pytest
 import shapely
 
 from freezebase.vectools import (
     drop_z_if_zero,
     is_z_axis_zero,
-    save_and_read_parquet,
     simplify_multipolygons,
+    write_parquet,
 )
 
 
@@ -40,48 +41,62 @@ def sample_gdf() -> gpd.GeoDataFrame:
     )
 
 
-class TestSaveAndReadParquet:
-    """Test save_and_read_parquet function."""
+class TestWriteParquet:
+    """Test write_parquet function."""
 
-    def test_save_and_read_basic(self, sample_gdf: gpd.GeoDataFrame) -> None:
-        """Test basic save and read functionality."""
+    def test_write_roundtrip(self, sample_gdf: gpd.GeoDataFrame) -> None:
+        """The written file reads back as the original GeoDataFrame."""
         with tempfile.TemporaryDirectory() as temp_dir:
             out_path = Path(temp_dir) / "test.parquet"
-            result_gdf = save_and_read_parquet(sample_gdf, out_path)
+            write_parquet(sample_gdf, out_path)
+            assert sample_gdf.equals(gpd.read_parquet(out_path))
 
-            # Check that file was created
-            assert out_path.exists()
-
-            # Check that returned GeoDataFrame matches original
-            assert sample_gdf.equals(result_gdf)
-
-    def test_save_creates_directory(self, sample_gdf: gpd.GeoDataFrame) -> None:
-        """Test that function creates parent directories if they don't exist."""
+    def test_write_creates_directory(self, sample_gdf: gpd.GeoDataFrame) -> None:
+        """Missing parent directories are created."""
         with tempfile.TemporaryDirectory() as temp_dir:
             out_path = Path(temp_dir) / "nested" / "dir" / "test.parquet"
-            result_gdf = save_and_read_parquet(sample_gdf, out_path)
+            write_parquet(sample_gdf, out_path)
+            assert sample_gdf.equals(gpd.read_parquet(out_path))
 
-            # Check that nested directories were created
-            assert out_path.exists()
-
-            # Check data integrity
-            assert sample_gdf.equals(result_gdf)
-
-    def test_save_with_string_path(self, sample_gdf: gpd.GeoDataFrame) -> None:
-        """Test function works with string path."""
+    def test_write_with_string_path(self, sample_gdf: gpd.GeoDataFrame) -> None:
+        """A string path is accepted."""
         with tempfile.TemporaryDirectory() as temp_dir:
             out_path = str(Path(temp_dir) / "test.parquet")
-            result_gdf = save_and_read_parquet(sample_gdf, out_path)
-
-            assert Path(out_path).exists()
-            assert sample_gdf.equals(result_gdf)
+            write_parquet(sample_gdf, out_path)
+            assert sample_gdf.equals(gpd.read_parquet(out_path))
 
     def test_no_leftover_staging_file(self, sample_gdf: gpd.GeoDataFrame) -> None:
         """The atomic staging temp file must not remain after a successful write."""
         with tempfile.TemporaryDirectory() as temp_dir:
             out_path = Path(temp_dir) / "test.parquet"
-            save_and_read_parquet(sample_gdf, out_path)
+            write_parquet(sample_gdf, out_path)
             assert not list(Path(temp_dir).glob(".*.tmp"))
+
+    def test_failed_write_leaves_no_file(
+        self, sample_gdf: gpd.GeoDataFrame, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A write that fails midway leaves neither the output nor the staging file."""
+
+        def fail(_self: gpd.GeoDataFrame, path: Path, **_kwargs: object) -> None:
+            Path(path).write_bytes(b"PAR1 truncated")
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr(gpd.GeoDataFrame, "to_parquet", fail)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_path = Path(temp_dir) / "test.parquet"
+            with pytest.raises(OSError, match="disk full"):
+                write_parquet(sample_gdf, out_path)
+            assert not list(Path(temp_dir).iterdir())
+
+    def test_writes_zstd_row_groups(self, sample_gdf: gpd.GeoDataFrame) -> None:
+        """The file is zstd-compressed and split into row groups of the given size."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_path = Path(temp_dir) / "test.parquet"
+            write_parquet(sample_gdf, out_path, compression_level=3, row_group_size=4)
+            metadata = pq.ParquetFile(out_path).metadata
+            assert metadata.num_row_groups == 2
+            assert metadata.row_group(0).column(0).compression == "ZSTD"
 
 
 class TestIsZAxisZeros:
