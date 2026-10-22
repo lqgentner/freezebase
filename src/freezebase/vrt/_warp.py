@@ -29,7 +29,7 @@ from freezebase.vrt._grid import (
     _snap_out,
     raster_info,
 )
-from freezebase.vrt._model import VRT
+from freezebase.vrt._model import VRT, _check_nodata_fits
 from freezebase.vrt._xml import from_xml
 
 if TYPE_CHECKING:
@@ -101,8 +101,9 @@ def warp(
     dtype : str | None, optional
         Data type of the warped bands. Defaults to the source's.
     nodata : float | None, optional
-        NODATA value of the warped bands. Defaults to the source's. Pass it with ``dtype``
-        when the source's sentinel should not stay a valid-looking value, e.g. ``nan``.
+        NODATA value of the warped bands. Defaults to the source's, which must then fit in
+        ``dtype``. Pass it with ``dtype`` when the source's sentinel should not stay a
+        valid-looking value, e.g. ``nan``.
     tolerance : float | {"auto"}, optional
         Error allowed when approximating the transformation, in source pixels; ``0`` is
         exact. ``"auto"`` is 0.125, or 0 when heights are shifted.
@@ -126,7 +127,8 @@ def warp(
         ``tolerance`` is negative or NaN, the source has no CRS and no ``src_crs`` is given,
         only one of the source CRS and the target CRS has a vertical datum, heights would
         be shifted in a source of more than one band, no exact transformation is available
-        and ``allow_ballpark`` is false, or the source has a colour table.
+        and ``allow_ballpark`` is false, the source has a colour table, or the nodata (the
+        given one, else the source's) does not fit in the warped dtype.
     RuntimeError
         If GDAL's serialized transformer cannot be made exact or ballpark-free.
     """
@@ -155,8 +157,10 @@ def warp(
         extras: dict[str, Any] = (
             _vertical_shift_options(src.units[0], source_crs, dst_crs) if vertical else {}
         )
-        if dtype is not None:
-            extras["dtype"] = dtype
+        # Always explicit: rasterio promotes an integer source to float64 for a NaN nodata.
+        extras["dtype"] = dtype or src.dtypes[0]
+        for band_nodata in {nodata} if nodata is not None else set(src.nodatavals):
+            _check_nodata_fits(extras["dtype"], band_nodata)
         if nodata is not None:
             # The source keeps its own sentinel; only the warped bands change.
             extras["src_nodata"] = src.nodata

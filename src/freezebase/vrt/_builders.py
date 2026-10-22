@@ -24,7 +24,14 @@ from freezebase.vrt._grid import (
     _validate_tiles,
     raster_info,
 )
-from freezebase.vrt._model import VRT, Band, PixelFunction, Source, SourceProperties
+from freezebase.vrt._model import (
+    VRT,
+    Band,
+    PixelFunction,
+    Source,
+    SourceProperties,
+    _check_nodata_fits,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -437,10 +444,11 @@ def derive(
     Raises
     ------
     ValueError
-        If ``sources`` is empty, the grids differ (use ``warp`` first), ``band`` is out
-        of range, or an input is complex and neither ``function`` takes complex values
-        nor its ``transfer_type`` is set.
+        If ``nodata`` does not fit in ``dtype``, ``sources`` is empty, the grids differ
+        (use ``warp`` first), ``band`` is out of range, or an input is complex and neither
+        ``function`` takes complex values nor its ``transfer_type`` is set.
     """
+    _check_nodata_fits(dtype, nodata)
     inputs = [sources] if isinstance(sources, (str, Path, UPath, VRT)) else list(sources)
     if not inputs:
         msg = "derive needs at least one source."
