@@ -9,12 +9,15 @@ from xml.etree import ElementTree as ET
 from rasterio.enums import ColorInterp
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from affine import Affine
     from rasterio.crs import CRS
     from rasterio.enums import Resampling
     from rasterio.windows import Window
     from upath import UPath
 
+type AnyPath = str | Path | UPath
 type SourceRef = UPath | VRT
 
 _GDAL_DTYPE_NAMES = {
@@ -315,3 +318,32 @@ class VRT:
         root = to_element(self, relative_to=relative_to)
         ET.indent(root)
         return ET.tostring(root, encoding="unicode")
+
+    def write(self, path: AnyPath, *, relative: bool = True) -> UPath:
+        """Write the VRT to ``path``.
+
+        Sources on the same store as ``path`` (local, or the same S3 bucket) are written
+        relative to it; others as absolute GDAL paths. Local writes are atomic.
+
+        Parameters
+        ----------
+        path : str | Path | UPath
+            Destination, local or ``s3://``.
+        relative : bool, optional
+            ``False`` writes every source path absolute.
+
+        Returns
+        -------
+        UPath
+            The path written.
+
+        Raises
+        ------
+        ValueError
+            If a band or source dtype has no GDAL equivalent.
+        RuntimeError
+            If a source is a nested VRT and rasterio's GDAL is older than 3.11.
+        """
+        from freezebase.vrt._io import write  # noqa: PLC0415  # _io imports raster, like _xml
+
+        return write(self, path, relative=relative)
