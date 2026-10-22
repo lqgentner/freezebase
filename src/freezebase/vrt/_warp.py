@@ -116,7 +116,7 @@ def warp(
     VRT
         A warped VRT; nothing is written. Heights are shifted between vertical datums, and
         converted between vertical units, when the source CRS and ``crs`` differ and both
-        are compound or 3D; the source must then have one band.
+        are compound or 3D; the source must then have one band and no scale or offset.
 
     Raises
     ------
@@ -126,9 +126,10 @@ def warp(
         ``resolution`` is not positive, ``bounds`` does not lie on the ``resolution`` grid,
         ``tolerance`` is negative or NaN, the source has no CRS and no ``src_crs`` is given,
         only one of the source CRS and the target CRS has a vertical datum, heights would
-        be shifted in a source of more than one band, no exact transformation is available
-        and ``allow_ballpark`` is false, the source has a colour table, or the nodata (the
-        given one, else the source's) does not fit in the warped dtype.
+        be shifted in a source of more than one band or with a scale or offset, no exact
+        transformation is available and ``allow_ballpark`` is false, the source has a
+        colour table, or the nodata (the given one, else the source's) does not fit in the
+        warped dtype.
     RuntimeError
         If GDAL's serialized transformer cannot be made exact or ballpark-free.
     """
@@ -182,7 +183,12 @@ def warp(
         ):
             rasterio.shutil.copy(warped, memfile.name, driver="VRT")
             xml = bytes(memfile.getbuffer()).decode()
+        scales, offsets = src.scales, src.offsets
     vrt = from_xml(xml)
+    # GDAL omits them for a compound-CRS source; unshifted values keep their meaning.
+    for band, scale, offset in zip(vrt.bands, scales, offsets, strict=True):
+        band.scale = None if scale == 1 else scale
+        band.offset = None if offset == 0 else offset
     if vrt.warp is None:  # pragma: no cover  # GDAL always writes a warped VRT here
         msg = "GDAL did not serialize a warped VRT"
         raise RuntimeError(msg)
@@ -250,7 +256,16 @@ def _vertical_shift(source_crs: CRS, dst_crs: CRS) -> bool:
 
 
 def _check_vertical_bands(src: DatasetReader, *, vertical: bool) -> None:
-    """Raise if heights would shift in a multi-band raster, as gdalwarp only shifts one band."""
+    """Raise if heights would shift in a multi-band or scaled raster."""
+    if vertical and (src.scales[0] != 1 or src.offsets[0] != 0):
+        # GDAL would shift the raw stored values, not the heights they encode.
+        msg = (
+            "Vertical shifts apply to rasters without a scale or offset, and the source has "
+            f"scale {src.scales[0]} and offset {src.offsets[0]}; convert it to heights first, "
+            "or pass a 2D src_crs to keep values unshifted."
+        )
+        raise ValueError(msg)
+    # gdalwarp only shifts single-band rasters.
     if vertical and src.count > 1:
         msg = (
             f"Vertical shifts apply to single-band rasters, and the source has {src.count} "

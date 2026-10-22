@@ -569,6 +569,55 @@ class TestVerticalShift:
             warp(make_tiff(tmp_path / "utm.tif"), crs="EPSG:4979")
         assert "pass a 3D or compound src_crs, or a 2D crs" in str(info.value)
 
+    @staticmethod
+    def _scaled_dem(path: Path, scale: float, offset: float) -> Path:
+        """Write an int16 DEM in LV95 + LN02 storing heights with a scale and offset."""
+        with rasterio.open(
+            path,
+            "w",
+            driver="GTiff",
+            width=6,
+            height=4,
+            count=1,
+            dtype="int16",
+            crs="EPSG:2056+5728",
+            transform=Affine(10.0, 0.0, 2620000.0, 0.0, -10.0, 1160000.0),
+        ) as ds:
+            # Set before writing: GTiff drops them when set after, under a compound CRS.
+            ds.scales, ds.offsets = (scale,), (offset,)
+            ds.write(np.full((1, 4, 6), 5000, "int16"))
+        with rasterio.open(path) as ds:
+            assert (ds.scales, ds.offsets) == ((scale,), (offset,))
+        return path
+
+    @pytest.mark.parametrize(
+        ("src_crs", "crs"), [("EPSG:2056", "EPSG:4326"), (None, "EPSG:2056+5728")]
+    )
+    def test_compound_source_keeps_scale_and_offset(
+        self, tmp_path: Path, src_crs: str | None, crs: str
+    ) -> None:
+        src = self._scaled_dem(tmp_path / "s.tif", 0.1, 2.0)
+        # Previously GDAL's warped VRT of a compound-CRS source dropped them.
+        w = warp(src, src_crs=src_crs, crs=crs, resolution=20.0 if src_crs is None else None)
+        assert (w.bands[0].scale, w.bands[0].offset) == (0.1, 2.0)
+        assert read(w.write(tmp_path / "w.vrt")) == w
+        with w.open() as ds:
+            assert (ds.scales, ds.offsets) == ((0.1,), (2.0,))
+
+    @pytest.mark.parametrize(("scale", "offset"), [(0.1, 0.0), (1.0, 500.0)])
+    def test_shift_of_a_scaled_source_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scale: float, offset: float
+    ) -> None:
+        def no_grid(*_args: object) -> None:
+            """Fail if the target grid is derived before the scale check."""
+            raise AssertionError
+
+        monkeypatch.setattr(_warp, "calculate_default_transform", no_grid)
+        src = self._scaled_dem(tmp_path / "s.tif", scale, offset)
+        # Previously the shift was added to the raw stored values.
+        with pytest.raises(ValueError, match="scale or offset"):
+            warp(src, crs="EPSG:4979")
+
     def test_2d_src_crs_keeps_heights(self, dem: Path) -> None:
         w = warp(dem, src_crs="EPSG:2056", crs="EPSG:4326")
         assert w.warp is not None
