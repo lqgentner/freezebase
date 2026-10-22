@@ -63,6 +63,27 @@ def make_tiff(
         dst.set_band_description(1, "VV")
 
 
+def make_uint16_tiff(path: Path, *, count: int = 1, nodata: int | None = 0) -> np.ndarray:
+    """Write a uint16 GTiff whose first pixel is 0; return band 1's data."""
+    data = np.arange(1, WIDTH * HEIGHT + 1, dtype="uint16").reshape(HEIGHT, WIDTH)
+    data[0, 0] = 0
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=WIDTH,
+        height=HEIGHT,
+        count=count,
+        dtype="uint16",
+        crs="EPSG:32632",
+        transform=from_origin(500000, 5200000, 10, 10),
+        nodata=nodata,
+    ) as dst:
+        for band in range(1, count + 1):
+            dst.write(data * band, band)
+    return data
+
+
 @pytest.fixture
 def vv_tiff(tmp_path: Path) -> Path:
     path = tmp_path / "vv.tif"
@@ -140,8 +161,48 @@ class TestDecibelVrt:
         assert np.isnan(out[0, 0])
         assert np.isfinite(out[0, 1:]).all()
 
+    def test_reads_band_one_only(self, tmp_path: Path) -> None:
+        src_path = tmp_path / "two.tif"
+        data = make_uint16_tiff(src_path, count=2)
+        vrt_path = tmp_path / "two_db.vrt"
+
+        create_decibel_vrt(src_path, vrt_path)
+
+        with rasterio.open(vrt_path) as src:
+            assert src.count == 1
+            out = src.read(1)
+        np.testing.assert_allclose(out[0, 1:], 10 * np.log10(data[0, 1:]), rtol=1e-5)
+
 
 class TestRgbVrt:
+    def test_reads_band_one_of_multiband_inputs(self, tmp_path: Path) -> None:
+        vv_path, vh_path = tmp_path / "vv.tif", tmp_path / "vh.tif"
+        data = make_uint16_tiff(vv_path, count=2, nodata=None)
+        make_uint16_tiff(vh_path, count=2, nodata=None)
+        vrt_path = tmp_path / "rgb.vrt"
+
+        create_rgb_vrt(vv_path, vh_path, vrt_path)
+
+        with rasterio.open(vrt_path) as src:
+            assert src.count == 3
+            np.testing.assert_array_equal(src.read(1), data)
+
+    def test_uint16_inputs_stay_float32_with_nan_nodata(self, tmp_path: Path) -> None:
+        vv_path, vh_path = tmp_path / "vv.tif", tmp_path / "vh.tif"
+        data = make_uint16_tiff(vv_path)
+        make_uint16_tiff(vh_path)
+        vrt_path = tmp_path / "rgb.vrt"
+
+        create_rgb_vrt(vv_path, vh_path, vrt_path)
+
+        with rasterio.open(vrt_path) as src:
+            assert src.dtypes == ("float32",) * 3
+            assert all(np.isnan(v) for v in src.nodatavals)
+            # The inputs' own nodata is not applied, so the zero pixel stays 0.
+            red = src.read(1)
+        assert red[0, 0] == 0
+        np.testing.assert_array_equal(red, data.astype("float32"))
+
     def test_linear_scale_band_layout(
         self,
         vv_tiff: Path,
@@ -372,8 +433,7 @@ class TestBuildVrtMosaic:
         cwd = Path.cwd()
         os.chdir(tmp_path)
         try:
-            # Relative and outside the VRT's directory: a naive absolute-path
-            # branch would leave this relative, tying the VRT to the cwd.
+            # Relative inputs outside the VRT's directory must not tie it to the cwd.
             build_vrt_mosaic(["a.tif", "other/b.tif"], "mosaic.vrt")
         finally:
             os.chdir(cwd)
@@ -634,6 +694,19 @@ class TestRgbaVrt:
             data = ds.read()
         # Skipped NODATA keeps the bands' zero initialisation, alpha included.
         assert np.all(data == 0)
+
+    def test_only_nodata_pixels_are_transparent(self, tmp_path: Path) -> None:
+        src = tmp_path / "src.tif"
+        make_uint16_tiff(src)
+        vrt_path = tmp_path / "rgba.vrt"
+        luts = [[(0.0, 0), (100.0, 255)] for _ in range(3)]
+
+        create_rgba_vrt(src, vrt_path, luts=luts)
+
+        with rasterio.open(vrt_path) as ds:
+            alpha = ds.read(4)
+        assert alpha[0, 0] == 0
+        assert (alpha.ravel()[1:] == 255).all()
 
     def test_data_is_opaque(self, tmp_path: Path) -> None:
         src = tmp_path / "src.tif"
