@@ -23,6 +23,8 @@ from freezebase.raster import _env_for_path, _to_vsi_uri
 from freezebase.vrt._grid import (
     _DENSIFY_PTS,
     _assert_extent_aligned,
+    _check_no_colour_table,
+    _has_colour_table,
     _label,
     _snap_out,
     raster_info,
@@ -51,8 +53,6 @@ _BAND_UNIT_TO_METRE = {
     "foot": 0.3048,
     "us survey foot": 1200 / 3937,
 }
-# Elements GDAL writes for a source's scale, offset or colour table.
-_UNSUPPORTED_BAND_ELEMENT = re.compile(r"Unsupported VRT element <(Offset|Scale|ColorTable)>")
 
 type _Grid = tuple[CRS, Affine, int, int]
 
@@ -126,14 +126,17 @@ def warp(
         ``tolerance`` is negative or NaN, the source has no CRS and no ``src_crs`` is given,
         only one of the source CRS and the target CRS has a vertical datum, heights would
         be shifted in a source of more than one band, no exact transformation is available
-        and ``allow_ballpark`` is false, or the source has a scale/offset or colour table
-        the model cannot hold.
+        and ``allow_ballpark`` is false, or the source has a colour table.
     RuntimeError
         If GDAL's serialized transformer cannot be made exact or ballpark-free.
     """
     _check_tolerance(tolerance)
     ref = source if isinstance(source, VRT) else _absolute(UPath(source))
     with _opened(ref) as src:
+        _check_no_colour_table(
+            [_has_colour_table(src, i) for i in src.indexes],
+            ref.name if isinstance(ref, UPath) else "the source VRT",
+        )
         source_crs = CRS.from_user_input(src_crs) if src_crs is not None else src.crs
         if source_crs is None:
             msg = f"{_label(raster_info(ref), 0)} has no CRS; pass src_crs."
@@ -175,13 +178,7 @@ def warp(
         ):
             rasterio.shutil.copy(warped, memfile.name, driver="VRT")
             xml = bytes(memfile.getbuffer()).decode()
-    try:
-        vrt = from_xml(xml)
-    except ValueError as err:
-        if not _UNSUPPORTED_BAND_ELEMENT.search(str(err)):
-            raise
-        msg = f"warp cannot keep the source's scale/offset or colour table: {err}"
-        raise ValueError(msg) from err
+    vrt = from_xml(xml)
     if vrt.warp is None:  # pragma: no cover  # GDAL always writes a warped VRT here
         msg = "GDAL did not serialize a warped VRT"
         raise RuntimeError(msg)

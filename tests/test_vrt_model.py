@@ -592,6 +592,8 @@ class TestRead:
             color_interp=ColorInterp.red,
             unit="dB",
             metadata={"B": "2"},
+            scale=0.01,
+            offset=5.0,
         )
         # A warp as GDAL writes it, whose source is an in-memory VRT.
         warped = from_xml(gdal_warped_xml(vrt_over(a).to_xml()))
@@ -604,6 +606,15 @@ class TestRead:
         out = v.write(tmp_path / "v" / "m.vrt")
         assert find(parse(out.read_text()), ".//SourceFilename").text == "../tiles/a.tif"
         assert read(out) == v
+
+    def test_scale_and_offset_reach_gdal(self, tmp_path: Path) -> None:
+        v = vrt_over(make_tiff(tmp_path / "a.tif"), scale=0.5, offset=-1.0)
+        band = find(parse(v.to_xml()), "VRTRasterBand")
+        assert (find(band, "Scale").text, find(band, "Offset").text) == ("0.5", "-1.0")
+        with v.open() as ds:
+            assert (ds.scales, ds.offsets) == ((0.5,), (-1.0,))
+        assert vrt_over(make_tiff(tmp_path / "b.tif")).bands[0].scale is None
+        assert "<Scale>" not in vrt_over(make_tiff(tmp_path / "c.tif")).to_xml()
 
     def test_round_trip_warp_with_relative_source(self, tmp_path: Path) -> None:
         (tmp_path / "v").mkdir()
@@ -761,7 +772,7 @@ class TestRead:
             (one_band(attributes=' blockXSize="128"'), "blockXSize"),
             (one_band('<Metadata domain="x" />'), "domain"),
             (one_band(dataset="<Metadata><Foo /></Metadata>"), "<Foo>"),
-            (one_band("<Scale>2</Scale>"), "<Scale>"),
+            (one_band("<ColorTable />"), "<ColorTable>"),
             (one_band("<ColorInterp>Sepia</ColorInterp>"), "Sepia"),
             (one_band().replace("Float32", "CFloat32"), "CFloat32"),
             (one_band("<PixelFunctionType>dB</PixelFunctionType>"), "<PixelFunctionType>"),

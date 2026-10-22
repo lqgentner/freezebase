@@ -594,6 +594,34 @@ class TestNodataEqual:
         assert not _nodata_equal(0.0, -9999.0)
 
 
+def make_paletted_tiff(path: Path) -> None:
+    make_tiff(path, fill=1, dtype="uint8", nodata=None)
+    with rasterio.open(path, "r+") as ds:
+        ds.write_colormap(1, {0: (255, 0, 0, 255), 1: (0, 255, 0, 255)})
+
+
+class TestColourTables:
+    def test_warped_vrt_rejects_colour_table(self, tmp_path: Path) -> None:
+        make_paletted_tiff(tmp_path / "pal.tif")
+        with pytest.raises(ValueError, match="colour table"):
+            create_warped_vrt(
+                tmp_path / "pal.tif", tmp_path / "w.vrt", crs="EPSG:3857", resolution=20.0
+            )
+
+    def test_mosaic_rejects_colour_table(self, tmp_path: Path) -> None:
+        make_paletted_tiff(tmp_path / "pal.tif")
+        with pytest.raises(ValueError, match="colour table"):
+            build_vrt_mosaic([tmp_path / "pal.tif"], tmp_path / "m.vrt")
+
+    def test_warped_vrt_keeps_scale_and_offset(self, tmp_path: Path) -> None:
+        make_tiff(tmp_path / "s.tif", dtype="int16", nodata=-1)
+        with rasterio.open(tmp_path / "s.tif", "r+") as ds:
+            ds.scales, ds.offsets = (0.01,), (5.0,)
+        create_warped_vrt(tmp_path / "s.tif", tmp_path / "w.vrt", crs="EPSG:3857", resolution=20.0)
+        with rasterio.open(tmp_path / "w.vrt") as ds:
+            assert (ds.scales, ds.offsets) == ((0.01,), (5.0,))
+
+
 class TestWarpedVrt:
     def test_reprojects_onto_the_requested_grid(self, tmp_path: Path) -> None:
         src = tmp_path / "utm.tif"

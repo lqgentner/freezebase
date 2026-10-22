@@ -168,6 +168,15 @@ def _add_band(
         element.set("subClass", "VRTDerivedRasterBand")
     elif warped:
         element.set("subClass", "VRTWarpedRasterBand")
+    _add_band_properties(element, band)
+    if band.pixel_function is not None:
+        _add_pixel_function(element, band.pixel_function)
+    for source in band.sources:
+        _add_source(element, source, relative_to=relative_to)
+
+
+def _add_band_properties(element: ET.Element, band: Band) -> None:
+    """Append the metadata, nodata, description, unit, scaling and colour of a band."""
     _add_metadata(element, band.metadata)
     if band.nodata is not None:
         ET.SubElement(element, "NoDataValue").text = _number(band.nodata)
@@ -175,15 +184,15 @@ def _add_band(
         ET.SubElement(element, "Description").text = band.description
     if band.unit is not None:
         ET.SubElement(element, "UnitType").text = band.unit
+    if band.offset is not None:
+        ET.SubElement(element, "Offset").text = _number(band.offset)
+    if band.scale is not None:
+        ET.SubElement(element, "Scale").text = _number(band.scale)
     # GDAL reads a band without <ColorInterp> as undefined, and writes it that way.
     if band.color_interp != ColorInterp.undefined:
         ET.SubElement(element, "ColorInterp").text = _COLOR_INTERP_NAMES.get(
             band.color_interp, band.color_interp.name.capitalize()
         )
-    if band.pixel_function is not None:
-        _add_pixel_function(element, band.pixel_function)
-    for source in band.sources:
-        _add_source(element, source, relative_to=relative_to)
 
 
 def _add_pixel_function(band: ET.Element, function: PixelFunction) -> None:
@@ -432,6 +441,10 @@ def _band(  # noqa: C901, PLR0912  # one case per element, as in the writer
                 band.description = _text(child)
             case "UnitType":
                 band.unit = _text(child)
+            case "Offset":
+                band.offset = float(_text(child))
+            case "Scale":
+                band.scale = float(_text(child))
             case "ColorInterp":
                 band.color_interp = _lookup(_COLOR_INTERPS, _text(child), "colour interpretation")
             case "PixelFunctionType" if derived:

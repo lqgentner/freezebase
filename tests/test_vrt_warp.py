@@ -306,25 +306,23 @@ class TestSources:
             assert ds.count == 3
             assert ds.tags(ns="IMAGE_STRUCTURE")["INTERLEAVE"] == "PIXEL"
 
-    def test_scaled_source_is_named_in_the_error(self, tmp_path: Path) -> None:
-        src = make_tiff(tmp_path / "scaled.tif")
+    def test_scale_and_offset_are_carried(self, tmp_path: Path) -> None:
+        src = make_tiff(tmp_path / "scaled.tif", dtype="int16", nodata=-1)
         with rasterio.open(src, "r+") as ds:
-            ds.scales = (2.0,)
-        # Previously raised the bare "Unsupported VRT element <Scale>".
-        with pytest.raises(ValueError, match=r"scale/offset or colour table.*<Scale>"):
+            ds.scales, ds.offsets = (0.01,), (5.0,)
+        # Previously raised "warp cannot keep the source's scale/offset".
+        w = warp(src, crs="EPSG:4326", resolution=1e-4)
+        assert (w.bands[0].scale, w.bands[0].offset) == (0.01, 5.0)
+        assert read(w.write(tmp_path / "w.vrt")) == w
+        with w.open() as ds:
+            assert (ds.scales, ds.offsets) == ((0.01,), (5.0,))
+
+    def test_colour_table_raises(self, tmp_path: Path) -> None:
+        src = make_tiff(tmp_path / "pal.tif", dtype="uint8", nodata=None)
+        with rasterio.open(src, "r+") as ds:
+            ds.write_colormap(1, {0: (255, 0, 0, 255), 1: (0, 255, 0, 255)})
+        with pytest.raises(ValueError, match=r"pal\.tif.*colour table"):
             warp(src, crs="EPSG:4326", resolution=1e-4)
-
-    def test_other_parse_errors_are_not_relabelled(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        def reject(_xml: str) -> VRT:
-            """Fail as the parser does on an element unrelated to scale or colour."""
-            msg = "Unsupported VRT element <Foo>"
-            raise ValueError(msg)
-
-        monkeypatch.setattr(_warp, "from_xml", reject)
-        with pytest.raises(ValueError, match=r"^Unsupported VRT element <Foo>$"):
-            warp(make_tiff(tmp_path / "utm.tif"), crs="EPSG:4326", resolution=1e-4)
 
     def test_vrt_source_is_the_callers(self, tmp_path: Path) -> None:
         source = mosaic([make_tiff(tmp_path / "a.tif")])

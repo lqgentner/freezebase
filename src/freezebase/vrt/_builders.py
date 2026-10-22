@@ -17,6 +17,7 @@ from freezebase.vrt._grid import (
     RasterInfo,
     _assert_extent_aligned,
     _assert_grid_aligned,
+    _check_no_colour_table,
     _check_north_up,
     _label,
     _mosaic_grid,
@@ -68,6 +69,9 @@ def _band(info: RasterInfo, index: int) -> Band:
         color_interp=info.colorinterp[index],
         unit=info.units[index] or None,
         metadata=dict(info.band_tags[index]),
+        # GDAL's defaults, which it writes no element for.
+        scale=None if info.scales[index] == 1 else info.scales[index],
+        offset=None if info.offsets[index] == 0 else info.offsets[index],
     )
 
 
@@ -83,15 +87,16 @@ def from_raster(path: AnyPath) -> VRT:
     -------
     VRT
         A VRT with the file's grid, bands, descriptions, colour interpretation, units,
-        nodata and metadata.
+        scales, offsets, nodata and metadata.
 
     Raises
     ------
     ValueError
-        If the raster is south-up.
+        If the raster is south-up or has a colour table.
     """
     info = raster_info(path)
     _check_north_up(info, _label(info, 0))
+    _check_no_colour_table(info.colour_tables, _label(info, 0))
     return VRT(
         crs=info.crs,
         transform=info.transform,
@@ -161,8 +166,8 @@ def stack(
     ------
     ValueError
         If ``sources`` is empty, the grids differ (use ``warp`` first), a source is
-        south-up, a ``bands`` entry is out of range, or ``bands``, ``band_names`` or
-        ``color_interp`` do not match.
+        south-up or has a colour table, a ``bands`` entry is out of range, or ``bands``,
+        ``band_names`` or ``color_interp`` do not match.
     """
     if not sources:
         msg = "stack needs at least one source."
@@ -173,6 +178,8 @@ def stack(
     infos = [raster_info(source) for source in sources]
     _check_same_grid(infos)
     _check_north_up(infos[0], _label(infos[0], 0))
+    for i, info in enumerate(infos):
+        _check_no_colour_table(info.colour_tables, _label(info, i))
     out = [
         _band(info, band - 1)
         for i, info in enumerate(infos)
@@ -301,7 +308,8 @@ def mosaic(
     Parameters
     ----------
     sources : Sequence[str | Path | UPath | VRT]
-        Tiles sharing a CRS, band count, dtypes and NODATA values. A ``VRT`` is nested.
+        Tiles sharing a CRS, band count, dtypes, scales, offsets and NODATA values. A
+        ``VRT`` is nested.
         Band *i* of the mosaic reads band *i* of every tile.
     bounds : rasterio.coords.BoundingBox | tuple[float, float, float, float] | None, optional
         Extent as ``(left, bottom, right, top)``, a whole number of output pixels; its
@@ -332,9 +340,9 @@ def mosaic(
     ------
     ValueError
         If ``sources`` is empty, the tiles are incompatible, off the pixel grid (with
-        ``resolution=None``), rotated or south-up, ``bounds`` is not whole pixels,
-        ``resolution`` is not positive, ``resampling`` is not supported, or ``band_names``
-        or ``color_interp`` do not match the band count.
+        ``resolution=None``), rotated, south-up or with a colour table, ``bounds`` is not
+        whole pixels, ``resolution`` is not positive, ``resampling`` is not supported, or
+        ``band_names`` or ``color_interp`` do not match the band count.
     """
     if not sources:
         msg = "sources must not be empty."

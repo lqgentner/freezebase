@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from affine import Affine
     from rasterio.crs import CRS
     from rasterio.enums import ColorInterp
+    from rasterio.io import DatasetReader
 
     from freezebase.vrt._model import AnyPath, SourceRef
 
@@ -32,7 +33,9 @@ __all__ = [
     "RasterInfo",
     "_assert_extent_aligned",
     "_assert_grid_aligned",
+    "_check_no_colour_table",
     "_check_north_up",
+    "_has_colour_table",
     "_label",
     "_mosaic_grid",
     "_snap_out",
@@ -58,6 +61,9 @@ class RasterInfo(NamedTuple):
     band_tags: list[dict[str, str]]
     tags: dict[str, str]
     block_shapes: list[tuple[int, int]]
+    scales: tuple[float, ...]
+    offsets: tuple[float, ...]
+    colour_tables: tuple[bool, ...]
 
     @property
     def px(self) -> float:
@@ -103,7 +109,30 @@ def raster_info(src: AnyPath | VRT) -> RasterInfo:
             band_tags=[ds.tags(i) for i in ds.indexes],
             tags=ds.tags(),
             block_shapes=list(ds.block_shapes),
+            scales=tuple(ds.scales),
+            offsets=tuple(ds.offsets),
+            colour_tables=tuple(_has_colour_table(ds, i) for i in ds.indexes),
         )
+
+
+def _has_colour_table(ds: DatasetReader, band: int) -> bool:
+    """Whether band ``band`` (1-based) of ``ds`` has a colour table."""
+    try:
+        ds.colormap(band)
+    except ValueError:  # rasterio raises for a band without one
+        return False
+    return True
+
+
+def _check_no_colour_table(colour_tables: Sequence[bool], name: str) -> None:
+    """Raise for a raster with a colour table, which the model cannot hold."""
+    for band, has_table in enumerate(colour_tables, start=1):
+        if has_table:
+            msg = (
+                f"'{name}' band {band} has a colour table, which freezebase.vrt cannot keep; "
+                "expand it to RGB(A) first, e.g. with gdal_translate -expand rgba."
+            )
+            raise ValueError(msg)
 
 
 def _assert_extent_aligned(
@@ -164,8 +193,9 @@ def _validate_tiles(infos: Sequence[RasterInfo], *, same_pixel_size: bool = True
     Raises
     ------
     ValueError
-        If CRS, band count, dtypes, NODATA or (with ``same_pixel_size``) pixel size differ,
-        a tile is rotated or south-up, or a dtype has no GDAL name.
+        If CRS, band count, dtypes, scales, offsets, NODATA or (with ``same_pixel_size``)
+        pixel size differ, a tile is rotated, south-up or has a colour table, or a dtype
+        has no GDAL name.
     """
     ref = infos[0]
     ref_name = _label(ref, 0)
@@ -194,6 +224,12 @@ def _validate_tile(
         got, want = next((a, b) for a, b in zip(t.dtypes, ref.dtypes, strict=True) if a != b)
         msg = f"All tiles must share a dtype; '{name}' is '{got}', '{ref_name}' is '{want}'."
         raise ValueError(msg)
+    if (t.scales, t.offsets) != (ref.scales, ref.offsets):
+        msg = (
+            f"All tiles must share a scale and offset; '{name}' has {t.scales} and "
+            f"{t.offsets}, '{ref_name}' has {ref.scales} and {ref.offsets}."
+        )
+        raise ValueError(msg)
     for got_nd, want_nd in zip(t.nodatavals, ref.nodatavals, strict=True):
         if not _nodata_equal(got_nd, want_nd):
             msg = (
@@ -210,6 +246,7 @@ def _validate_tile(
         msg = f"Rotated/sheared tiles cannot be mosaicked into an axis-aligned VRT: '{name}'."
         raise ValueError(msg)
     _check_north_up(t, name)
+    _check_no_colour_table(t.colour_tables, name)
 
 
 def _assert_grid_aligned(infos: Sequence[RasterInfo], minx: float, maxy: float) -> None:
