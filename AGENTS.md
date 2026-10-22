@@ -74,7 +74,7 @@ Keep `--no-sync`; otherwise `uv run` re-resolves the environment at the latest v
 ## Documentation
 
 Great Docs uses Quarto, which must be installed separately. See
-[`user_guide/03-contributing.qmd`](user_guide/03-contributing.qmd) for preview and freeze-cache
+[`user_guide/04-contributing.qmd`](user_guide/04-contributing.qmd) for preview and freeze-cache
 details.
 
 ```bash

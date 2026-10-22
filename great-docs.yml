@@ -106,6 +106,8 @@ reference:
         - vrt.Band
         - vrt.Source
         - vrt.PixelFunction
+        - vrt.SourceProperties
+        - vrt.Warp
         - vrt.mosaic
         - vrt.warp
         - vrt.stack

@@ -285,9 +285,11 @@ class TestVrtOnS3:
         m = mosaic(tiles)
 
         with m.env(), rasterio.open(m.to_xml()) as ds:
-            assert ds.width == 2 * WIDTH
+            assert set(np.unique(ds.read(1)).tolist()) == {1.0, 2.0}
         with m.open() as ds:
-            assert ds.read(1).shape == (HEIGHT, 2 * WIDTH)
+            data = ds.read(1)
+        assert data.shape == (HEIGHT, 2 * WIDTH)
+        assert set(np.unique(data).tolist()) == {1.0, 2.0}
 
     def test_source_files_follow_a_local_vrt_to_s3(self, prefix: UPath, tmp_path: Path) -> None:
         tiles = self._upload_tiles(prefix)

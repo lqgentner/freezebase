@@ -44,13 +44,15 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   `rasterio.warp.calculate_default_transform` derives, or onto a reference raster's grid
   (`like`). PROJ ballpark transformations are refused unless `allow_ballpark=True`, so a
   missing grid raises `ValueError` instead of silently ignoring a datum shift. `tolerance`
-  is the approximation error in source pixels (0.125 by default, `0` for exact). Both
-  settings are kept in the written VRT.
+  is the approximation error in source pixels, `0` for exact; the default `"auto"` is 0.125
+  for horizontal-only warps and exact when heights shift. Both settings are kept in the
+  written VRT.
 - `warp` shifts heights between vertical datums when the source CRS and `crs` differ and
   both are compound or 3D (e.g. `EPSG:2056+5728` to `EPSG:4979`), with exact transforms
   under `tolerance="auto"`. Heights in feet are converted as `gdalwarp` does. Warping between
-  a vertical and a 2D CRS raises `ValueError`; pass a 2D `src_crs` to keep heights
-  unconverted. PROJ needs the grids, e.g. via `PROJ_DATA`.
+  a vertical and a 2D CRS raises `ValueError`: pass a 2D `src_crs` to keep heights
+  unconverted from a vertical source, and a 3D or compound `src_crs` (or a 2D `crs`) for a
+  2D source and a vertical target. PROJ needs the grids, e.g. via `PROJ_DATA`.
 - `VRT.metadata_domains` holds dataset metadata of named domains, such as the
   `IMAGE_STRUCTURE` interleaving GDAL records for a warped multi-band raster.
 
@@ -58,8 +60,9 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 - `build_vrt_mosaic` accepts multi-band tiles and writes sources on the VRT's store relative
   to it, even outside its directory (`other/b.tif`, not an absolute path).
-- `create_decibel_vrt` writes nodata, not `-inf`, where a source with non-NaN NODATA holds
-  that value.
+- **Breaking:** `create_decibel_vrt` writes nodata where a source with non-NaN NODATA holds
+  that value. Before, `10 * log10(nodata)` reached the output, e.g. `-inf` for a NODATA of
+  0; now the output pixel is nodata (NaN). Mask `-inf` no longer; test for NaN instead.
 - `create_warped_vrt` takes `resolution` as a float, an `(x, y)` tuple or `None`.
 - **Breaking:** `create_warped_vrt` is built on `freezebase.vrt.warp` and no longer ignores
   datum differences. Before, a missing PROJ datum grid fell back silently to a ballpark
