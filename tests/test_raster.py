@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path, PurePosixPath
+import tempfile
 from typing import Any, assert_type
 
 import numpy as np
@@ -418,12 +419,66 @@ class TestRewriteTiffVrt:
         with rasterio.open(dst) as ds:
             assert (ds.read(1) == 9.0).all()
 
-    def test_rewrite_vrt_wraps_a_band_length_error(self, tmp_path: Path) -> None:
+    def test_rewrite_vrt_band_length_error_is_a_value_error(self, tmp_path: Path) -> None:
         src = tmp_path / "src.tif"
         make_tiff(src)
 
-        with pytest.raises(RuntimeError, match="one entry per band"):
+        with pytest.raises(ValueError, match="one entry per band"):
             rewrite_tiff(from_raster(src), tmp_path / "dst.tif", units=["a", "b"])
+
+        assert not (tmp_path / "dst.tif").exists()
+
+    def test_rewrite_vrt_ignores_profile_dtype_and_nodata(self, tmp_path: Path) -> None:
+        src, dst = tmp_path / "src.tif", tmp_path / "dst.tif"
+        make_tiff(src)
+
+        rewrite_tiff(from_raster(src), dst, {"dtype": "uint8", "nodata": 7})
+
+        with rasterio.open(dst) as ds:
+            assert ds.dtypes == ("float32",)
+            assert np.isnan(ds.nodata)
+
+    def test_rewrite_vrt_merges_band_tags_and_replaces_units_and_color_interp(
+        self, tmp_path: Path
+    ) -> None:
+        src, dst = tmp_path / "src.tif", tmp_path / "dst.tif"
+        make_tiff(src)
+        with rasterio.open(src, "r+") as ds:
+            ds.update_tags(1, A="1")
+            ds.set_band_unit(1, "m")
+
+        rewrite_tiff(
+            from_raster(src),
+            dst,
+            band_tags=[{"B": "2"}],
+            units=["dB"],
+            color_interp=[ColorInterp.red],
+        )
+
+        with rasterio.open(dst) as ds:
+            assert ds.tags(1) == {"A": "1", "B": "2"}
+            assert ds.units == ("dB",)
+            assert ds.colorinterp == (ColorInterp.red,)
+
+    def test_rewrite_vrt_to_s3_failure_leaves_nothing(
+        self,
+        tmp_path: Path,
+        s3_uploads: dict[str, bytes],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        src = tmp_path / "src.tif"
+        make_tiff(src)
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+
+        with pytest.raises(RuntimeError, match="Failed to rewrite"):
+            rewrite_tiff(
+                from_raster(src), UPath("s3://bucket/out/x.tif"), {"driver": "NotADriver"}
+            )
+
+        assert not s3_uploads
+        assert not list(scratch.iterdir())
 
     def test_rewrite_merges_tags(self, tmp_path: Path) -> None:
         src, dst = tmp_path / "src.tif", tmp_path / "dst.tif"
