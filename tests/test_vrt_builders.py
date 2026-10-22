@@ -7,8 +7,10 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 import rasterio
-from rasterio.enums import ColorInterp
+from rasterio.coords import disjoint_bounds
+from rasterio.enums import ColorInterp, Resampling
 from rasterio.transform import Affine
+from rasterio.warp import reproject
 from rasterio.windows import Window
 
 from freezebase.vrt import VRT, Source, from_raster, mosaic, stack
@@ -246,12 +248,9 @@ class TestMosaicAligned:
         assert (wide.width, wide.height) == (12, 8)
         assert wide.bands[0].sources[0].dst_window == Window(0, 4, 6, 4)
 
-    def test_rejects_empty_and_unimplemented_resolution(self, tmp_path: Path) -> None:
+    def test_rejects_empty(self) -> None:
         with pytest.raises(ValueError, match="must not be empty"):
             mosaic([])
-        a = make_tiff(tmp_path / "a.tif")
-        with pytest.raises(NotImplementedError):
-            mosaic([a], resolution="finest")
 
     def test_names_and_color_interp(self, tmp_path: Path) -> None:
         a = make_tiff(tmp_path / "a.tif", count=2)
@@ -262,3 +261,157 @@ class TestMosaicAligned:
             mosaic([a], band_names=["p"])
         with pytest.raises(ValueError, match="entries"):
             mosaic([a], color_interp=[ColorInterp.red])
+
+
+def _reproject_onto(path: Path, vrt: VRT) -> np.ndarray:
+    """Warp band 1 of ``path`` with nearest onto ``vrt``'s grid, NaN outside it."""
+    out = np.full((vrt.height, vrt.width), np.nan, dtype="float32")
+    with rasterio.open(path) as ds:
+        reproject(
+            rasterio.band(ds, 1),
+            out,
+            dst_transform=vrt.transform,
+            dst_crs=ds.crs,
+            dst_nodata=np.nan,
+            resampling=Resampling.nearest,
+        )
+    return out
+
+
+class TestMosaicMixedResolution:
+    def test_coarse_tile_is_placed_exactly(self, tmp_path: Path) -> None:
+        fine = make_tiff(tmp_path / "fine.tif")
+        # 3 m off the fine grid: rounding would misplace it by 0.3 pixel.
+        coarse = make_tiff(
+            tmp_path / "coarse.tif", origin=(500063.0, 5200000.0), res=(30.0, 30.0), size=(4, 2)
+        )
+        m = mosaic([fine, coarse], resolution="finest")
+        with m.open() as ds:
+            data = ds.read(1)
+        ref = _reproject_onto(coarse, m)
+        mask = ~np.isnan(ref) & np.isnan(_reproject_onto(fine, m))
+        assert mask.sum() > 0
+        np.testing.assert_array_equal(data[mask], ref[mask])
+        np.testing.assert_array_equal(data[:4, :6], _read(fine)[0])
+        source = m.bands[0].sources[1]
+        assert source.dst_window == Window(6.3, 0, 12, 6)
+        assert source.resampling == Resampling.nearest
+        assert '<DstRect xOff="6.3' in m.to_xml()
+
+    def test_finest_is_taken_per_axis(self, tmp_path: Path) -> None:
+        a = make_tiff(tmp_path / "a.tif", res=(10.0, 20.0))
+        b = make_tiff(tmp_path / "b.tif", origin=(500060.0, 5200000.0), res=(20.0, 10.0))
+        m = mosaic([a, b], resolution="finest")
+        assert (m.transform.a, m.transform.e) == (10.0, -10.0)
+        assert (m.width, m.height) == (18, 8)
+
+    def test_anchor_is_the_first_tile_at_target_size(self, tmp_path: Path) -> None:
+        coarse = make_tiff(
+            tmp_path / "coarse.tif", origin=(499987.0, 5200013.0), res=(30.0, 30.0), size=(4, 2)
+        )
+        fine = make_tiff(tmp_path / "fine.tif")
+        m = mosaic([coarse, fine], resolution="finest")
+        # The union's corner (499987, 5200013) grows outward onto the fine tile's grid.
+        assert m.transform == Affine(10.0, 0.0, 499980.0, 0.0, -10.0, 5200020.0)
+        assert (m.width, m.height) == (13, 7)
+        assert m.bands[0].sources[1].dst_window == Window(2, 2, 6, 4)
+
+    def test_exact_edges_do_not_add_a_pixel(self, tmp_path: Path) -> None:
+        fine = make_tiff(tmp_path / "fine.tif")
+        coarse = make_tiff(
+            tmp_path / "coarse.tif", origin=(500060.0, 5200000.0), res=(30.0, 30.0), size=(2, 2)
+        )
+        m = mosaic([fine, coarse], resolution="finest")
+        assert m.transform == Affine(10.0, 0.0, 500000.0, 0.0, -10.0, 5200000.0)
+        assert (m.width, m.height) == (12, 6)
+        assert m.bands[0].sources[1].dst_window == Window(6, 0, 6, 6)
+
+    def test_anchor_falls_back_to_union_corner(self, tmp_path: Path) -> None:
+        fine = make_tiff(tmp_path / "fine.tif")
+        coarse = make_tiff(
+            tmp_path / "coarse.tif", origin=(499963.0, 5200005.0), res=(30.0, 30.0), size=(4, 2)
+        )
+        m = mosaic([fine, coarse], resolution=(7.0, 7.0))
+        assert m.transform == Affine(7.0, 0.0, 499963.0, 0.0, -7.0, 5200005.0)
+        assert (m.width, m.height) == (18, 9)
+        assert all(s.resampling == Resampling.nearest for s in m.bands[0].sources)
+
+    def test_explicit_bounds_anchor_the_grid(self, tmp_path: Path) -> None:
+        fine = make_tiff(tmp_path / "fine.tif")
+        coarse = make_tiff(
+            tmp_path / "coarse.tif", origin=(500063.0, 5200000.0), res=(30.0, 30.0), size=(4, 2)
+        )
+        m = mosaic([fine, coarse], bounds=(499990, 5199930, 500200, 5200010), resolution="finest")
+        assert m.transform == Affine(10.0, 0.0, 499990.0, 0.0, -10.0, 5200010.0)
+        assert (m.width, m.height) == (21, 8)
+        assert m.bands[0].sources[0].dst_window == Window(1, 1, 6, 4)
+        with pytest.raises(ValueError, match="whole number"):
+            mosaic([fine, coarse], bounds=(499990, 5199930, 500205, 5200010), resolution="finest")
+
+    def test_coverage_is_not_lost(self, tmp_path: Path) -> None:
+        paths = [
+            make_tiff(
+                tmp_path / "coarse.tif",
+                origin=(499987.0, 5200013.0),
+                res=(30.0, 30.0),
+                size=(4, 2),
+            ),
+            make_tiff(tmp_path / "fine.tif"),
+            make_tiff(tmp_path / "far.tif", origin=(500101.5, 5199902.5), res=(25.0, 15.0)),
+        ]
+        m = mosaic(paths, resolution="finest")
+        with m.open() as ds:
+            out = ds.bounds
+        for path in paths:
+            tile = raster_info(path).bounds
+            assert out.left <= tile.left
+            assert out.bottom <= tile.bottom
+            assert out.right >= tile.right
+            assert out.top >= tile.top
+            assert not disjoint_bounds(out, tile)
+
+    def test_on_grid_tiles_are_not_resampled(self, tmp_path: Path) -> None:
+        fine = make_tiff(tmp_path / "fine.tif")
+        coarse = make_tiff(
+            tmp_path / "coarse.tif", origin=(500063.0, 5200000.0), res=(30.0, 30.0), size=(4, 2)
+        )
+        m = mosaic([fine, coarse], resolution="finest", resampling=Resampling.bilinear)
+        fine_source, coarse_source = m.bands[0].sources
+        assert fine_source.resampling is None
+        assert fine_source.dst_window == Window(0, 0, 6, 4)
+        assert coarse_source.resampling == Resampling.bilinear
+        assert 'resampling="bilinear"' in m.to_xml()
+
+    def test_same_size_tile_off_the_grid_is_resampled(self, tmp_path: Path) -> None:
+        a = make_tiff(tmp_path / "a.tif")
+        b = make_tiff(tmp_path / "b.tif", origin=(500065.0, 5200000.0))
+        m = mosaic([a, b], resolution="finest")
+        source = m.bands[0].sources[1]
+        assert source.dst_window == Window(6.5, 0, 6, 4)
+        assert source.resampling == Resampling.nearest
+
+    def test_tiles_must_still_match(self, tmp_path: Path) -> None:
+        a = make_tiff(tmp_path / "a.tif")
+        coarse = (30.0, 30.0)
+        cases = [
+            (make_tiff(tmp_path / "c.tif", res=coarse, crs="EPSG:32633"), "CRS"),
+            (make_tiff(tmp_path / "n.tif", res=coarse, count=2), "band count"),
+            (make_tiff(tmp_path / "d.tif", res=coarse, dtype="float64"), "dtype"),
+            (make_tiff(tmp_path / "z.tif", res=coarse, nodata=0.0), "NODATA"),
+        ]
+        for b, match in cases:
+            with pytest.raises(ValueError, match=match):
+                mosaic([a, b], resolution="finest")
+
+    @pytest.mark.parametrize("resampling", [Resampling.max, Resampling.sum, Resampling.q1])
+    def test_rejects_resampling_vrt_sources_lack(
+        self, tmp_path: Path, resampling: Resampling
+    ) -> None:
+        a = make_tiff(tmp_path / "a.tif")
+        with pytest.raises(ValueError, match="resampling"):
+            mosaic([a], resolution="finest", resampling=resampling)
+
+    def test_rejects_non_positive_resolution(self, tmp_path: Path) -> None:
+        a = make_tiff(tmp_path / "a.tif")
+        with pytest.raises(ValueError, match="positive"):
+            mosaic([a], resolution=(10.0, 0.0))

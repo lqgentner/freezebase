@@ -28,9 +28,10 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 - `freezebase.vrt.from_raster(path)` builds a 1:1 VRT over a raster, and
   `freezebase.vrt.stack(sources, bands=, band_names=, color_interp=)` stacks the bands of
   rasters or VRTs on one grid (`ValueError` pointing at `warp` when the grids differ).
-- `freezebase.vrt.mosaic(sources, bounds=, nodata=, band_names=, color_interp=)` mosaics
-  aligned tiles of any band count, later sources drawing over earlier ones; `VRT` inputs are
-  nested.
+- `freezebase.vrt.mosaic(sources, bounds=, resolution=, resampling=, nodata=, band_names=,
+  color_interp=)` mosaics tiles of any band count, later sources drawing over earlier ones;
+  `VRT` inputs are nested. With `resolution="finest"` or `(x, y)`, tiles of mixed pixel
+  sizes or off the output grid are resampled and placed exactly, not snapped to it.
 
 ### Changed
 
