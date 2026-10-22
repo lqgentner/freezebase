@@ -9,9 +9,12 @@ from rasterio.enums import Resampling
 from rasterio.windows import Window
 
 from freezebase.vrt._grid import (
+    _ALIGNMENT_TOL,
+    _PIXEL_SIZE_TOL,
     RasterInfo,
     _assert_extent_aligned,
     _assert_grid_aligned,
+    _mosaic_grid,
     _validate_tiles,
     raster_info,
 )
@@ -26,6 +29,19 @@ if TYPE_CHECKING:
     from freezebase.vrt._model import AnyPath
 
 _ALMOST_EQUAL_PRECISION = 1e-6
+# The kernels a VRT source can resample with; GDAL rejects the others.
+_SOURCE_RESAMPLINGS = frozenset(
+    {
+        Resampling.nearest,
+        Resampling.bilinear,
+        Resampling.cubic,
+        Resampling.cubic_spline,
+        Resampling.lanczos,
+        Resampling.average,
+        Resampling.mode,
+        Resampling.gauss,
+    }
+)
 
 
 def _band(info: RasterInfo, index: int) -> Band:
@@ -167,26 +183,75 @@ def stack(
 
 
 def _mosaic_source(
-    info: RasterInfo, band: int, minx: float, maxy: float, nodata: float | None
+    info: RasterInfo,
+    band: int,
+    grid: Affine,
+    nodata: float | None,
+    resampling: Resampling,
 ) -> Source:
-    """Build the source drawing band ``band`` (0-based) of a tile at its place on the grid."""
+    """Build the source drawing band ``band`` (0-based) of a tile at its place on ``grid``."""
     block_height, block_width = info.block_shapes[band]
-    bounds = info.bounds
+    rx, ry = grid.a, -grid.e
+    col = (info.bounds.left - grid.c) / rx
+    row = (grid.f - info.bounds.top) / ry
+    on_grid = (
+        abs(info.px - rx) <= _PIXEL_SIZE_TOL
+        and abs(info.py - ry) <= _PIXEL_SIZE_TOL
+        and abs(col - round(col)) <= _ALIGNMENT_TOL
+        and abs(row - round(row)) <= _ALIGNMENT_TOL
+    )
+    # Off the grid, the unrounded window georeferences the tile exactly.
+    dst_window = (
+        Window(round(col), round(row), info.width, info.height)
+        if on_grid
+        else Window(col, row, info.width * info.px / rx, info.height * info.py / ry)
+    )
     return Source(
         path=info.ref,
         band=band + 1,
         src_window=Window(0, 0, info.width, info.height),
-        dst_window=Window(
-            round((bounds.left - minx) / info.px),
-            round((maxy - bounds.top) / info.py),
-            info.width,
-            info.height,
-        ),
+        dst_window=dst_window,
         nodata=nodata,
         properties=SourceProperties(
             info.width, info.height, info.dtypes[band], block_width, block_height
         ),
+        resampling=None if on_grid else resampling,
     )
+
+
+def _output_grid(
+    infos: Sequence[RasterInfo],
+    bounds: BoundingBox | tuple[float, float, float, float] | None,
+    resolution: Literal["finest"] | tuple[float, float] | None,
+) -> tuple[Affine, int, int]:
+    """Return the transform, width and height of the mosaic grid."""
+    extent = (
+        None
+        if bounds is None
+        else (float(bounds[0]), float(bounds[1]), float(bounds[2]), float(bounds[3]))
+    )
+    if resolution is None:
+        px, py = infos[0].px, infos[0].py
+        if extent is None:
+            minx = min(t.bounds.left for t in infos)
+            miny = min(t.bounds.bottom for t in infos)
+            maxx = max(t.bounds.right for t in infos)
+            maxy = max(t.bounds.top for t in infos)
+        else:
+            minx, miny, maxx, maxy = extent
+            _assert_extent_aligned(px, py, left=minx, bottom=miny, right=maxx, top=maxy)
+        _assert_grid_aligned(infos, minx, maxy)
+        width, height = round((maxx - minx) / px), round((maxy - miny) / py)
+    else:
+        if resolution == "finest":
+            px, py = min(t.px for t in infos), min(t.py for t in infos)
+        else:
+            px, py = resolution
+        if px <= 0 or py <= 0:
+            msg = f"resolution must be positive, got {resolution}."
+            raise ValueError(msg)
+        minx, maxy, width, height = _mosaic_grid(infos, extent, px, py)
+    return Affine(px, 0.0, minx, 0.0, -py, maxy), width, height
 
 
 def mosaic(
@@ -194,7 +259,7 @@ def mosaic(
     *,
     bounds: BoundingBox | tuple[float, float, float, float] | None = None,
     resolution: Literal["finest"] | tuple[float, float] | None = None,
-    resampling: Resampling = Resampling.nearest,  # noqa: ARG001  # used once resolution is set
+    resampling: Resampling = Resampling.nearest,
     nodata: float | None = None,
     band_names: Sequence[str] | None = None,
     color_interp: Sequence[ColorInterp] | None = None,
@@ -204,15 +269,20 @@ def mosaic(
     Parameters
     ----------
     sources : Sequence[str | Path | UPath | VRT]
-        Tiles sharing a CRS, pixel size, band count, dtypes and NODATA values. A ``VRT``
-        is nested. Band *i* of the mosaic reads band *i* of every tile.
+        Tiles sharing a CRS, band count, dtypes and NODATA values. A ``VRT`` is nested.
+        Band *i* of the mosaic reads band *i* of every tile.
     bounds : rasterio.coords.BoundingBox | tuple[float, float, float, float] | None, optional
-        Extent as ``(left, bottom, right, top)``, on the tiles' pixel grid. Defaults to the
-        union of the tiles.
+        Extent as ``(left, bottom, right, top)``, a whole number of output pixels; its
+        top-left corner anchors the grid. Defaults to the union of the tiles.
     resolution : {"finest"} | tuple[float, float] | None, optional
-        ``None`` requires one common pixel size. Other values are not implemented yet.
+        Output pixel size. ``None`` requires one common pixel size and every tile on one
+        grid; ``"finest"`` takes the smallest pixel size per axis; ``(x, y)`` sets it.
+        Without ``bounds``, the grid runs through the origin of the first tile of that
+        pixel size, or else the union's top-left corner, and covers every tile.
     resampling : Resampling, optional
-        Resampling for tiles not on the output grid.
+        Resampling for tiles not on the output grid, which are placed exactly rather than
+        snapped to it. One of nearest, bilinear, cubic, cubic_spline, lanczos, average,
+        mode or gauss.
     nodata : float | None, optional
         NODATA of every band and source, replacing the first tile's.
     band_names : Sequence[str] | None, optional
@@ -223,25 +293,25 @@ def mosaic(
     Returns
     -------
     VRT
-        A VRT with the first tile's band descriptions, colour interpretation and NODATA.
+        A VRT with the first tile's band descriptions, colour interpretation and NODATA,
+        unless overridden.
 
     Raises
     ------
     ValueError
-        If ``sources`` is empty, the tiles are incompatible or off the pixel grid,
-        ``bounds`` is not on the grid, or ``band_names`` or ``color_interp`` do not match
-        the band count.
-    NotImplementedError
-        If ``resolution`` is not ``None``.
+        If ``sources`` is empty, the tiles are incompatible, off the pixel grid (with
+        ``resolution=None``) or rotated, ``bounds`` is not whole pixels, ``resolution`` is
+        not positive, ``resampling`` is not supported, or ``band_names`` or
+        ``color_interp`` do not match the band count.
     """
-    if resolution is not None:
-        msg = "mosaic supports resolution=None only."
-        raise NotImplementedError(msg)
     if not sources:
         msg = "sources must not be empty."
         raise ValueError(msg)
+    if resampling not in _SOURCE_RESAMPLINGS:
+        msg = f"VRT sources cannot use {resampling.name} resampling."
+        raise ValueError(msg)
     infos = [raster_info(source) for source in sources]
-    _validate_tiles(infos)
+    _validate_tiles(infos, same_pixel_size=resolution is None)
     first = infos[0]
     if band_names is not None and len(band_names) != first.count:
         msg = f"band_names has {len(band_names)} entries for {first.count} bands."
@@ -250,32 +320,17 @@ def mosaic(
         msg = f"color_interp has {len(color_interp)} entries for {first.count} bands."
         raise ValueError(msg)
 
-    px, py = first.px, first.py
-    if bounds is None:
-        minx = min(t.bounds.left for t in infos)
-        maxy = max(t.bounds.top for t in infos)
-        maxx = max(t.bounds.right for t in infos)
-        miny = min(t.bounds.bottom for t in infos)
-    else:
-        minx, miny, maxx, maxy = (float(v) for v in bounds)
-        _assert_extent_aligned(px, py, left=minx, bottom=miny, right=maxx, top=maxy)
-    _assert_grid_aligned(infos, minx, maxy)
+    grid, width, height = _output_grid(infos, bounds, resolution)
 
     out: list[Band] = []
     for i in range(first.count):
         band_nodata = first.nodatavals[i] if nodata is None else nodata
         band = _band(first, i)
         band.nodata = band_nodata
-        band.sources = [_mosaic_source(info, i, minx, maxy, band_nodata) for info in infos]
+        band.sources = [_mosaic_source(info, i, grid, band_nodata, resampling) for info in infos]
         if band_names is not None:
             band.description = band_names[i]
         if color_interp is not None:
             band.color_interp = color_interp[i]
         out.append(band)
-    return VRT(
-        crs=first.crs,
-        transform=Affine(px, 0.0, minx, 0.0, -py, maxy),
-        width=round((maxx - minx) / px),
-        height=round((maxy - miny) / py),
-        bands=out,
-    )
+    return VRT(crs=first.crs, transform=grid, width=width, height=height, bands=out)

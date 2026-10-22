@@ -33,6 +33,7 @@ __all__ = [
     "_assert_extent_aligned",
     "_assert_grid_aligned",
     "_label",
+    "_mosaic_grid",
     "_nodata_equal",
     "_snap_out",
     "_validate_tiles",
@@ -143,19 +144,21 @@ def _label(info: RasterInfo, index: int) -> str:
     return f"VRT input #{index}" if isinstance(info.ref, VRT) else info.ref.name
 
 
-def _validate_tiles(infos: Sequence[RasterInfo]) -> None:
+def _validate_tiles(infos: Sequence[RasterInfo], *, same_pixel_size: bool = True) -> None:
     """Raise unless the tiles can share one axis-aligned mosaic grid.
 
     Parameters
     ----------
     infos : Sequence[RasterInfo]
         Headers of the tiles; the first is the reference.
+    same_pixel_size : bool, optional
+        Require every tile to have the reference's pixel size.
 
     Raises
     ------
     ValueError
-        If CRS, band count, dtypes, NODATA, pixel size or rotation differ, or a dtype has
-        no GDAL name.
+        If CRS, band count, dtypes, NODATA or (with ``same_pixel_size``) pixel size differ,
+        a tile is rotated, or a dtype has no GDAL name.
     """
     ref = infos[0]
     ref_name = _label(ref, 0)
@@ -164,10 +167,12 @@ def _validate_tiles(infos: Sequence[RasterInfo]) -> None:
             msg = f"Unsupported tile dtype '{dtype}' in '{ref_name}'."
             raise ValueError(msg)
     for i, t in enumerate(infos):
-        _validate_tile(t, _label(t, i), ref, ref_name)
+        _validate_tile(t, _label(t, i), ref, ref_name, same_pixel_size=same_pixel_size)
 
 
-def _validate_tile(t: RasterInfo, name: str, ref: RasterInfo, ref_name: str) -> None:
+def _validate_tile(
+    t: RasterInfo, name: str, ref: RasterInfo, ref_name: str, *, same_pixel_size: bool
+) -> None:
     """Validate one tile against the mosaic reference."""
     if t.crs != ref.crs:
         msg = f"All tiles must share a CRS; '{name}' differs from '{ref_name}'."
@@ -189,7 +194,9 @@ def _validate_tile(t: RasterInfo, name: str, ref: RasterInfo, ref_name: str) -> 
                 f"'{ref_name}' is {want_nd}."
             )
             raise ValueError(msg)
-    if abs(t.px - ref.px) > _PIXEL_SIZE_TOL or abs(t.py - ref.py) > _PIXEL_SIZE_TOL:
+    if same_pixel_size and (
+        abs(t.px - ref.px) > _PIXEL_SIZE_TOL or abs(t.py - ref.py) > _PIXEL_SIZE_TOL
+    ):
         msg = "All tiles must share the same pixel size to be mosaicked into a VRT"
         raise ValueError(msg)
     if abs(t.transform.b) > _PIXEL_SIZE_TOL or abs(t.transform.d) > _PIXEL_SIZE_TOL:
@@ -210,3 +217,39 @@ def _assert_grid_aligned(infos: Sequence[RasterInfo], minx: float, maxy: float) 
                 "its origin does not fall on an integer pixel offset."
             )
             raise ValueError(msg)
+
+
+def _mosaic_grid(
+    infos: Sequence[RasterInfo],
+    bounds: tuple[float, float, float, float] | None,
+    rx: float,
+    ry: float,
+) -> tuple[float, float, int, int]:
+    """Return the left, top, width and height of an ``rx`` by ``ry`` grid over the tiles."""
+    if bounds is not None:
+        left, bottom, right, top = bounds
+        _assert_extent_aligned(rx, ry, left=left, bottom=bottom, right=right, top=top)
+        return left, top, round((right - left) / rx), round((top - bottom) / ry)
+    left = min(t.bounds.left for t in infos)
+    bottom = min(t.bounds.bottom for t in infos)
+    right = max(t.bounds.right for t in infos)
+    top = max(t.bounds.top for t in infos)
+    anchor = next(
+        (
+            t
+            for t in infos
+            if abs(t.px - rx) <= _PIXEL_SIZE_TOL and abs(t.py - ry) <= _PIXEL_SIZE_TOL
+        ),
+        None,
+    )
+    if anchor is None:
+        width = math.ceil((right - left) / rx - _ALIGNMENT_TOL)
+        height = math.ceil((top - bottom) / ry - _ALIGNMENT_TOL)
+        return left, top, width, height
+    # Grow the union outward onto the anchor tile's grid; the slack keeps exact edges.
+    ax, ay = anchor.bounds.left, anchor.bounds.top
+    col0 = math.floor((left - ax) / rx + _ALIGNMENT_TOL)
+    col1 = math.ceil((right - ax) / rx - _ALIGNMENT_TOL)
+    row0 = math.floor((ay - top) / ry + _ALIGNMENT_TOL)
+    row1 = math.ceil((ay - bottom) / ry - _ALIGNMENT_TOL)
+    return ax + col0 * rx, ay - row0 * ry, col1 - col0, row1 - row0
