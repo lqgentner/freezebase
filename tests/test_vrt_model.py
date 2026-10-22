@@ -122,6 +122,17 @@ class TestToXml:
             assert ds.units == ("dB",)
             assert ds.colorinterp == (ColorInterp.red,)
 
+    def test_metadata_domains(self, tmp_path: Path) -> None:
+        v = vrt_over(make_tiff(tmp_path / "a.tif"))
+        v.metadata = {"A": "1"}
+        v.metadata_domains = {"IMAGE_STRUCTURE": {"INTERLEAVE": "PIXEL"}, "x": {"B": "2"}}
+        root = parse(v.to_xml())
+        assert [m.get("domain") for m in root.iter("Metadata")] == [None, "IMAGE_STRUCTURE", "x"]
+        with rasterio.open(v.to_xml()) as ds:
+            assert ds.tags() == {"A": "1"}
+            assert ds.tags(ns="x") == {"B": "2"}
+        assert from_xml(v.to_xml()) == v
+
     def test_every_color_interp_round_trips(self, tmp_path: Path) -> None:
         tile = make_tiff(tmp_path / "a.tif")
         v = vrt_over(tile)
@@ -680,7 +691,7 @@ class TestRead:
             ("<Foo />", "<Foo>"),
             ('<VRTDataset rasterYSize="4" />', "rasterXSize"),
             (one_band(attributes=' blockXSize="128"'), "blockXSize"),
-            (one_band(dataset='<Metadata domain="x" />'), "domain"),
+            (one_band('<Metadata domain="x" />'), "domain"),
             (one_band(dataset="<Metadata><Foo /></Metadata>"), "<Foo>"),
             (one_band("<Scale>2</Scale>"), "<Scale>"),
             (one_band("<ColorInterp>Sepia</ColorInterp>"), "Sepia"),

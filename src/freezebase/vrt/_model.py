@@ -344,6 +344,8 @@ class VRT:
         Dataset metadata items.
     warp : Warp | None, optional
         Set for a warped VRT, whose bands then carry no sources.
+    metadata_domains : dict[str, dict[str, str]], optional
+        Dataset metadata items of named domains, such as ``IMAGE_STRUCTURE``, by domain.
     """
 
     crs: CRS | None
@@ -353,6 +355,7 @@ class VRT:
     bands: list[Band] = field(default_factory=list)
     metadata: dict[str, str] = field(default_factory=dict)
     warp: Warp | None = None
+    metadata_domains: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def to_xml(self, *, relative_to: UPath | None = None) -> str:
         """Serialize to VRT XML.

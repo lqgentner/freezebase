@@ -72,6 +72,7 @@ _RESAMPLINGS = {
 # The attributes each element may carry; GDALWarpOptions' contents are kept unchecked.
 _ATTRIBUTES = {
     "VRTDataset": {"rasterXSize", "rasterYSize", "subClass"},
+    "Metadata": {"domain"},
     "SRS": {"dataAxisToSRSAxisMapping"},
     "MDI": {"key"},
     "VRTRasterBand": {"dataType", "band", "subClass"},
@@ -94,6 +95,8 @@ def to_element(vrt: VRT, *, relative_to: UPath | None) -> ET.Element:
     if vrt.warp is not None:
         root.set("subClass", "VRTWarpedDataset")
     _add_metadata(root, vrt.metadata)
+    for domain, items in vrt.metadata_domains.items():
+        _add_metadata(root, items, domain=domain)
     if vrt.crs is not None:
         ET.SubElement(root, "SRS").text = vrt.crs.to_wkt()
     ET.SubElement(root, "GeoTransform").text = ", ".join(
@@ -137,11 +140,11 @@ def _path_text(path: UPath, *, relative_to: UPath | None) -> tuple[str, str]:
     return text, "1" if relative else "0"
 
 
-def _add_metadata(parent: ET.Element, metadata: dict[str, str]) -> None:
-    """Append a ``<Metadata>`` element unless ``metadata`` is empty."""
+def _add_metadata(parent: ET.Element, metadata: dict[str, str], *, domain: str = "") -> None:
+    """Append a ``<Metadata>`` element of ``domain`` unless ``metadata`` is empty."""
     if not metadata:
         return
-    element = ET.SubElement(parent, "Metadata")
+    element = ET.SubElement(parent, "Metadata", {"domain": domain} if domain else {})
     for key, value in metadata.items():
         ET.SubElement(element, "MDI", key=key).text = value
 
@@ -301,7 +304,7 @@ def from_element(
     for child in _children(root):
         match child.tag:
             case "Metadata":
-                vrt.metadata = _metadata(child)
+                _dataset_metadata(vrt, child)
             case "SRS":
                 vrt.crs = CRS.from_user_input(_text(child))
             case "GeoTransform":
@@ -317,6 +320,14 @@ def from_element(
     if warped:
         vrt.warp = _warp(options, block, base=base, storage_options=storage_options)
     return vrt
+
+
+def _dataset_metadata(vrt: VRT, element: ET.Element) -> None:
+    """Store a dataset ``<Metadata>`` element under its domain."""
+    if domain := element.get("domain"):
+        vrt.metadata_domains[domain] = _metadata(element)
+    else:
+        vrt.metadata = _metadata(element)
 
 
 def _unsupported(element: ET.Element) -> ValueError:
@@ -406,6 +417,9 @@ def _band(  # noqa: C901, PLR0912  # one case per element, as in the writer
     for child in _children(element):
         match child.tag:
             case "Metadata":
+                if child.get("domain") is not None:
+                    msg = "Unsupported attribute 'domain' on band <Metadata>"
+                    raise ValueError(msg)
                 band.metadata = _metadata(child)
             case "NoDataValue":
                 band.nodata = float(_text(child))
