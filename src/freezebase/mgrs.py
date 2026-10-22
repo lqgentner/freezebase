@@ -240,6 +240,13 @@ _UTM_MAX_LAT = 84.5
 _COLUMN_LETTERS = ("ABCDEFGH", "JKLMNPQR", "STUVWXYZ")
 _ROW_LETTERS = "ABCDEFGHJKLMNPQRSTUV"
 _ROW_CYCLE = 2_000_000
+_BAND_CHARS = np.array(list(_LATITUDE_BANDS))
+_ROW_CHARS = np.array(list(_ROW_LETTERS))
+_DIGIT_CHARS = np.array(list("0123456789"))
+# Zone, band, 100 km square and one digit each for easting and northing.
+_MGRS_10KM_LENGTH = 7
+# Width of `MGRSGrid.mgrs_codes`, kept for compatibility.
+_MGRS_CODES_DTYPE = np.dtype("<U27")
 
 
 @functools.cache
@@ -288,14 +295,16 @@ def _mgrs_10km_codes(
     # Zones 32, 34 and 36 end at 72 N, so their squares straddling it stay in band W.
     top_band = len(_LATITUDE_BANDS) - (2 if zone in (_ZONE_32, _ZONE_34, _ZONE_36) else 1)
     band_index = np.clip(band_index, 0, top_band).astype(np.intp)
-    bands = np.array(list(_LATITUDE_BANDS))[band_index]
-    columns = np.array(list(_COLUMN_LETTERS[(zone - 1) % 3]))[eastings // _100KM_SIZE - 1]
-    rows = np.array(list(_ROW_LETTERS))[
-        (northings + _row_offset(zone)) % _ROW_CYCLE // _100KM_SIZE
-    ]
-    east_digits = (eastings % _100KM_SIZE // _10KM_SIZE).astype(np.str_)
-    north_digits = (northings % _100KM_SIZE // _10KM_SIZE).astype(np.str_)
-    return f"{zone:02d}" + bands + columns + rows + east_digits + north_digits
+    # Fill one character per column and view the rows as strings, avoiding a
+    # temporary array per concatenation.
+    chars = np.empty((len(eastings), _MGRS_10KM_LENGTH), dtype="<U1")
+    chars[:, :2] = list(f"{zone:02d}")
+    chars[:, 2] = _BAND_CHARS[band_index]
+    chars[:, 3] = np.array(list(_COLUMN_LETTERS[(zone - 1) % 3]))[eastings // _100KM_SIZE - 1]
+    chars[:, 4] = _ROW_CHARS[(northings + _row_offset(zone)) % _ROW_CYCLE // _100KM_SIZE]
+    chars[:, 5] = _DIGIT_CHARS[eastings % _100KM_SIZE // _10KM_SIZE]
+    chars[:, 6] = _DIGIT_CHARS[northings % _100KM_SIZE // _10KM_SIZE]
+    return chars.view(f"<U{_MGRS_10KM_LENGTH}")[:, 0].astype(_MGRS_CODES_DTYPE)
 
 
 def _mgrs_10km_to_utm(match: re.Match[str]) -> tuple[int, Hemisphere, int, int]:
