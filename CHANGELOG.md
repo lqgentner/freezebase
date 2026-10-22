@@ -35,8 +35,8 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   color_interp=)` mosaics tiles of any band count, later sources drawing over earlier ones;
   `VRT` inputs are nested. With `resolution="finest"` or `(x, y)`, tiles of mixed pixel
   sizes or off the output grid are resampled and placed exactly, not snapped to it, and
-  fill only the output pixels whose centre they contain. `nodata` sets the bands' NODATA;
-  each tile's own NODATA pixels stay transparent under it.
+  fill only the output pixels whose centre they contain. `nodata` sets the bands' NODATA
+  and must fit in their dtype; each tile's own NODATA pixels stay transparent under it.
 - `freezebase.vrt.derive(sources, function, dtype=, nodata=, description=, band=)` applies a
   GDAL pixel function to one input (every band) or several (one band from each). `VRT`
   inputs are nested whole, so the function sees mosaicked pixels; input NODATA is honoured
@@ -65,7 +65,7 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   `complex128` to GDAL's `CInt16`, `CInt32`, `CFloat32` and `CFloat64`. `derive` reads
   complex inputs as complex, so `PixelFunction.db()` gives the dB of the modulus, and
   raises `ValueError` for a pixel function GDAL does not document for complex values
-  unless `transfer_type` is set. `build_vrt_mosaic` accepts complex tiles.
+  unless `transfer_type` is set.
 - `Band.scale` and `Band.offset` hold a band's `<Scale>` and `<Offset>`. `from_raster`,
   `stack`, `mosaic` and `warp` carry them from their inputs; `mosaic` tiles must share
   them. A colour table, which the model cannot hold, raises `ValueError` in all four.
@@ -79,11 +79,12 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   `../tiles/a.tif`. A VRT moved together with its sources still opens; a VRT moved alone
   no longer does, so move both, or build with `freezebase.vrt` and write with
   `VRT.write(path, relative=False)`. `create_warped_vrt` still writes absolute paths.
-- `build_vrt_mosaic` accepts multi-band tiles, and tiles without a CRS (before, an
-  `AttributeError`).
+- `build_vrt_mosaic` accepts multi-band tiles, complex tiles (before, a `ValueError`) and
+  tiles without a CRS (before, an `AttributeError`).
 - **Breaking:** `build_vrt_mosaic` takes each band's colour interpretation from the first
   tile. Before, it was always gray; now an RGB tile gives red, green and blue bands, and a
-  tile with none gives undefined. Set `Band.color_interp` through `mosaic` to override it.
+  tile with none gives undefined. Pass `color_interp` to `freezebase.vrt.mosaic` to choose
+  them.
 - **Breaking:** `build_vrt_mosaic` and `create_rgb_vrt` raise `ValueError` for a south-up
   input (positive pixel height). Before, they wrote a south-up VRT; now warp the input
   north-up first, e.g. with `freezebase.vrt.warp`. `mosaic`, `stack` and `from_raster`
