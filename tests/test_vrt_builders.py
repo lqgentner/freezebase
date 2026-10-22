@@ -539,6 +539,16 @@ def _write(
 
 
 class TestDerive:
+    @pytest.mark.parametrize(("scale", "offset"), [(0.01, 0.0), (1.0, 5.0)])
+    def test_scaled_input_raises(self, tmp_path: Path, scale: float, offset: float) -> None:
+        src = _scaled(tmp_path / "s.tif", scale, offset)
+        plain = make_tiff(tmp_path / "p.tif", dtype="int16", nodata=-1)
+        # Previously the pixel function computed on the raw stored values.
+        with pytest.raises(ValueError, match=r"s\.tif.*scale or offset"):
+            derive(src, PixelFunction.db())
+        with pytest.raises(ValueError, match=r"s\.tif.*scale or offset"):
+            derive([plain, src], PixelFunction.div())
+
     def test_db_over_an_in_memory_mosaic_is_not_zero(self, tmp_path: Path) -> None:
         """A dB band over a two-tile band reads the mosaicked pixels."""
         # Previously a dB band over a two-tile band returned 0 everywhere.
