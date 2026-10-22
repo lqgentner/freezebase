@@ -5,7 +5,7 @@ import geopandas as gpd
 import numpy as np
 from pyproj import CRS
 import pytest
-from shapely import Point, Polygon, box, get_parts
+from shapely import Point, Polygon, box, get_parts, is_prepared
 
 from freezebase.mgrs import (
     MGRSGeoBox,
@@ -325,6 +325,11 @@ class TestMGRSGridFilterGeometryInput:
         # Empty geometries are nulled out, not dropped, to keep tree indices aligned.
         mixed = gpd.GeoSeries([Polygon(), ZURICH_AOI], crs="EPSG:4326")
         assert len(MGRSGrid(mixed)) == self.EXPECTED
+
+    def test_leaves_the_callers_geometry_unprepared(self) -> None:
+        aoi = box(8.4, 47.3, 8.6, 47.4)
+        MGRSGrid(aoi)
+        assert not is_prepared(aoi)
 
 
 class TestMGRSGridInExceptionZones:

@@ -650,6 +650,9 @@ class MGRSGrid:
         # STRtree ignores None but not empty geometries.
         non_empty = geoms.copy()
         non_empty[shapely.is_empty(non_empty)] = None
+        # Prepare copies so the caller's geometries are left untouched.
+        non_empty = shapely.from_wkb(shapely.to_wkb(non_empty))
+        shapely.prepare(non_empty)
         return shapely.STRtree(non_empty)
 
     def _make_subdivision_template(self) -> NDArray[np.int32]:
@@ -670,9 +673,12 @@ class MGRSGrid:
 
     def _intersects_any(self, geoms: GeoArray) -> NDArray[np.bool_]:
         """Return a boolean mask of geometries that intersect any filter geometry."""
-        hits = self._filter_tree.query(geoms, predicate="intersects")[0]
+        # Testing envelope matches against the prepared filter geometries avoids
+        # preparing every square, which is slow against a detailed area of interest.
+        square_idx, filter_idx = self._filter_tree.query(geoms)
+        hits = shapely.intersects(self._filter_tree.geometries[filter_idx], geoms[square_idx])
         mask = np.zeros(len(geoms), dtype=np.bool_)
-        mask[hits] = True
+        mask[square_idx[hits]] = True
         return mask
 
     def _materialize(self) -> None:
