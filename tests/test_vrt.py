@@ -18,7 +18,7 @@ from freezebase.vrt import (
     create_rgba_vrt,
     create_warped_vrt,
 )
-from freezebase.vrt._legacy import _nodata_equal
+from freezebase.vrt._model import _nodata_equal
 
 WIDTH, HEIGHT = 6, 4
 
