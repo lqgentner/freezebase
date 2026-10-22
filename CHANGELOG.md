@@ -15,6 +15,9 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   GeoParquet.
 - `http://` / `https://` paths in `rasterio_open` and every reader built on it, read
   through `/vsicurl/` with `GDAL_HTTP_OPTIONS`; `http_env()`.
+- `freezebase.vrt.VRT`, an editable model of a GDAL VRT (`Band`, `Source`,
+  `SourceProperties`, `PixelFunction`, `Warp`), serialized with `VRT.to_xml()`.
+  A `Source` may be another `VRT`, nested inline (needs GDAL ≥ 3.11).
 
 ### Changed
 

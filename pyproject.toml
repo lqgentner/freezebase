@@ -236,3 +236,5 @@ show_missing = true
 preset = "strict"
 # Check against the oldest supported Python, not the interpreter in .venv.
 python-version = "3.12"
+# Lets tests import the shared fixtures in `tests/rasters.py`.
+search-path = ["src", "."]
