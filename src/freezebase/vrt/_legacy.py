@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 from rasterio.enums import ColorInterp, Resampling
@@ -42,7 +43,9 @@ def create_decibel_vrt(
     from_intensity : bool, optional
         Use ``10*log10`` for intensity; otherwise use ``20*log10``.
     """
-    derived = derive(src_path, PixelFunction.db(10 if from_intensity else 20), description="dB")
+    derived = derive(
+        src_path, PixelFunction.db(10 if from_intensity else 20), description="dB", band=1
+    )
     derived.write(output_vrt)
 
 
@@ -100,6 +103,7 @@ def create_rgb_vrt(
     names = ("VV_dB", "VH_dB", "VV_dB-VH_dB") if decibel_scale else ("VV", "VH", "VV/VH")
     vrt = stack(
         [vv_path, vh_path],
+        bands=[[1], [1]],
         band_names=names[:2],
         color_interp=(ColorInterp.red, ColorInterp.green),
     )
@@ -110,6 +114,12 @@ def create_rgb_vrt(
     ).bands[0]
     blue.color_interp = ColorInterp.blue
     vrt.bands.append(blue)
+    # As in 0.8: float32 bands read raw values, with NaN as the only nodata.
+    for band in vrt.bands:
+        band.dtype = "float32"
+        band.nodata = math.nan
+        for source in band.sources:
+            source.nodata = None
     vrt.write(output_vrt)
 
 
@@ -161,10 +171,9 @@ def create_warped_vrt(
 ) -> None:
     """Create a warped VRT reprojecting a raster onto a fixed target grid.
 
-    Heights are shifted between vertical datums when both CRSs are compound or 3D.
-
     With ``snap``, the grid origin grows outward to a multiple of
-    ``resolution``, so warps of several sources land on one common grid.
+    ``resolution``, so warps of several sources land on one common grid. Heights are
+    shifted between vertical datums when both CRSs are compound or 3D.
 
     Parameters
     ----------
@@ -184,7 +193,7 @@ def create_warped_vrt(
     resampling : rasterio.enums.Resampling, optional
         Warp kernel; ``average`` suits downsampling to a coarser target.
     snap : bool, optional
-        Snap the derived extent onto the ``resolution`` grid. Ignored when
+        Snap the derived extent onto the target pixel grid. Ignored when
         ``bounds`` is given.
     dtype : str or None, optional
         Data type of the warped band. Defaults to the source's; promote to
