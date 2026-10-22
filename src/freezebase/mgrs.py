@@ -331,7 +331,7 @@ def _mgrs_10km_to_utm(match: re.Match[str]) -> tuple[int, Hemisphere, int, int]:
     square = _utm_squares_to_wgs84(
         zone, hemisphere, np.array([easting]), np.array([northing]), _10KM_SIZE
     )
-    if not _overlaps_zone(square, _zone_geometry(zone, hemisphere))[0]:
+    if not _overlaps_zone(square, zone, hemisphere)[0]:
         msg = f"MGRS reference {mgrs_code!r} lies outside UTM zone {zone}{hemisphere}."
         raise ValueError(msg)
     return zone, hemisphere, easting, northing
@@ -532,12 +532,31 @@ class UTMZones:
 _MIN_ZONE_OVERLAP = 1e-9
 
 
-def _overlaps_zone(boxes: GeoArray, zone_geom: BaseGeometry) -> NDArray[np.bool_]:
+def _overlaps_zone(boxes: GeoArray, zone: int, hemisphere: Hemisphere) -> NDArray[np.bool_]:
     """Return which boxes overlap a zone by more than rounding error."""
+    zone_geom = _zone_geometry(zone, hemisphere)
+    rects = _zone_rectangles(zone, hemisphere)
+    # Envelopes strictly inside one of the rectangles tiling the zone, or clear of all
+    # of them, settle most boxes without GEOS; the rest are tested exactly.
+    bounds = shapely.bounds(boxes)[:, np.newaxis, :]
+    inside = (
+        (bounds[..., 0] > rects[:, 0])
+        & (bounds[..., 1] > rects[:, 1])
+        & (bounds[..., 2] < rects[:, 2])
+        & (bounds[..., 3] < rects[:, 3])
+    ).any(axis=1)
+    near = (
+        (bounds[..., 0] <= rects[:, 2])
+        & (bounds[..., 1] <= rects[:, 3])
+        & (bounds[..., 2] >= rects[:, 0])
+        & (bounds[..., 3] >= rects[:, 1])
+    ).any(axis=1)
+    overlaps = inside
+    unsettled = np.flatnonzero(near & ~inside)
     # Predicates only use the prepared geometry when it is the first argument.
     shapely.prepare(zone_geom)
-    overlaps = shapely.intersects(zone_geom, boxes)
-    hits = np.flatnonzero(overlaps)
+    hits = unsettled[shapely.intersects(zone_geom, boxes[unsettled])]
+    overlaps[hits] = True
     # Only squares on the zone boundary need the costlier area test.
     edge = hits[~shapely.contains_properly(zone_geom, boxes[hits])]
     shared = shapely.area(shapely.intersection(boxes[edge], zone_geom))
@@ -546,9 +565,34 @@ def _overlaps_zone(boxes: GeoArray, zone_geom: BaseGeometry) -> NDArray[np.bool_
 
 
 @functools.cache
+def _utm_zones() -> UTMZones:
+    """Return the UTM zones, built once for the cached zone lookups."""
+    return UTMZones()
+
+
+@functools.cache
 def _zone_geometry(zone: int, hemisphere: Hemisphere) -> BaseGeometry:
     """Return the cached WGS84 geometry of a UTM zone."""
-    return UTMZones().get_zone_geometry(zone, hemisphere)
+    return _utm_zones().get_zone_geometry(zone, hemisphere)
+
+
+@functools.cache
+def _zone_rectangles(zone: int, hemisphere: Hemisphere) -> NDArray[np.float64]:
+    """Return the ``[west, south, east, north]`` rectangles tiling a zone by latitude slab."""
+    zone_geom = _zone_geometry(zone, hemisphere)
+    west, _, east, _ = zone_geom.bounds
+    latitudes = np.unique(shapely.get_coordinates(zone_geom)[:, 1])
+    middles = (latitudes[:-1] + latitudes[1:]) / 2
+    crossings = shapely.intersection(
+        zone_geom,
+        shapely.linestrings(
+            np.stack([np.full_like(middles, west), np.full_like(middles, east)], axis=-1),
+            np.stack([middles, middles], axis=-1),
+        ),
+    )
+    slab_west, _, slab_east, _ = shapely.bounds(crossings).T
+    # Zones are unions of lon/lat boxes, so each latitude slab is a single rectangle.
+    return np.column_stack([slab_west, latitudes[:-1], slab_east, latitudes[1:]])
 
 
 def _split_at_antimeridian(geoms: GeoArray) -> GeoArray:
@@ -764,7 +808,7 @@ class MGRSGrid:
         fine_x, fine_y = self._subdivide_coarse_coords(coarse_x, coarse_y)
         fine_boxes_wgs = _utm_10km_squares_to_wgs84(zone, hemisphere, coarse_x, coarse_y)
         mask = self._intersects_any(fine_boxes_wgs)
-        mask[mask] = _overlaps_zone(fine_boxes_wgs[mask], zone_geom_wgs)
+        mask[mask] = _overlaps_zone(fine_boxes_wgs[mask], zone, hemisphere)
         return fine_x[mask], fine_y[mask], fine_boxes_wgs[mask]
 
     def _build_coarse_coords(

@@ -1,16 +1,19 @@
 """Tests for freezebase.mgrs - MGRS grid system."""
 
+from typing import Literal
+
 from affine import Affine
 import geopandas as gpd
 import numpy as np
 from pyproj import CRS
 import pytest
-from shapely import Point, Polygon, box, equals_exact, get_parts, is_prepared
+from shapely import Point, Polygon, box, equals_exact, get_parts, is_prepared, union_all
 
 from freezebase.mgrs import (
     MGRSGeoBox,
     MGRSGrid,
     UTMZones,
+    _zone_rectangles,
     mgrs_to_crs,
     transform_shapely,
     utm_to_crs,
@@ -197,6 +200,13 @@ class TestUTMZoneExceptions:
                     offenders.append((lon, lat, zones))
 
         assert offenders == []
+
+    @pytest.mark.parametrize("hemisphere", ["N", "S"])
+    def test_latitude_slabs_tile_every_zone(self, hemisphere: Literal["N", "S"]) -> None:
+        # The grid settles most squares against these rectangles instead of the zone.
+        for zone in range(1, 61):
+            rects = _zone_rectangles(zone, hemisphere)
+            assert union_all(box(*rects.T)).equals(UTMZones().get_zone_geometry(zone, hemisphere))
 
 
 # ---------------------------------------------------------------------------
