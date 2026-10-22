@@ -44,6 +44,10 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   missing grid raises `ValueError` instead of silently ignoring a datum shift. `tolerance`
   is the approximation error in source pixels (0.125 by default, `0` for exact). Both
   settings are kept in the written VRT.
+- `warp` shifts heights between vertical datums when both the source CRS and `crs` are
+  compound or 3D geographic (e.g. `EPSG:2056+5728` to `EPSG:4979`), with exact transforms
+  under `tolerance="auto"`. Warping between a vertical and a 2D CRS raises `ValueError`; pass
+  a 2D `src_crs` to keep heights unconverted. PROJ needs the grids, e.g. via `PROJ_DATA`.
 - `VRT.metadata_domains` holds dataset metadata of named domains, such as the
   `IMAGE_STRUCTURE` interleaving GDAL records for a warped multi-band raster.
 

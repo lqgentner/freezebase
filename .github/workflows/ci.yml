@@ -60,6 +60,8 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+      - name: Sync the PROJ grids of the vertical-shift tests
+        run: uv run --python ${{ matrix.python-version }} --all-extras python -m pyproj sync --source-id ch_swisstopo
       - name: Run tests with coverage
         run: >
           uv run --python ${{ matrix.python-version }} --all-extras
@@ -86,6 +88,8 @@ jobs:
           enable-cache: true
       - name: Sync dependencies at their lower bounds
         run: uv sync --all-extras --resolution lowest-direct --python 3.12
+      - name: Sync the PROJ grids of the vertical-shift tests
+        run: uv run --no-sync python -m pyproj sync --source-id ch_swisstopo
       - name: Run tests
         # --no-sync keeps `uv run` from re-resolving the environment back to the
         # latest versions before running.

@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 from xml.etree import ElementTree as ET
 
 import numpy as np
+import pyproj
+from pyproj import Transformer
 import pytest
 import rasterio
 from rasterio.crs import CRS
@@ -16,33 +18,83 @@ from rasterio.transform import Affine
 from rasterio.warp import calculate_default_transform, reproject
 from upath import UPath
 
-from freezebase.vrt import VRT, from_raster, mosaic, read, warp
-from freezebase.vrt._warp import _set_transformer
+from freezebase.vrt import VRT, _warp, from_raster, mosaic, read, warp
+from freezebase.vrt._warp import _has_vertical, _set_transformer
 from tests.rasters import make_tiff
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
-DEM_ORIGIN = (2600000.0, 1200000.0)
+    from numpy.typing import NDArray
+
+
+@pytest.fixture
+def dem(tmp_path: Path) -> Path:
+    """Write a DEM of zeros in LV95 with LN02 heights."""
+    return make_tiff(
+        tmp_path / "dem_ln02.tif",
+        origin=(2620000.0, 1160000.0),
+        res=(100.0, 100.0),
+        size=(300, 300),
+        fill=0.0,
+        crs="EPSG:2056+5728",
+    )
+
+
+def _grid_env(proj_grids: Path) -> rasterio.Env:
+    """Point GDAL's PROJ at the synced grids, offline."""
+    return rasterio.Env(PROJ_DATA=str(proj_grids), PROJ_NETWORK="OFF")
+
+
+def _pyproj_shift(
+    src: str, dst: str, xs: NDArray[np.float64], ys: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """Return the height pyproj gives a zero height at ``(xs, ys)`` in ``src``, in ``dst``."""
+    transformer = Transformer.from_crs(
+        src, dst, always_xy=True, only_best=True, allow_ballpark=False
+    )
+    _, _, z = transformer.transform(xs, ys, np.zeros_like(xs), errcheck=True)
+    return np.asarray(z)
+
+
+def _shift_matches_pyproj(w: VRT, source: Path, src: str, dst: str) -> NDArray[np.float32]:
+    """Assert each warped pixel holds pyproj's shift at the source pixel it reads; return them."""
+    with w.open() as ds:
+        got = ds.read(1)
+    with rasterio.open(source) as ds:
+        src_transform, width, height = ds.transform, ds.width, ds.height
+    rows, cols = np.mgrid[0 : w.height, 0 : w.width]
+    # Written out, since affine's point operator differs across supported versions.
+    xs = w.transform.c + (cols + 0.5) * w.transform.a
+    ys = w.transform.f + (rows + 0.5) * w.transform.e
+    horizontal = Transformer.from_crs(
+        pyproj.CRS(dst).to_2d(), pyproj.CRS(src).to_2d(), always_xy=True
+    )
+    sx, sy = horizontal.transform(xs, ys)
+    src_cols = np.floor((sx - src_transform.c) / src_transform.a).astype(int)
+    src_rows = np.floor((sy - src_transform.f) / src_transform.e).astype(int)
+    # The outermost source pixels are left out: nearest may pick either side of the edge.
+    inside = (src_cols >= 1) & (src_cols < width - 1) & (src_rows >= 1) & (src_rows < height - 1)
+    assert inside.sum() > 1000
+    cx = src_transform.c + (src_cols[inside] + 0.5) * src_transform.a
+    cy = src_transform.f + (src_rows[inside] + 0.5) * src_transform.e
+    expected = _pyproj_shift(src, dst, cx, cy)
+    np.testing.assert_allclose(got[inside], expected, atol=0.02, rtol=0)
+    return got[inside]
 
 
 @pytest.fixture
 def no_grids(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Leave PROJ only rasterio's own data, without network, so no grid is reachable."""
+    # PROJ remembers a grid lookup for the whole process, so users need grids (EGM2008)
+    # that no test with proj_grids needs.
     proj_data = PROJDataFinder().search()
     if proj_data is None:
         pytest.skip("rasterio bundles no PROJ data")
     monkeypatch.delenv("PROJ_NETWORK", raising=False)
     with rasterio.Env(PROJ_DATA=proj_data, PROJ_NETWORK="OFF"):
         yield
-
-
-def _dem(tmp_path: Path) -> Path:
-    """Write a DEM of zeros in LV95 without a vertical datum."""
-    return make_tiff(
-        tmp_path / "dem.tif", origin=DEM_ORIGIN, res=(100.0, 100.0), fill=0.0, crs="EPSG:2056"
-    )
 
 
 class TestGrid:
@@ -251,6 +303,18 @@ class TestSources:
         with pytest.raises(ValueError, match=r"scale/offset or colour table.*<Scale>"):
             warp(src, crs="EPSG:4326", resolution=1e-4)
 
+    def test_other_parse_errors_are_not_relabelled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def reject(_xml: str) -> VRT:
+            """Fail as the parser does on an element unrelated to scale or colour."""
+            msg = "Unsupported VRT element <Foo>"
+            raise ValueError(msg)
+
+        monkeypatch.setattr(_warp, "from_xml", reject)
+        with pytest.raises(ValueError, match=r"^Unsupported VRT element <Foo>$"):
+            warp(make_tiff(tmp_path / "utm.tif"), crs="EPSG:4326", resolution=1e-4)
+
     def test_vrt_source_is_the_callers(self, tmp_path: Path) -> None:
         source = mosaic([make_tiff(tmp_path / "a.tif")])
         w = warp(source, crs="EPSG:4326", resolution=1e-4)
@@ -308,15 +372,20 @@ class TestOptions:
 
     @pytest.mark.parametrize("tolerance", [-1.0, math.nan])
     def test_rejects_negative_or_nan_tolerance(self, tmp_path: Path, tolerance: float) -> None:
-        with pytest.raises(ValueError, match="tolerance"):
+        with pytest.raises(ValueError, match=r"tolerance must be .* a non-negative number"):
             warp(make_tiff(tmp_path / "utm.tif"), crs="EPSG:4326", tolerance=tolerance)
 
     @pytest.mark.usefixtures("no_grids")
     def test_ballpark_is_refused(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="pyproj sync") as info:
-            warp(_dem(tmp_path), src_crs="EPSG:2056+5728", crs="EPSG:4979", resolution=1e-3)
+            warp(
+                make_tiff(tmp_path / "utm.tif", fill=0.0),
+                src_crs="EPSG:32632+3855",
+                crs="EPSG:4979",
+                resolution=1e-3,
+            )
         assert str(info.value).startswith(
-            "No exact transformation from CH1903+ / LV95 + LN02 height to EPSG:4979"
+            "No exact transformation from WGS 84 / UTM zone 32N + EGM2008 height to EPSG:4979"
         )
         assert "allow_ballpark=True" in str(info.value)
 
@@ -366,8 +435,8 @@ class TestOptions:
     @pytest.mark.usefixtures("no_grids")
     def test_allow_ballpark_opts_out(self, tmp_path: Path) -> None:
         w = warp(
-            _dem(tmp_path),
-            src_crs="EPSG:2056+5728",
+            make_tiff(tmp_path / "utm.tif", fill=0.0),
+            src_crs="EPSG:32632+3855",
             crs="EPSG:4979",
             resolution=1e-3,
             allow_ballpark=True,
@@ -375,3 +444,91 @@ class TestOptions:
         assert w.crs == CRS.from_epsg(4979)
         with w.open() as ds:
             assert ds.read(1).shape == (w.height, w.width)
+
+
+class TestVerticalShift:
+    def test_compound_to_3d_gives_ellipsoidal_heights(self, proj_grids: Path, dem: Path) -> None:
+        with _grid_env(proj_grids):
+            w = warp(dem, crs="EPSG:4979", resampling=Resampling.nearest)
+            got = _shift_matches_pyproj(w, dem, "EPSG:2056+5728", "EPSG:4979")
+        assert w.warp is not None
+        assert w.warp.vertical_shift
+        assert 51.0 < got.min() < got.max() < 54.0
+
+    def test_compound_to_compound(self, proj_grids: Path, dem: Path) -> None:
+        with _grid_env(proj_grids):
+            w = warp(dem, crs="EPSG:2056+5729", resampling=Resampling.nearest)
+            got = _shift_matches_pyproj(w, dem, "EPSG:2056+5728", "EPSG:2056+5729")
+        assert 0.05 < got.min() < got.max() < 1.0
+
+    def test_3d_to_compound(self, proj_grids: Path, tmp_path: Path) -> None:
+        src = make_tiff(
+            tmp_path / "ellipsoidal.tif",
+            origin=(7.7, 46.6),
+            res=(0.001, 0.001),
+            size=(300, 200),
+            fill=0.0,
+            crs="EPSG:4979",
+        )
+        with _grid_env(proj_grids):
+            w = warp(src, crs="EPSG:2056+5728", resampling=Resampling.nearest)
+            got = _shift_matches_pyproj(w, src, "EPSG:4979", "EPSG:2056+5728")
+        assert -54.0 < got.min() < got.max() < -51.0
+
+    def test_vertical_source_into_2d_target_raises(self, dem: Path) -> None:
+        with pytest.raises(ValueError, match="vertical") as info:
+            warp(dem, crs="EPSG:4326")
+        assert "pass a 3D or compound crs, or a 2D src_crs" in str(info.value)
+
+    def test_2d_source_into_vertical_target_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="vertical") as info:
+            warp(make_tiff(tmp_path / "utm.tif"), crs="EPSG:4979")
+        assert "pass a 3D or compound src_crs, or a 2D crs" in str(info.value)
+
+    def test_2d_src_crs_keeps_heights(self, dem: Path) -> None:
+        w = warp(dem, src_crs="EPSG:2056", crs="EPSG:4326")
+        assert w.warp is not None
+        assert not w.warp.vertical_shift
+        with w.open() as ds:
+            data = ds.read(1)
+        assert np.isfinite(data).any()
+        assert np.nanmin(data) == np.nanmax(data) == 0.0
+
+    def test_auto_tolerance_is_exact_with_a_shift(self, proj_grids: Path, dem: Path) -> None:
+        with _grid_env(proj_grids):
+            w = warp(dem, crs="EPSG:4979")
+            approx = warp(dem, crs="EPSG:4979", tolerance=0.5)
+        assert w.warp is not None
+        assert w.warp.vertical_shift
+        assert "ApproxTransformer" not in w.to_xml()
+        assert "<MaxError>0.5</MaxError>" in approx.to_xml()
+        plain = warp(dem, src_crs="EPSG:2056", crs="EPSG:4326")
+        assert "<MaxError>0.125</MaxError>" in plain.to_xml()
+
+    def test_written_shift_reopens_with_the_shift(
+        self, proj_grids: Path, dem: Path, tmp_path: Path
+    ) -> None:
+        with _grid_env(proj_grids):
+            w = warp(dem, crs="EPSG:4979", resampling=Resampling.nearest)
+            text = w.write(tmp_path / "w.vrt").read_text()
+            reread = read(tmp_path / "w.vrt")
+            with w.open() as ds, reread.open() as written:
+                expected = ds.read(1)
+                assert np.array_equal(written.read(1), expected, equal_nan=True)
+        assert '<Option name="APPLY_VERTICAL_SHIFT">YES</Option>' in text
+        assert '<Option key="ALLOW_BALLPARK">NO</Option>' in text
+        assert reread == w
+        assert np.nanmax(expected) > 50.0
+
+    @pytest.mark.parametrize(
+        ("crs", "expected"),
+        [
+            ("EPSG:2056+5728", True),
+            ("EPSG:5728", True),
+            ("EPSG:4979", True),
+            ("EPSG:4326", False),
+            ("EPSG:2056", False),
+        ],
+    )
+    def test_has_vertical(self, crs: str, expected: bool) -> None:
+        assert _has_vertical(CRS.from_user_input(crs)) is expected
