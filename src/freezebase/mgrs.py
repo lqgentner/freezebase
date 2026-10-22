@@ -790,7 +790,7 @@ class MGRSGrid:
         hemisphere: Hemisphere,
     ) -> tuple[NDArray[np.int32], NDArray[np.int32], GeoArray]:
         """Return the SW corners and WGS84 boxes of one zone's squares."""
-        zone_geom_wgs = self.utm_zones.get_zone_geometry(zone, hemisphere)
+        zone_geom_wgs = _zone_geometry(zone, hemisphere)
         coarse_x, coarse_y = self._build_coarse_coords(zone, hemisphere)
         coarse_boxes_wgs = _utm_squares_to_wgs84(
             zone,
@@ -831,8 +831,8 @@ class MGRSGrid:
             100 km-spaced eastings and northings.
         """
         cell_size = _100KM_SIZE
-        zone_geom_wgs = self.utm_zones.get_zone_geometry(zone=zone, hemisphere=hemisphere)
-        utm_crs = utm_to_crs(zone, hemisphere)
+        zone_geom_wgs = _zone_geometry(zone, hemisphere)
+        utm_crs = _cached_utm_crs(zone, hemisphere)
         zone_geom_utm = transform_shapely(zone_geom_wgs, WGS84, utm_crs)
         minx, miny, maxx, maxy = zone_geom_utm.bounds
 
