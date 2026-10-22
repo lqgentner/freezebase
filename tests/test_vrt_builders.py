@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pytest
@@ -641,3 +641,57 @@ class TestSouthUp:
     def test_from_raster_raises(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="south-up"):
             from_raster(self._south_up(tmp_path))
+
+
+def _scaled(path: Path, scale: float = 0.01, offset: float = 5.0, **kwargs: Any) -> Path:
+    """Write an int16 raster with a scale and offset."""
+    make_tiff(path, dtype="int16", nodata=-1, **kwargs)
+    with rasterio.open(path, "r+") as ds:
+        ds.scales, ds.offsets = (scale,), (offset,)
+    return path
+
+
+def _paletted(path: Path) -> Path:
+    """Write a uint8 raster with a colour table."""
+    make_tiff(path, dtype="uint8", nodata=None)
+    with rasterio.open(path, "r+") as ds:
+        ds.write_colormap(1, {0: (255, 0, 0, 255), 1: (0, 255, 0, 255)})
+    return path
+
+
+class TestScaleAndColourTable:
+    """Scale and offset are carried; a colour table, which the model can't hold, raises."""
+
+    def test_builders_carry_scale_and_offset(self, tmp_path: Path) -> None:
+        a = _scaled(tmp_path / "a.tif")
+        b = _scaled(tmp_path / "b.tif", origin=(500060.0, 5200000.0))
+        # Previously dropped: GDAL then read the raw integers as the values.
+        for v in (from_raster(a), stack([a]), mosaic([a, b])):
+            assert (v.bands[0].scale, v.bands[0].offset) == (0.01, 5.0)
+            with v.open() as ds:
+                assert (ds.scales, ds.offsets) == ((0.01,), (5.0,))
+
+    def test_unscaled_bands_have_none(self, tmp_path: Path) -> None:
+        band = from_raster(make_tiff(tmp_path / "a.tif")).bands[0]
+        assert (band.scale, band.offset) == (None, None)
+
+    @pytest.mark.parametrize(("scale", "offset"), [(0.02, 5.0), (0.01, 6.0)])
+    def test_mosaic_rejects_differing_scale_or_offset(
+        self, tmp_path: Path, scale: float, offset: float
+    ) -> None:
+        a = _scaled(tmp_path / "a.tif")
+        b = _scaled(tmp_path / "b.tif", scale, offset, origin=(500060.0, 5200000.0))
+        with pytest.raises(ValueError, match=r"scale and offset.*b\.tif"):
+            mosaic([a, b])
+
+    def test_colour_table_raises(self, tmp_path: Path) -> None:
+        pal = _paletted(tmp_path / "pal.tif")
+        plain = make_tiff(tmp_path / "plain.tif", dtype="uint8", nodata=None)
+        # Previously the band kept colour interpretation "palette" without its table.
+        for build in (
+            lambda: from_raster(pal),
+            lambda: stack([plain, pal]),
+            lambda: mosaic([plain, pal]),
+        ):
+            with pytest.raises(ValueError, match=r"pal\.tif.*colour table"):
+                build()

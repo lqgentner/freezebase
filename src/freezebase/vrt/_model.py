@@ -259,6 +259,8 @@ class Band:
         Band metadata items.
     pixel_function : PixelFunction | None, optional
         Pixel function combining the sources; setting it makes a derived band.
+    scale, offset : float | None, optional
+        Scale and offset turning pixel values into physical values; ``None`` writes none.
     """
 
     dtype: str
@@ -269,6 +271,8 @@ class Band:
     unit: str | None = None
     metadata: dict[str, str] = field(default_factory=dict)
     pixel_function: PixelFunction | None = None
+    scale: float | None = None
+    offset: float | None = None
 
     def __eq__(self, other: object) -> bool:
         """Compare all fields, treating NaN nodata as equal.

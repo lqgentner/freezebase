@@ -59,6 +59,9 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   a multi-band source raises `ValueError`. PROJ needs the grids, e.g. via `PROJ_DATA`.
 - `VRT.metadata_domains` holds dataset metadata of named domains, such as the
   `IMAGE_STRUCTURE` interleaving GDAL records for a warped multi-band raster.
+- `Band.scale` and `Band.offset` hold a band's `<Scale>` and `<Offset>`. `from_raster`,
+  `stack`, `mosaic` and `warp` carry them from their inputs; `mosaic` tiles must share
+  them. A colour table, which the model cannot hold, raises `ValueError` in all four.
 
 ### Changed
 
@@ -68,6 +71,13 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   input (positive pixel height). Before, they wrote a south-up VRT; now warp the input
   north-up first, e.g. with `freezebase.vrt.warp`. `mosaic`, `stack` and `from_raster`
   refuse such rasters too.
+- **Breaking:** `build_vrt_mosaic`, `create_rgb_vrt` and `create_warped_vrt` raise
+  `ValueError` for an input with a colour table. Before, `build_vrt_mosaic` and
+  `create_rgb_vrt` dropped the table and `create_warped_vrt` kept it; now expand the input
+  to RGB(A) first, e.g. with `gdal_translate -expand rgba`.
+- **Breaking:** `build_vrt_mosaic` writes the tiles' scale and offset, and raises
+  `ValueError` for tiles whose scale or offset differ. Before, it wrote neither, so readers
+  saw the raw stored values.
 - **Breaking:** `create_decibel_vrt` writes nodata where a source with non-NaN NODATA holds
   that value. Before, `10 * log10(nodata)` reached the output, e.g. `-inf` for a NODATA of
   0; now the output pixel is nodata (NaN). Mask `-inf` no longer; test for NaN instead.
