@@ -535,7 +535,8 @@ def rewrite_tiff(
     Raises
     ------
     ValueError
-        If ``move`` is set for a ``VRT`` source.
+        If ``move`` is set for a ``VRT`` source, or a per-band sequence for a ``VRT`` does
+        not hold one entry per band.
     RuntimeError
         If the rewrite fails.
     """
@@ -611,15 +612,16 @@ def _rewrite_vrt(
 ) -> None:
     """Apply the metadata to a copy of ``vrt`` and encode it in one staged copy."""
     vrt = copy.deepcopy(vrt)
+    # Outside the try: a bad argument is the caller's ValueError, as in write_cog.
+    _apply_vrt_metadata(
+        vrt,
+        band_names=band_names,
+        color_interp=color_interp,
+        tags=tags,
+        band_tags=band_tags,
+        units=units,
+    )
     try:
-        _apply_vrt_metadata(
-            vrt,
-            band_names=band_names,
-            color_interp=color_interp,
-            tags=tags,
-            band_tags=band_tags,
-            units=units,
-        )
         # Entered in the main thread: credentials set in a worker don't reach GDAL's readers.
         with vrt.env():
             _encode_cog(vrt.to_xml(), dst_file, {"driver": driver, **dst_profile}, checksum=False)

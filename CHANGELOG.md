@@ -153,10 +153,15 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ### Removed
 
-- **Breaking:** `merge_tiffs`. Before: `merge_tiffs([a, b], "out.tif")`.
-  After: `write_cog(vrt.mosaic([a, b]), "out.tif")` for a COG, or
-  `rewrite_tiff(vrt.mosaic([a, b]), "out.tif", profile)` for a GTiff;
-  `method="first"` is `vrt.mosaic(reversed(files))`; `min`/`max`/`sum`/`count`
+- **Breaking:** `merge_tiffs`, which wrote a GTiff with the first source's profile, the
+  first file winning overlaps. Before: `merge_tiffs([a, b], "out.tif")`. After:
+  `write_cog(vrt.mosaic(list(reversed(files)), band_names=..., nodata=...), "out.tif")` for
+  a COG (`write_cog` writes a COG, not the first source's profile), or
+  `rewrite_tiff(vrt.mosaic(list(reversed(files))), "out.tif", profile)` for a GTiff.
+  `mosaic` lets later files win, hence the reversal; band names, nodata, dtype and grid
+  origin now come from the last file, so pass `band_names=` and `nodata=` to keep the first
+  file's. `mosaic` raises `ValueError` for tiles that differ in nodata, dtype or band
+  count, which `rasterio.merge` accepted. `min`, `max`, `sum`, `count` and `mem_limit_mb`
   have no replacement.
 - **Breaking:** `MGRSGrid.utm_to_mgrs`, an undocumented `np.vectorize` wrapper
   around `mgrs.MGRS().UTMToMGRS` that grid construction left on the instance.
