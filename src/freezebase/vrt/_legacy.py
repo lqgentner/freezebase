@@ -14,7 +14,8 @@ from rasterio.vrt import WarpedVRT
 from rasterio.warp import transform_bounds
 from upath import UPath
 
-from freezebase.raster import _to_vsi_uri, _upload, rasterio_open
+from freezebase import raster
+from freezebase.raster import _to_vsi_uri, rasterio_open
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -75,7 +76,7 @@ def _write_vrt(root: ET.Element, dst: AnyPath) -> None:
     xml = ET.tostring(root, encoding="unicode")
     dst = UPath(dst)
     if dst.protocol == "s3":
-        _upload(xml.encode(), dst)
+        raster._upload(xml.encode(), dst)  # noqa: SLF001  # patched via the module in tests
     else:
         dst.write_text(xml)
 
@@ -560,7 +561,7 @@ def create_warped_vrt(
             with MemoryFile(ext=".vrt") as memfile:
                 rasterio.shutil.copy(vrt, memfile.name, driver="VRT")
                 xml = bytes(memfile.getbuffer())
-    _upload(xml, output_vrt)
+    raster._upload(xml, output_vrt)  # noqa: SLF001  # patched via the module in tests
 
 
 def _snap_out(

@@ -15,7 +15,7 @@ import rasterio.shutil
 from rasterio.transform import from_origin
 from upath import UPath
 
-from freezebase import raster, vrt
+from freezebase import raster
 from freezebase.raster import (
     COG_PROFILE,
     RASTERIO_PROFILE_DEFAULTS,
@@ -908,7 +908,6 @@ def s3_uploads(monkeypatch: pytest.MonkeyPatch) -> dict[str, bytes]:
         return real_open(fp, mode, *args, **kwargs)
 
     monkeypatch.setattr(raster, "_upload", record)
-    monkeypatch.setattr(vrt, "_upload", record)
     monkeypatch.setattr(rasterio.shutil, "copy", guarded_copy)
     monkeypatch.setattr(rasterio, "open", guarded_open)
     return uploads
