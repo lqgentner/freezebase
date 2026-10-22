@@ -16,7 +16,6 @@ from pyproj.exceptions import CRSError
 import rasterio
 import rasterio.env
 from rasterio.io import MemoryFile
-from rasterio.merge import merge
 import rasterio.shutil
 from upath import UPath
 
@@ -496,105 +495,8 @@ def group_tiffs_by_crs(src_tiffs: Sequence[AnyPath]) -> dict[str, list[UPath]]:
     return groups
 
 
-def merge_tiffs(
-    src_files: Sequence[AnyPath],
-    dst_file: AnyPath,
-    *,
-    method: str = "first",
-    mem_limit_mb: int = 10_000,
-    profile: dict[str, Any] | None = None,
-) -> None:
-    """Merge GeoTIFFs, preserving band names from the first source.
-
-    Parameters
-    ----------
-    src_files : Sequence[str | Path | UPath]
-        Source files, all in the same CRS.
-    dst_file : str | Path | UPath
-        Output file.
-    method : str, default "first"
-        Overlap method accepted by ``rasterio.merge.merge``.
-    mem_limit_mb : int, default 10000
-        Merge memory limit in megabytes.
-    profile : dict[str, Any] or None, optional
-        Output profile overrides.
-
-    Raises
-    ------
-    ValueError
-        If ``src_files`` is empty or contains different CRSs.
-    FileNotFoundError
-        If any source file does not exist.
-    RuntimeError
-        If merging fails.
-    """
-    if not src_files:
-        msg = "src_files list cannot be empty"
-        raise ValueError(msg)
-
-    dst_file = UPath(dst_file)
-    src_paths = [UPath(f) for f in src_files]
-
-    for src_path in src_paths:
-        if not src_path.exists():
-            msg = f"Source file not found: {src_path}"
-            raise FileNotFoundError(msg)
-
-    logger.info("Merging %d GeoTIFFs into '%s'", len(src_files), dst_file.name)
-
-    # rasterio.merge does not reject mismatched CRSs.
-    ref_crs = None
-    src_profile: dict[str, Any] = {}
-    descriptions: tuple[str | None, ...] = ()
-    for i, src_path in enumerate(src_paths):
-        with rasterio_open(src_path) as src:
-            if i == 0:
-                src_profile = dict(src.profile)
-                descriptions = src.descriptions
-                ref_crs = src.crs
-            elif src.crs != ref_crs:
-                msg = (
-                    f"All source files must share a CRS; '{src_path.name}' has {src.crs}, "
-                    f"expected {ref_crs}."
-                )
-                raise ValueError(msg)
-
-    # Preserve descriptions only when every band has one.
-    if descriptions and all(d is not None for d in descriptions):
-        band_names: list[str] | None = [d for d in descriptions if d is not None]
-    else:
-        band_names = None
-
-    dst_profile = build_rasterio_profile(src_profile, profile)
-    is_s3 = dst_file.protocol == "s3"
-
-    try:
-        with tempfile.TemporaryDirectory(prefix="freezebase-") as tmp:
-            # An S3 destination is merged locally and uploaded whole.
-            local_dst = Path(tmp) / dst_file.name
-            work_dst: AnyPath = local_dst if is_s3 else dst_file
-            # Credentials come from an S3 source, if any; the destination is local here.
-            env_path = next((p for p in src_paths if p.protocol == "s3"), src_paths[0])
-            with _env_for_path(env_path):
-                merge(
-                    [str(p) for p in src_paths],
-                    method=method,
-                    mem_limit=mem_limit_mb,
-                    dst_path=str(work_dst),
-                    dst_kwds=dst_profile,
-                )
-            _inject_band_metadata(work_dst, band_names=band_names)
-            if is_s3:
-                _upload(local_dst, dst_file)
-    except Exception as e:
-        msg = f"Failed to merge GeoTIFFs: {e}"
-        raise RuntimeError(msg) from e
-
-    logger.info("Successfully merged into '%s'", dst_file.name)
-
-
 def rewrite_tiff(
-    src_file: AnyPath,
+    src_file: AnyPath | VRT,
     dst_file: AnyPath,
     profile: dict[str, Any] | None = None,
     band_names: list[str] | None = None,
@@ -605,14 +507,14 @@ def rewrite_tiff(
     units: list[str] | None = None,
     move: bool = False,
 ) -> None:
-    """Rewrite a GeoTIFF locally or on S3 while preserving metadata.
+    """Rewrite a raster file or ``VRT`` locally or on S3 while preserving metadata.
 
     The staged write leaves an existing destination untouched on failure.
 
     Parameters
     ----------
-    src_file : str | Path | UPath
-        Source file.
+    src_file : str | Path | UPath | VRT
+        Source file or VRT.
     dst_file : str | Path | UPath
         Destination file. May equal ``src_file`` for an in-place rewrite.
     profile : dict[str, Any] or None, optional
@@ -632,12 +534,17 @@ def rewrite_tiff(
 
     Raises
     ------
+    ValueError
+        If ``move`` is set for a ``VRT`` source.
     RuntimeError
         If the rewrite fails.
     """
-    src_file = UPath(src_file)
+    from freezebase.vrt import VRT  # noqa: PLC0415  # freezebase.vrt imports raster
+
+    if isinstance(src_file, VRT) and move:
+        msg = "move needs a source file"
+        raise ValueError(msg)
     dst_file = UPath(dst_file)
-    in_place = src_file == dst_file
 
     dst_profile = build_rasterio_profile(profile)
     driver = dst_profile.pop("driver", "GTiff")
@@ -649,6 +556,23 @@ def rewrite_tiff(
         for _k in ("tiled", "blockxsize", "blockysize", "interleave"):
             dst_profile.pop(_k, None)
 
+    if isinstance(src_file, VRT):
+        _rewrite_vrt(
+            src_file,
+            dst_file,
+            driver=driver,
+            dst_profile=dst_profile,
+            band_names=band_names,
+            color_interp=color_interp,
+            tags=tags,
+            band_tags=band_tags,
+            units=units,
+        )
+        logger.debug("Rewrote a VRT to '%s'", dst_file.name)
+        return
+
+    src_file = UPath(src_file)
+    in_place = src_file == dst_file
     # The stage helpers configure each backend independently.
     stage = _rewrite_via_memory if dst_file.protocol == "s3" else _rewrite_via_tempfile
     try:
@@ -671,6 +595,37 @@ def rewrite_tiff(
         src_file.unlink()
 
     logger.debug("Rewrote GeoTIFF from '%s' to '%s'", src_file.name, dst_file.name)
+
+
+def _rewrite_vrt(
+    vrt: VRT,
+    dst_file: UPath,
+    *,
+    driver: str,
+    dst_profile: dict[str, Any],
+    band_names: list[str] | None,
+    color_interp: list[ColorInterp] | None,
+    tags: Mapping[str, str] | None,
+    band_tags: Sequence[Mapping[str, str]] | None,
+    units: list[str] | None,
+) -> None:
+    """Apply the metadata to a copy of ``vrt`` and encode it in one staged copy."""
+    vrt = copy.deepcopy(vrt)
+    try:
+        _apply_vrt_metadata(
+            vrt,
+            band_names=band_names,
+            color_interp=color_interp,
+            tags=tags,
+            band_tags=band_tags,
+            units=units,
+        )
+        # Entered in the main thread: credentials set in a worker don't reach GDAL's readers.
+        with vrt.env():
+            _encode_cog(vrt.to_xml(), dst_file, {"driver": driver, **dst_profile}, checksum=False)
+    except Exception as e:
+        msg = f"Failed to rewrite GeoTIFF: {e}"
+        raise RuntimeError(msg) from e
 
 
 def _rewrite_via_memory(

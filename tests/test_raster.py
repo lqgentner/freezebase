@@ -28,7 +28,6 @@ from freezebase.raster import (
     get_utm_zone_string,
     group_tiffs_by_crs,
     http_env,
-    merge_tiffs,
     rasterio_open,
     rewrite_tiff,
     utm_zone_to_crs,
@@ -367,77 +366,79 @@ class TestRewriteTiffLocal:
             assert (ds.read(1) == 1.0).all()
 
 
-class TestMergeTiffs:
-    def test_merges_same_crs_tiles(self, tmp_path: Path) -> None:
-        a = tmp_path / "a.tif"
-        b = tmp_path / "b.tif"
-        make_tiff(a, fill=1.0, origin=(500000, 5200000))
+class TestRewriteTiffVrt:
+    def test_rewrite_a_vrt_to_gtiff(self, tmp_path: Path) -> None:
+        a, b = tmp_path / "a.tif", tmp_path / "b.tif"
+        make_tiff(a, fill=1.0)
         make_tiff(b, fill=2.0, origin=(500000 + WIDTH * 10, 5200000))
-        dst = tmp_path / "merged.tif"
+        dst = tmp_path / "dst.tif"
 
-        merge_tiffs([a, b], dst)
+        rewrite_tiff(mosaic([a, b]), dst, {"driver": "GTiff"})
 
         with rasterio.open(dst) as ds:
             assert ds.width == WIDTH * 2
             assert ds.descriptions == ("VV",)
+            assert ds.read(1)[0, 0] == 1.0
+            assert ds.read(1)[0, -1] == 2.0
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["a.tif", "b.tif", "dst.tif"]
 
-    def test_rejects_mismatched_crs(self, tmp_path: Path) -> None:
-        a = tmp_path / "a.tif"
-        b = tmp_path / "b.tif"
-        make_tiff(a, crs="EPSG:32632")
-        make_tiff(b, crs="EPSG:32633")
-        dst = tmp_path / "merged.tif"
+    def test_rewrite_a_vrt_to_cog_keeps_the_model_untouched(self, tmp_path: Path) -> None:
+        src, dst = tmp_path / "src.tif", tmp_path / "dst.tif"
+        make_tiff(src)
+        vrt = from_raster(src)
 
-        with pytest.raises(ValueError, match="share a CRS"):
-            merge_tiffs([a, b], dst)
+        rewrite_tiff(vrt, dst, COG_PROFILE, band_names=["HH"], units=["dB"], tags={"B": "2"})
 
-    def test_handles_missing_descriptions(self, tmp_path: Path) -> None:
-        # A source without band descriptions must not crash metadata injection.
-        a = tmp_path / "a.tif"
-        make_tiff(a, description=None)
-        dst = tmp_path / "merged.tif"
+        assert_is_cog(dst)
+        with rasterio.open(dst) as ds:
+            assert ds.descriptions == ("HH",)
+            assert ds.units == ("dB",)
+            assert ds.tags()["B"] == "2"
+        assert vrt.bands[0].description == "VV"
+        assert "B" not in vrt.metadata
 
-        merge_tiffs([a], dst)
+    def test_rewrite_vrt_with_move_raises(self, tmp_path: Path) -> None:
+        src = tmp_path / "src.tif"
+        make_tiff(src)
+
+        with pytest.raises(ValueError, match="move needs a source file"):
+            rewrite_tiff(from_raster(src), tmp_path / "dst.tif", move=True)
+
+        assert not (tmp_path / "dst.tif").exists()
+
+    def test_rewrite_vrt_failure_keeps_the_destination(self, tmp_path: Path) -> None:
+        src, dst = tmp_path / "src.tif", tmp_path / "dst.tif"
+        make_tiff(src)
+        make_tiff(dst, fill=9.0)
+
+        with pytest.raises(RuntimeError, match="Failed to rewrite"):
+            rewrite_tiff(from_raster(src), dst, {"driver": "NotARealDriver"})
+
+        assert not list(tmp_path.glob(f".{dst.name}.*.tmp"))
+        with rasterio.open(dst) as ds:
+            assert (ds.read(1) == 9.0).all()
+
+    def test_rewrite_vrt_wraps_a_band_length_error(self, tmp_path: Path) -> None:
+        src = tmp_path / "src.tif"
+        make_tiff(src)
+
+        with pytest.raises(RuntimeError, match="one entry per band"):
+            rewrite_tiff(from_raster(src), tmp_path / "dst.tif", units=["a", "b"])
+
+    def test_rewrite_merges_tags(self, tmp_path: Path) -> None:
+        src, dst = tmp_path / "src.tif", tmp_path / "dst.tif"
+        make_tiff(src)
+        with rasterio.open(src, "r+") as ds:
+            ds.update_tags(A="1")
+
+        rewrite_tiff(from_raster(src), dst, tags={"B": "2"})
 
         with rasterio.open(dst) as ds:
-            assert ds.descriptions == (None,)
+            assert ds.tags()["A"] == "1"
+            assert ds.tags()["B"] == "2"
 
-    def test_rejects_empty_input(self, tmp_path: Path) -> None:
-        with pytest.raises(ValueError, match="cannot be empty"):
-            merge_tiffs([], tmp_path / "merged.tif")
-
-    def test_missing_source_raises_before_any_write(self, tmp_path: Path) -> None:
-        present = tmp_path / "a.tif"
-        make_tiff(present)
-        dst = tmp_path / "merged.tif"
-
-        with pytest.raises(FileNotFoundError, match="Source file not found"):
-            merge_tiffs([present, tmp_path / "absent.tif"], dst)
-
-        assert not dst.exists()
-
-    def test_merge_failure_is_wrapped_in_runtime_error(self, tmp_path: Path) -> None:
-        a = tmp_path / "a.tif"
-        make_tiff(a)
-        dst = tmp_path / "merged.tif"
-
-        with pytest.raises(RuntimeError, match="Failed to merge GeoTIFFs"):
-            merge_tiffs([a], dst, method="not-a-real-method")
-
-        # A failed merge must not leave a half-written destination behind.
-        assert not dst.exists()
-
-    def test_preserves_band_names_from_first_source(self, tmp_path: Path) -> None:
-        a = tmp_path / "a.tif"
-        b = tmp_path / "b.tif"
-        make_tiff(a, description="VH")
-        make_tiff(b, origin=(500000 + WIDTH * 10, 5200000), description="VH")
-        dst = tmp_path / "merged.tif"
-
-        merge_tiffs([a, b], dst)
-
-        with rasterio.open(dst) as ds:
-            assert ds.descriptions == ("VH",)
+    def test_merge_tiffs_is_gone(self) -> None:
+        assert not hasattr(raster, "merge_tiffs")
 
 
 class TestWriteCog:
@@ -1003,11 +1004,11 @@ class TestS3WritesUploadThroughS3fs:
             fail_mid_write()
         assert other not in s3_uploads
 
-    def test_merge_tiffs(self, tmp_path: Path, s3_uploads: dict[str, bytes]) -> None:
+    def test_rewrite_a_vrt(self, tmp_path: Path, s3_uploads: dict[str, bytes]) -> None:
         a, b = tmp_path / "a.tif", tmp_path / "b.tif"
         make_tiff(a, fill=1)
         make_tiff(b, fill=2, origin=(500000 + WIDTH * 10, 5200000))
-        merge_tiffs([a, b], UPath(self.dst))
+        rewrite_tiff(mosaic([a, b]), UPath(self.dst), COG_PROFILE)
         with rasterio.open(_landed(s3_uploads, self.dst, tmp_path)) as ds:
             assert ds.width == 2 * WIDTH
             assert ds.descriptions == ("VV",)
