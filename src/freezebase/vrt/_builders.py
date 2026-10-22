@@ -349,7 +349,8 @@ def mosaic(
         snapped to it and fill only the output pixels whose centre they contain. One of
         nearest, bilinear, cubic, cubic_spline, lanczos, average, rms, mode or gauss.
     nodata : float | None, optional
-        NODATA of every band and source, replacing the first tile's.
+        NODATA of every band, replacing the first tile's. Tiles keep their own NODATA
+        pixels transparent; tiles without one treat ``nodata`` as theirs.
     band_names : Sequence[str] | None, optional
         Description of each band, replacing the first tile's.
     color_interp : Sequence[ColorInterp] | None, optional
@@ -364,10 +365,11 @@ def mosaic(
     Raises
     ------
     ValueError
-        If ``sources`` is empty, the tiles are incompatible, off the pixel grid (with
-        ``resolution=None``), rotated, south-up or with a colour table, ``bounds`` is not
-        whole pixels, ``resolution`` is not positive, ``resampling`` is not supported, or
-        ``band_names`` or ``color_interp`` do not match the band count.
+        If ``sources`` is empty, ``nodata`` does not fit in a band's dtype, the tiles are
+        incompatible, off the pixel grid (with ``resolution=None``), rotated, south-up or
+        with a colour table, ``bounds`` is not whole pixels, ``resolution`` is not
+        positive, ``resampling`` is not supported, or ``band_names`` or ``color_interp``
+        do not match the band count.
     """
     if not sources:
         msg = "sources must not be empty."
@@ -389,13 +391,16 @@ def mosaic(
 
     out: list[Band] = []
     for i in range(first.count):
-        band_nodata = first.nodatavals[i] if nodata is None else nodata
+        native = first.nodatavals[i]
+        _check_nodata_fits(first.dtypes[i], nodata)
         band = _band(first, i)
-        band.nodata = band_nodata
+        band.nodata = native if nodata is None else nodata
+        # Tiles keep their own NODATA, so its pixels stay transparent under an override.
+        source_nodata = band.nodata if native is None else native
         band.sources = [
             source
             for info in infos
-            if (source := _mosaic_source(info, i, grid, band_nodata, resampling)) is not None
+            if (source := _mosaic_source(info, i, grid, source_nodata, resampling)) is not None
         ]
         if band_names is not None:
             band.description = band_names[i]

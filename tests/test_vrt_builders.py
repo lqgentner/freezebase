@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -202,6 +203,31 @@ class TestMosaicAligned:
         assert [s.nodata for s in vrt.bands[0].sources] == [0.0, 0.0]
         assert "<ComplexSource" in vrt.to_xml()
         assert "<NODATA>0" in vrt.to_xml()
+
+    def test_nodata_override_keeps_native_nodata_on_sources(self, tmp_path: Path) -> None:
+        a = _write(tmp_path / "a.tif", np.full((1, 2, 2), 1, "float32"), nodata=-9999)
+        b = _write(
+            tmp_path / "b.tif", np.array([[[-9999, -9999], [5, 5]]], "float32"), nodata=-9999
+        )
+        vrt = mosaic([a, b], nodata=np.nan)
+        assert [s.nodata for s in vrt.bands[0].sources] == [-9999, -9999]
+        # Previously b's -9999 drew over a's 1 and then counted as valid under NaN nodata.
+        with vrt.open() as ds:
+            assert math.isnan(ds.nodata)
+            np.testing.assert_array_equal(ds.read(1), [[1, 1], [5, 5]])
+        with mosaic([b], nodata=np.nan).open() as ds:
+            np.testing.assert_array_equal(ds.read(1), [[np.nan, np.nan], [5, 5]])
+
+    def test_nodata_override_still_needs_one_native_nodata(self, tmp_path: Path) -> None:
+        a = _write(tmp_path / "a.tif", np.ones((1, 2, 2), "float32"), nodata=-9999)
+        b = _write(tmp_path / "b.tif", np.ones((1, 2, 2), "float32"), nodata=0)
+        with pytest.raises(ValueError, match="NODATA"):
+            mosaic([a, b], nodata=np.nan)
+
+    def test_nodata_override_must_fit_dtype(self, tmp_path: Path) -> None:
+        a = _write(tmp_path / "a.tif", np.ones((1, 2, 2), "uint16"), nodata=0)
+        with pytest.raises(ValueError, match=r"nodata nan .*uint16"):
+            mosaic([a], nodata=np.nan)
 
     def test_rejects_mismatched_band_count(self, tmp_path: Path) -> None:
         a = make_tiff(tmp_path / "a.tif")
