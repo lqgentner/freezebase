@@ -1151,6 +1151,21 @@ class TestDiscovery:
             assert ds.count == 1
         create_warped_vrt(foreign, tmp_path / "w.vrt", crs="EPSG:3857", resolution=20.0)
 
+    def test_unmapped_vsi_sources_are_skipped(self, tmp_path: Path) -> None:
+        tile = UPath(make_tiff(tmp_path / "a.tif"))
+        foreign = tmp_path / "foreign.vrt"
+        zipped = '<SimpleSource><SourceFilename relativeToVRT="0">/vsizip/x.zip/t.tif'
+        foreign.write_text(
+            FOREIGN_VRT.replace(
+                "</VRTRasterBand>", f"{zipped}</SourceFilename></SimpleSource></VRTRasterBand>"
+            )
+        )
+        top = VRT(None, UTM_GRID, 1, 1, [Band("float32", [Source(UPath(foreign))])])
+        # Previously "Unsupported GDAL path"; discovery cannot map it, so it is not listed.
+        assert top.source_files() == [tile]
+        with top.env():
+            pass
+
     def test_cycles_end(self, tmp_path: Path) -> None:
         tile = UPath(make_tiff(tmp_path / "t.tif"))
         a, b = tmp_path / "a.vrt", tmp_path / "b.vrt"
