@@ -6,6 +6,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the project is pre-1.0 (`0.x`), minor releases may contain breaking changes.
 
+## Unreleased
+
+### Changed
+
+- `mgrs` is no longer a dependency. MGRS references are now computed with NumPy
+  and pyproj, giving the same codes and squares as `mgrs` (GeoTrans) except for
+  the fixes below. `MGRSGrid` builds about a third faster.
+- **Breaking:** `MGRSGeoBox.from_mgrs` raises `ValueError` for every reference
+  that uses letters its zone lacks or names a square outside its latitude band
+  or UTM zone. Before, GeoTrans rejected some with `mgrs.core.MGRSError` (band X
+  in zones 32, 34 and 36; letters not used in the zone; squares past the
+  equator), only warned about squares outside their band
+  (`from_mgrs("32TMA00")` emitted a `RuntimeWarning`), and silently accepted
+  squares outside their zone (`from_mgrs("31VFH00")` returned a square at 5°E,
+  east of where zone 31V ends at 3°E). Now all of these raise `ValueError`;
+  catch that instead of `MGRSError`.
+- **Breaking:** `MGRSGeoBox.from_mgrs` stores the reference in the form
+  `MGRSGrid` uses: upper case, two-digit zone, no surrounding spaces. Before,
+  `from_mgrs("4QFJ15").mgrs_code` was `"4QFJ15"`; now it is `"04QFJ15"`.
+
+### Removed
+
+- **Breaking:** `MGRSGrid.utm_to_mgrs`, an undocumented `np.vectorize` wrapper
+  around `mgrs.MGRS().UTMToMGRS` that grid construction left on the instance.
+  Before: `grid.utm_to_mgrs(zones, hemispheres, eastings, northings,
+  MGRSPrecision=1)`. After: read `grid.mgrs_codes`, which holds the grid's codes.
+
+### Fixed
+
+- **Breaking:** `MGRSGrid` no longer mislabels zone-31 squares on the 3°E edge of
+  zone 31V (56–64°N). Before, squares that touched the zone only along that edge
+  were included and named after a different zone-32 square, e.g. `32VJH22` for
+  the zone-31 square at easting 500000, so codes repeated and `from_mgrs`
+  rebuilt the wrong square. Now those squares are dropped, and zone-31 squares
+  that reach past 64°N keep a `31V` code.
+- **Breaking:** `MGRSGrid` no longer names squares in band X in zones 32, 34 and
+  36, which have no band X. Before, the one square per zone straddling 72°N was
+  coded from its SW corner just north of it, e.g. `32XNE69`, and `from_mgrs`
+  rejected that code. Now it is `32WNE69`.
+- **Breaking:** `MGRSGrid` geometries no longer wrap around the globe at the
+  antimeridian. Before, a square crossing 180° became a polygon spanning every
+  longitude, and squares beyond 180° were kept in zones 1–6 and 55–60 because
+  that polygon overlapped them. Now crossing squares are split at 180° into a
+  two-part `MultiPolygon`, and the spurious squares are gone.
+
 ## [0.8.0] - 2026-09-21
 
 ### Added

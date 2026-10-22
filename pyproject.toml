@@ -37,7 +37,6 @@ dynamic = ["version"]
 dependencies = [
     "affine>=2.4.0",
     "geopandas>=1.1",
-    "mgrs>=1.4.4",
     # Required because the code uses `np.concat`
     "numpy>=2.0",
     "odc-geo>=0.5.0",

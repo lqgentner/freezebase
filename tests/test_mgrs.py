@@ -5,7 +5,7 @@ import geopandas as gpd
 import numpy as np
 from pyproj import CRS
 import pytest
-from shapely import Point, Polygon, box
+from shapely import Point, Polygon, box, get_parts
 
 from freezebase.mgrs import (
     MGRSGeoBox,
@@ -367,6 +367,96 @@ class TestMGRSGridInExceptionZones:
 
         assert gdf.geometry.intersects(aoi).all()
 
+    @pytest.mark.parametrize(
+        "aoi",
+        [
+            box(2.5, 59.0, 3.5, 60.0),  # across 3 E, where zone 31V ends
+            box(2.5, 63.5, 3.5, 64.5),  # where zone 31 widens again at 64 N
+        ],
+    )
+    def test_zone_31v_edge_squares_keep_their_zone(self, aoi: Polygon) -> None:
+        # Previously, zone-31 squares on the 3 E edge took the code of a zone-32 square.
+        gdf = MGRSGrid(aoi).to_geodataframe()
+
+        assert (gdf.mgrs_code.str[:2].astype(int) == gdf.zone).all()
+        assert gdf.mgrs_code.is_unique
+
+    def test_zone_31v_drops_squares_that_only_touch_the_zone(self) -> None:
+        # Squares east of 3 E between 56 and 64 N lie outside zone 31 but for rounding.
+        gdf = MGRSGrid(box(2.5, 59.0, 3.5, 60.0)).to_geodataframe()
+        zone_31 = gdf[gdf.zone == 31]
+
+        assert len(zone_31) > 0
+        assert (zone_31.easting < 500_000).all()
+
+    @pytest.mark.parametrize(("zone", "west"), [(32, 9.0), (34, 21.0), (36, 33.0)])
+    def test_zones_without_band_x_name_squares_at_72n_in_band_w(
+        self,
+        zone: int,
+        west: float,
+    ) -> None:
+        # Previously named one square per zone in band X, which `from_mgrs` rejected.
+        gdf = MGRSGrid(box(west, 71.8, west + 3, 72.0)).to_geodataframe()
+        codes = gdf[gdf.zone == zone].mgrs_code
+
+        assert len(codes) > 0
+        assert not codes.str[2].eq("X").any()
+
+    def test_zone_31_squares_crossing_64n_keep_a_31v_code(self) -> None:
+        # Their SW corner lies in 31V's truncated part, but they overlap zone 31 north of 64 N.
+        gdf = MGRSGrid(box(2.5, 63.5, 3.5, 64.5)).to_geodataframe()
+        crossing = gdf[(gdf.zone == 31) & (gdf.easting >= 500_000)]
+
+        assert len(crossing) > 0
+        assert crossing.mgrs_code.str.startswith("31V").any()
+
+
+class TestMGRSGridAtAntimeridian:
+    """Squares whose WGS84 outline crosses 180 degrees."""
+
+    def test_crossing_squares_are_split_at_180(self) -> None:
+        gdf = MGRSGrid(box(179.9, -17.0, 180.0, -16.9)).to_geodataframe()
+        split = gdf[gdf.geom_type == "MultiPolygon"]
+
+        assert len(split) > 0
+        for square in split.geometry:
+            beyond_180, before_180 = sorted(get_parts(square), key=lambda part: part.bounds[0])
+            assert beyond_180.bounds[0] == -180
+            assert before_180.bounds[2] == 180
+
+    def test_squares_beyond_180_do_not_wrap_into_the_zone(self) -> None:
+        # Previously squares west of 180 E wrapped into a globe-spanning box that
+        # overlapped zone 2, far from them.
+        gdf = MGRSGrid(box(-173.5, -72.1, -172.5, -71.9)).to_geodataframe()
+        bounds = gdf.bounds
+
+        assert len(gdf) > 0
+        assert (bounds.maxx - bounds.minx < 1).all()
+
+
+@pytest.mark.parametrize(
+    "aoi",
+    [
+        box(-158.5, 20.5, -157.0, 21.8),  # Hawaii
+        box(-75.5, -1.0, -74.5, 1.0),  # across the equator
+        box(-73.5, -50.0, -72.5, -49.0),  # Patagonia
+        box(166.0, -80.3, 167.5, -79.6),  # band C, at 80 S
+        box(2.5, 55.5, 3.5, 64.5),  # Norway, both ends of zone 31V
+        box(14.0, 79.5, 16.0, 80.5),  # Svalbard, band X
+        box(9.0, 71.8, 12.0, 72.0),  # zone 32 at 72 N, where band X is absent
+        box(179.9, -17.0, 180.0, -16.9),  # Fiji, across the antimeridian
+    ],
+)
+def test_grid_squares_round_trip_through_from_mgrs(aoi: Polygon) -> None:
+    grid = MGRSGrid(aoi)
+
+    assert len(grid) > 0
+    assert len(set(grid.mgrs_codes)) == len(grid)
+    for square in grid:
+        rebuilt = MGRSGeoBox.from_mgrs(square.mgrs_code)
+        assert square.crs == rebuilt.crs
+        assert square.affine == rebuilt.affine
+
 
 # ---------------------------------------------------------------------------
 # MGRSGeoBox
@@ -388,6 +478,14 @@ class TestMGRSGeoBox:
         assert cell.crs is not None
         assert cell.crs.to_epsg() == 32632
 
+    @pytest.mark.parametrize(
+        ("mgrs_code", "expected"),
+        [("4QFJ15", "04QFJ15"), ("32tmt64", "32TMT64"), (" 32TMT64 ", "32TMT64")],
+    )
+    def test_from_mgrs_normalises_the_code(self, mgrs_code: str, expected: str) -> None:
+        # Previously kept the caller's spelling, which differed from MGRSGrid's codes.
+        assert MGRSGeoBox.from_mgrs(mgrs_code).mgrs_code == expected
+
     def test_from_mgrs_rejects_non_positive_resolution(self) -> None:
         with pytest.raises(ValueError, match="resolution must be positive"):
             MGRSGeoBox.from_mgrs("32TMT64", resolution=0)
@@ -401,6 +499,61 @@ class TestMGRSGeoBox:
         # A 100 km reference must not be silently treated as a 10 km cell.
         with pytest.raises(ValueError, match="10 km MGRS reference"):
             MGRSGeoBox.from_mgrs("32TMT")
+
+    # SW corners as computed by GeoTrans.
+    @pytest.mark.parametrize(
+        ("mgrs_code", "epsg", "easting", "northing"),
+        [
+            ("32TMT64", 32632, 460_000, 5_240_000),
+            ("04QFJ15", 32604, 610_000, 2_350_000),
+            ("4QFJ15", 32604, 610_000, 2_350_000),
+            ("33XWG06", 32633, 500_000, 8_660_000),
+            ("31VCH41", 32631, 340_000, 6_710_000),
+            ("34DEF12", 32734, 510_000, 2_020_000),
+            ("23MPN98", 32723, 690_000, 9_280_000),
+            ("58CEU21", 32758, 520_000, 1_310_000),
+            ("17NQA00", 32617, 700_000, 0),
+            ("60XWG00", 32660, 500_000, 8_100_000),
+            ("01CDN90", 32701, 490_000, 1_200_000),
+            ("18LUL55", 32718, 350_000, 8_550_000),
+            ("32tmt64", 32632, 460_000, 5_240_000),
+        ],
+    )
+    def test_from_mgrs_places_the_square(
+        self,
+        mgrs_code: str,
+        epsg: int,
+        easting: int,
+        northing: int,
+    ) -> None:
+        cell = MGRSGeoBox.from_mgrs(mgrs_code)
+
+        assert cell.crs is not None
+        assert cell.crs.to_epsg() == epsg
+        assert cell.affine == Affine(10, 0, easting, 0, -10, northing + 10_000)
+
+    @pytest.mark.parametrize(
+        ("mgrs_code", "match"),
+        [
+            ("32XMG00", "zone 32 has no band X"),
+            ("32TAT64", "has no square AT"),  # zone 32 columns run J-R
+            ("32TMW64", "has no square MW"),  # rows run A-V
+            ("61TMT64", "UTM zone"),
+            ("32TMA00", "outside latitude band T"),
+            ("21MZB00", "outside latitude band M"),  # north of the equator
+            ("31VFH00", "outside UTM zone 31N"),  # east of where 31V ends at 3 E
+            ("31VEH00", "outside UTM zone 31N"),  # touches 31V only along 3 E
+            ("31XGF00", "outside UTM zone 31N"),  # east of 31X, which ends at 9 E
+            ("01CAM00", "outside UTM zone 1S"),  # 400 km west of the meridian at 80 S
+        ],
+    )
+    def test_from_mgrs_rejects_squares_outside_zone_and_band(
+        self,
+        mgrs_code: str,
+        match: str,
+    ) -> None:
+        with pytest.raises(ValueError, match=match):
+            MGRSGeoBox.from_mgrs(mgrs_code)
 
 
 class TestMgrsToCrs:
