@@ -133,6 +133,33 @@ class TestToXml:
             assert ds.tags(ns="x") == {"B": "2"}
         assert from_xml(v.to_xml()) == v
 
+    def test_empty_metadata_domain_raises(self, tmp_path: Path) -> None:
+        v = vrt_over(make_tiff(tmp_path / "a.tif"))
+        v.metadata_domains = {"": {"A": "1"}}
+        with pytest.raises(ValueError, match="domain"):
+            v.to_xml()
+
+    def test_missing_color_interp_round_trips(self, tmp_path: Path) -> None:
+        """GDAL leaves out ColorInterp on bands 2..n of a multi-band warp; so does the model."""
+        tile = make_tiff(tmp_path / "rgb.tif", count=3)
+        gdal_xml = gdal_warped_xml(str(tile))
+        with rasterio.open(gdal_xml) as ds:
+            expected = ds.colorinterp
+        v = from_xml(gdal_xml)
+        assert [band.color_interp for band in v.bands] == [
+            ColorInterp.gray,
+            ColorInterp.undefined,
+            ColorInterp.undefined,
+        ]
+
+        def color_interps(xml: str) -> list[str | None]:
+            return [band.findtext("ColorInterp") for band in parse(xml).iter("VRTRasterBand")]
+
+        assert color_interps(v.to_xml()) == color_interps(gdal_xml) == ["Gray", None, None]
+        assert from_xml(v.to_xml()).to_xml() == v.to_xml()
+        with v.open() as ds:
+            assert ds.colorinterp == expected
+
     def test_every_color_interp_round_trips(self, tmp_path: Path) -> None:
         tile = make_tiff(tmp_path / "a.tif")
         v = vrt_over(tile)

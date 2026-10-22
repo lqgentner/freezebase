@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from typing import TYPE_CHECKING
+from xml.etree import ElementTree as ET
 
 import numpy as np
 import pytest
@@ -156,7 +157,14 @@ class TestGrid:
         mislabelled = make_tiff(tmp_path / "a.tif", crs="EPSG:32632")
         labelled = make_tiff(tmp_path / "b.tif", crs="EPSG:32633")
         w = warp(mislabelled, src_crs="EPSG:32633", crs="EPSG:4326")
-        assert w.transform == warp(labelled, crs="EPSG:4326").transform
+        expected = warp(labelled, crs="EPSG:4326")
+        assert w.transform == expected.transform
+        assert w.warp is not None
+        source_srs = ET.fromstring(w.warp.options_xml).find(".//SourceSRS")  # noqa: S314
+        assert source_srs is not None
+        assert CRS.from_user_input(source_srs.text or "") == CRS.from_epsg(32633)
+        with w.open() as ds, expected.open() as ref:
+            assert np.array_equal(ds.read(1), ref.read(1), equal_nan=True)
 
 
 class TestPixels:
@@ -235,6 +243,20 @@ class TestSources:
             assert ds.count == 3
             assert ds.tags(ns="IMAGE_STRUCTURE")["INTERLEAVE"] == "PIXEL"
 
+    def test_scaled_source_is_named_in_the_error(self, tmp_path: Path) -> None:
+        src = make_tiff(tmp_path / "scaled.tif")
+        with rasterio.open(src, "r+") as ds:
+            ds.scales = (2.0,)
+        # Previously raised the bare "Unsupported VRT element <Scale>".
+        with pytest.raises(ValueError, match=r"scale/offset or colour table.*<Scale>"):
+            warp(src, crs="EPSG:4326", resolution=1e-4)
+
+    def test_vrt_source_is_the_callers(self, tmp_path: Path) -> None:
+        source = mosaic([make_tiff(tmp_path / "a.tif")])
+        w = warp(source, crs="EPSG:4326", resolution=1e-4)
+        assert w.warp is not None
+        assert w.warp.source is source
+
 
 class TestOptions:
     def test_written_warp_keeps_its_options(self, tmp_path: Path) -> None:
@@ -284,9 +306,10 @@ class TestOptions:
         assert approx.warp is not None
         assert "<MaxError>0.5</MaxError>" in approx.warp.options_xml
 
-    def test_rejects_negative_tolerance(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("tolerance", [-1.0, math.nan])
+    def test_rejects_negative_or_nan_tolerance(self, tmp_path: Path, tolerance: float) -> None:
         with pytest.raises(ValueError, match="tolerance"):
-            warp(make_tiff(tmp_path / "utm.tif"), crs="EPSG:4326", tolerance=-1.0)
+            warp(make_tiff(tmp_path / "utm.tif"), crs="EPSG:4326", tolerance=tolerance)
 
     @pytest.mark.usefixtures("no_grids")
     def test_ballpark_is_refused(self, tmp_path: Path) -> None:
@@ -303,9 +326,42 @@ class TestOptions:
             '<Options><Option key="ONLY_BEST">YES</Option></Options>'
             "</ReprojectionTransformer></Transformer></GDALWarpOptions>"
         )
-        assert _set_transformer(options, exact=True, allow_ballpark=False) == options.replace(
+        got = _set_transformer(options, exact=True, allow_ballpark=False, reprojects=True)
+        assert got == options.replace(
             "</Options>", '<Option key="ALLOW_BALLPARK">NO</Option></Options>'
         )
+
+    def test_existing_ballpark_option_is_replaced(self) -> None:
+        options = (
+            "<GDALWarpOptions><Transformer><ReprojectionTransformer>"
+            '<Options><Option key="ALLOW_BALLPARK">YES</Option></Options>'
+            "</ReprojectionTransformer></Transformer></GDALWarpOptions>"
+        )
+        got = _set_transformer(options, exact=False, allow_ballpark=False, reprojects=True)
+        assert got == options.replace(">YES<", ">NO<")
+
+    def test_unwrappable_approx_transformer_raises(self) -> None:
+        options = (
+            "<GDALWarpOptions><Transformer><ApproxTransformer><MaxError>0.125</MaxError>"
+            "</ApproxTransformer></Transformer></GDALWarpOptions>"
+        )
+        with pytest.raises(RuntimeError, match="exact"):
+            _set_transformer(options, exact=True, allow_ballpark=True, reprojects=True)
+
+    def test_missing_reprojection_transformer_raises(self) -> None:
+        options = (
+            "<GDALWarpOptions><Transformer><GenImgProjTransformer />"
+            "</Transformer></GDALWarpOptions>"
+        )
+        with pytest.raises(RuntimeError, match="ballpark"):
+            _set_transformer(options, exact=False, allow_ballpark=False, reprojects=True)
+        # Without a reprojection there is nothing to refuse.
+        same = _set_transformer(options, exact=False, allow_ballpark=False, reprojects=False)
+        assert same == options
+        with pytest.raises(RuntimeError, match="<Transformer>"):
+            _set_transformer(
+                "<GDALWarpOptions />", exact=False, allow_ballpark=True, reprojects=False
+            )
 
     @pytest.mark.usefixtures("no_grids")
     def test_allow_ballpark_opts_out(self, tmp_path: Path) -> None:

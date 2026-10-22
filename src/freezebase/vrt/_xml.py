@@ -96,6 +96,9 @@ def to_element(vrt: VRT, *, relative_to: UPath | None) -> ET.Element:
         root.set("subClass", "VRTWarpedDataset")
     _add_metadata(root, vrt.metadata)
     for domain, items in vrt.metadata_domains.items():
+        if not domain:
+            msg = "metadata_domains needs domain names; the default domain is metadata."
+            raise ValueError(msg)
         _add_metadata(root, items, domain=domain)
     if vrt.crs is not None:
         ET.SubElement(root, "SRS").text = vrt.crs.to_wkt()
@@ -172,9 +175,11 @@ def _add_band(
         ET.SubElement(element, "Description").text = band.description
     if band.unit is not None:
         ET.SubElement(element, "UnitType").text = band.unit
-    ET.SubElement(element, "ColorInterp").text = _COLOR_INTERP_NAMES.get(
-        band.color_interp, band.color_interp.name.capitalize()
-    )
+    # GDAL reads a band without <ColorInterp> as undefined, and writes it that way.
+    if band.color_interp != ColorInterp.undefined:
+        ET.SubElement(element, "ColorInterp").text = _COLOR_INTERP_NAMES.get(
+            band.color_interp, band.color_interp.name.capitalize()
+        )
     if band.pixel_function is not None:
         _add_pixel_function(element, band.pixel_function)
     for source in band.sources:
@@ -412,7 +417,7 @@ def _band(  # noqa: C901, PLR0912  # one case per element, as in the writer
     """Parse a ``<VRTRasterBand>``."""
     subclass = _subclass(element, _DERIVED_BAND, _WARPED_BAND)
     derived = subclass == _DERIVED_BAND
-    band = Band(_dtype(_attribute(element, "dataType")))
+    band = Band(_dtype(_attribute(element, "dataType")), color_interp=ColorInterp.undefined)
     function: dict[str, Any] = {}
     for child in _children(element):
         match child.tag:
