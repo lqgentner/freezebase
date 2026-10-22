@@ -659,7 +659,7 @@ class TestComplexInputs:
             create_rgb_vrt(tmp_path / "vv.tif", tmp_path / "vh.tif", tmp_path / "rgb.vrt")
 
 
-class TestColourTables:
+class TestScaleAndColourTables:
     def test_warped_vrt_rejects_colour_table(self, tmp_path: Path) -> None:
         make_paletted_tiff(tmp_path / "pal.tif")
         with pytest.raises(ValueError, match="colour table"):
@@ -671,6 +671,23 @@ class TestColourTables:
         make_paletted_tiff(tmp_path / "pal.tif")
         with pytest.raises(ValueError, match="colour table"):
             build_vrt_mosaic([tmp_path / "pal.tif"], tmp_path / "m.vrt")
+
+    def test_decibel_vrt_rejects_scaled_input(self, tmp_path: Path) -> None:
+        make_tiff(tmp_path / "s.tif", dtype="int16", nodata=-1)
+        with rasterio.open(tmp_path / "s.tif", "r+") as ds:
+            ds.scales = (0.01,)
+        # 0.8 gave the dB of the raw stored values.
+        with pytest.raises(ValueError, match="scale or offset"):
+            create_decibel_vrt(tmp_path / "s.tif", tmp_path / "db.vrt")
+
+    def test_rgb_vrt_rejects_scaled_inputs(self, tmp_path: Path) -> None:
+        for name in ("vv.tif", "vh.tif"):
+            make_tiff(tmp_path / name, dtype="int16", nodata=-1)
+            with rasterio.open(tmp_path / name, "r+") as ds:
+                ds.scales = (0.01,)
+        # Previously red and green carried the scale and blue, a ratio of raw values, didn't.
+        with pytest.raises(ValueError, match="scale or offset"):
+            create_rgb_vrt(tmp_path / "vv.tif", tmp_path / "vh.tif", tmp_path / "rgb.vrt")
 
     def test_warped_vrt_keeps_scale_and_offset(self, tmp_path: Path) -> None:
         make_tiff(tmp_path / "s.tif", dtype="int16", nodata=-1)

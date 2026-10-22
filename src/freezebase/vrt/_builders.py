@@ -433,7 +433,8 @@ def derive(
     ------
     ValueError
         If ``nodata`` does not fit in ``dtype``, ``sources`` is empty, the grids differ
-        (use ``warp`` first), ``band`` is out of range, or an input is complex.
+        (use ``warp`` first), ``band`` is out of range, or an input band is complex or has
+        a scale or offset.
     """
     _check_nodata_fits(dtype, nodata)
     inputs = [sources] if isinstance(sources, (str, Path, UPath, VRT)) else list(sources)
@@ -453,7 +454,7 @@ def derive(
         for i, info in enumerate(infos):
             _selected_bands(info, wanted, i)
         groups = [[(info, wanted[0]) for info in infos]]
-    _check_not_complex(groups)
+    _check_derive_inputs(groups)
     out = [
         Band(
             dtype=dtype,
@@ -473,12 +474,19 @@ def derive(
     )
 
 
-def _check_not_complex(groups: Sequence[Sequence[tuple[RasterInfo, int]]]) -> None:
-    """Raise for complex inputs, which derive does not support."""
+def _check_derive_inputs(groups: Sequence[Sequence[tuple[RasterInfo, int]]]) -> None:
+    """Raise for complex or scaled input bands, which derive does not support."""
     for group in groups:
         for info, band in group:
             if info.dtypes[band - 1].startswith("complex"):
                 msg = f"complex data types are not supported by derive: {_label(info, 0)}"
+                raise ValueError(msg)
+            # Pixel functions compute on the raw stored values, not the physical ones.
+            if info.scales[band - 1] != 1 or info.offsets[band - 1] != 0:
+                msg = (
+                    f"{_label(info, 0)} band {band} has a scale or offset, which pixel "
+                    "functions would ignore; derive does not support scaled inputs."
+                )
                 raise ValueError(msg)
 
 

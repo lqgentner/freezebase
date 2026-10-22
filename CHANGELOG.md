@@ -43,7 +43,8 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   GDAL pixel function to one input (every band) or several (one band from each). `VRT`
   inputs are nested whole, so the function sees mosaicked pixels; input NODATA is honoured
   through `propagateNoData`, so a nodata input gives a nodata output. A `nodata` that
-  doesn't fit in `dtype` (NaN or out of range for an integer type) raises `ValueError`.
+  doesn't fit in `dtype` (NaN or out of range for an integer type) raises `ValueError`, and
+  so does an input band with a scale or offset, which pixel functions would ignore.
 - `freezebase.vrt.warp(source, crs=, src_crs=, resolution=, bounds=, like=, resampling=,
   snap=, dtype=, nodata=, tolerance=, allow_ballpark=)` warps a raster or `VRT` onto an
   explicit grid (`resolution` may be `(x, y)`), onto the grid
@@ -99,6 +100,10 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   `create_decibel_vrt` gave the dB of the real part, and `create_rgb_vrt` the real parts
   and their ratio or difference. Now convert the input to a real dtype first, e.g. to its
   intensity.
+- **Breaking:** `create_decibel_vrt` and `create_rgb_vrt` raise `ValueError` for an input
+  with a scale or offset. Before, they computed on the raw stored values (`create_decibel_vrt`
+  gave the dB of the raw counts); now convert the input to physical values first.
+  `create_rgb_vrt` writes no scale or offset on its bands, as before.
 - **Breaking:** `build_vrt_mosaic` writes the tiles' scale and offset, and raises
   `ValueError` for tiles whose scale or offset differ. Before, it wrote neither, so readers
   saw the raw stored values.

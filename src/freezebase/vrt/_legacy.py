@@ -46,7 +46,7 @@ def create_decibel_vrt(
     Raises
     ------
     ValueError
-        If the source is complex.
+        If the source is complex or has a scale or offset.
     """
     derived = derive(
         src_path, PixelFunction.db(10 if from_intensity else 20), description="dB", band=1
@@ -84,7 +84,7 @@ def create_rgb_vrt(
     Raises
     ------
     ValueError
-        If the inputs have different grids or are complex.
+        If the inputs have different grids, are complex or have a scale or offset.
     """
     vv = raster_info(vv_path)
     vh = raster_info(vh_path)
@@ -123,6 +123,7 @@ def create_rgb_vrt(
     for band in vrt.bands:
         band.dtype = "float32"
         band.nodata = math.nan
+        band.scale = band.offset = None
         for source in band.sources:
             source.nodata = None
     vrt.write(output_vrt)
