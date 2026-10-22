@@ -35,7 +35,7 @@ from freezebase.raster import (
     write_cog,
 )
 from freezebase.s3 import GDAL_S3_OPTIONS
-from freezebase.vrt import create_decibel_vrt, create_warped_vrt
+from freezebase.vrt import VRT, create_decibel_vrt, create_warped_vrt, from_raster, mosaic
 
 WIDTH, HEIGHT = 8, 6
 
@@ -1034,3 +1034,177 @@ class TestS3WritesUploadThroughS3fs:
         with pytest.raises(RuntimeError, match="AccessDenied"):
             rewrite_tiff(src, UPath(self.dst), move=True)
         assert src.exists()
+
+
+def make_int_tiff(
+    path: Path, values: list[int], *, dtype: str = "uint16", nodata: int = 0
+) -> None:
+    """Write a one-row raster holding ``values``."""
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=len(values),
+        height=1,
+        count=1,
+        dtype=dtype,
+        crs="EPSG:32632",
+        transform=from_origin(500000, 5200000, 10, 10),
+        nodata=nodata,
+    ) as dst:
+        dst.write(np.array([values], dtype=dtype), 1)
+
+
+class TestWriteCogFromVrt:
+    def test_streams_a_mosaic(self, tmp_path: Path) -> None:
+        left, right = tmp_path / "l.tif", tmp_path / "r.tif"
+        make_tiff(left, fill=1.0)
+        make_tiff(right, fill=2.0, origin=(500000 + WIDTH * 10, 5200000))
+        vrt = mosaic([left, right])
+        dst = tmp_path / "o.tif"
+        write_cog(vrt, dst)
+        assert_is_cog(dst)
+        with rasterio.open(dst) as ds, vrt.open() as expected:
+            np.testing.assert_array_equal(ds.read(), expected.read())
+        assert not list(tmp_path.glob(".*.tmp"))
+
+    def test_accepts_a_raster_path(self, tmp_path: Path) -> None:
+        src = tmp_path / "s.tif"
+        make_tiff(src, fill=3.0)
+        dst = tmp_path / "o.tif"
+        write_cog(src, dst)
+        assert_is_cog(dst)
+        with rasterio.open(dst) as ds:
+            assert ds.read(1)[0, 0] == 3.0
+
+    def test_keeps_dtype_and_nodata_by_default(self, tmp_path: Path) -> None:
+        src = tmp_path / "s.tif"
+        make_int_tiff(src, [0, 5], dtype="uint16", nodata=0)
+        write_cog(src, tmp_path / "o.tif")
+        with rasterio.open(tmp_path / "o.tif") as ds:
+            assert ds.dtypes == ("uint16",)
+            assert ds.nodata == 0
+
+    def test_metadata_lands_in_the_header(self, tmp_path: Path) -> None:
+        src = tmp_path / "s.tif"
+        make_tiff(src)
+        dst = tmp_path / "o.tif"
+        write_cog(
+            _vrt_of(src),
+            dst,
+            band_names=["VH"],
+            tags={"A": "1"},
+            band_tags=[{"B": "2"}],
+            units=["dB"],
+            color_interp=[ColorInterp.alpha],
+        )
+        assert_is_cog(dst)
+        with rasterio.open(dst) as ds:
+            assert ds.descriptions == ("VH",)
+            assert ds.tags()["A"] == "1"
+            assert ds.tags(1)["B"] == "2"
+            assert ds.units == ("dB",)
+            assert ds.colorinterp == (ColorInterp.alpha,)
+
+    def test_metadata_does_not_touch_the_input_vrt(self, tmp_path: Path) -> None:
+        src = tmp_path / "s.tif"
+        make_tiff(src)
+        vrt = _vrt_of(src)
+        write_cog(vrt, tmp_path / "o.tif", {"nodata": -1.0}, band_names=["X"], tags={"A": "1"})
+        assert vrt == _vrt_of(src)
+
+    def test_band_metadata_length_is_checked(self, tmp_path: Path) -> None:
+        src = tmp_path / "s.tif"
+        make_tiff(src)
+        with pytest.raises(ValueError, match="band_names"):
+            write_cog(src, tmp_path / "o.tif", band_names=["a", "b"])
+
+    def test_nodata_change_remaps_pixels(self, tmp_path: Path) -> None:
+        src = tmp_path / "s.tif"
+        make_int_tiff(src, [0, 5], dtype="uint16", nodata=0)
+        write_cog(src, tmp_path / "o.tif", {"nodata": 65535})
+        with rasterio.open(tmp_path / "o.tif") as ds:
+            assert ds.read(1).tolist() == [[65535, 5]]
+            assert ds.nodata == 65535
+
+    def test_cast_keeps_scale_and_offset(self, tmp_path: Path) -> None:
+        src = tmp_path / "s.tif"
+        make_int_tiff(src, [0, 5], dtype="uint8", nodata=0)
+        with rasterio.open(src, "r+") as ds:
+            ds.scales = (0.5,)
+            ds.offsets = (2.0,)
+        write_cog(src, tmp_path / "o.tif", {"dtype": "uint16"})
+        with rasterio.open(tmp_path / "o.tif") as ds:
+            assert ds.dtypes == ("uint16",)
+            assert (ds.scales, ds.offsets) == ((0.5,), (2.0,))
+
+    def test_cast_with_nan_nodata_needs_an_integer_nodata(self, tmp_path: Path) -> None:
+        src = tmp_path / "s.tif"
+        make_tiff(src)
+        with pytest.raises(ValueError, match="casting to uint8 needs a nodata"):
+            write_cog(src, tmp_path / "o.tif", {"dtype": "uint8"})
+        assert not (tmp_path / "o.tif").exists()
+
+    def test_cast_with_a_fitting_nodata(self, tmp_path: Path) -> None:
+        src = tmp_path / "s.tif"
+        make_tiff(src)
+        write_cog(src, tmp_path / "o.tif", {"dtype": np.dtype("uint8"), "nodata": 255})
+        with rasterio.open(tmp_path / "o.tif") as ds:
+            assert ds.dtypes == ("uint8",)
+            assert ds.nodata == 255
+
+    def test_nodata_that_does_not_fit_the_dtype_raises(self, tmp_path: Path) -> None:
+        src = tmp_path / "s.tif"
+        make_int_tiff(src, [0, 5], dtype="uint8", nodata=0)
+        with pytest.raises(ValueError, match="does not fit"):
+            write_cog(src, tmp_path / "o.tif", {"nodata": 65535})
+
+    def test_creation_options_come_from_the_profile(self, tmp_path: Path) -> None:
+        src = tmp_path / "s.tif"
+        make_tiff(src)
+        write_cog(src, tmp_path / "o.tif", {"compress": "lzw", "blocksize": 256})
+        with rasterio.open(tmp_path / "o.tif") as ds:
+            assert ds.compression.value == "LZW"
+            assert ds.block_shapes == [(256, 256)]
+
+    def test_checksum_matches_the_file(self, tmp_path: Path) -> None:
+        src = tmp_path / "s.tif"
+        make_tiff(src)
+        dst = tmp_path / "o.tif"
+        digest = write_cog(src, dst, checksum=True)
+        assert digest == "1220" + hashlib.sha256(dst.read_bytes()).hexdigest()
+
+    def test_failure_leaves_no_partial_file(self, tmp_path: Path) -> None:
+        src = tmp_path / "s.tif"
+        make_tiff(src)
+        with pytest.raises(RuntimeError, match="Failed to write COG"):
+            write_cog(src, tmp_path / "missing" / "o.tif")
+        assert not list(tmp_path.glob("**/.*.tmp"))
+
+    def test_s3_destination_uploads_once(
+        self, tmp_path: Path, s3_uploads: dict[str, bytes]
+    ) -> None:
+        src = tmp_path / "s.tif"
+        make_tiff(src)
+        digest = write_cog(src, UPath("s3://bucket/out/x.tif"), checksum=True)
+        assert list(s3_uploads) == ["s3://bucket/out/x.tif"]
+        landed = _landed(s3_uploads, "s3://bucket/out/x.tif", tmp_path)
+        assert_is_cog(landed)
+        assert digest == "1220" + hashlib.sha256(landed.read_bytes()).hexdigest()
+
+    def test_s3_destination_without_checksum(
+        self, tmp_path: Path, s3_uploads: dict[str, bytes]
+    ) -> None:
+        src = tmp_path / "s.tif"
+        make_tiff(src)
+        assert write_cog(src, UPath("s3://bucket/out/x.tif")) is None
+        assert list(s3_uploads) == ["s3://bucket/out/x.tif"]
+
+    def test_ndarray_still_requires_a_profile(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="profile is required"):
+            write_cog(np.zeros((2, 2), np.float32), tmp_path / "o.tif")
+
+
+def _vrt_of(path: Path) -> VRT:
+    """Build a 1:1 VRT over a raster."""
+    return from_raster(path)

@@ -71,6 +71,10 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 - `Band.scale` and `Band.offset` hold a band's `<Scale>` and `<Offset>`. `from_raster`,
   `stack`, `mosaic` and `warp` carry them from their inputs; `mosaic` tiles must share
   them. A colour table, which the model cannot hold, raises `ValueError` in all four.
+- `write_cog` accepts a `VRT` or a raster path and streams it to a COG through GDAL, without
+  loading it into memory; `profile` is now optional for those inputs. A `nodata` in
+  `profile` remaps the pixels holding the old value, and a `dtype` casts every band, raising
+  `ValueError` when the nodata value cannot be held by an integer `dtype`.
 
 ### Changed
 
