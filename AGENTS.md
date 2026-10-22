@@ -8,7 +8,11 @@ API. Preserve compatibility unless a change is explicitly breaking.
 ## Environment
 
 The project uses uv and supports Python 3.12–3.15. Dependencies are declared in
-`pyproject.toml`, and the virtual environment is located at `.venv/`.
+`pyproject.toml`, and the virtual environment is located at `.venv/`. `.python-version` pins the
+interpreter of `.venv/`; CI jobs that test a specific version pass `--python`, which takes
+precedence over it. `tests/test_supported_python_versions.py` fails if the CI matrix,
+`requires-python`, the lowest-bound job, Pyrefly's `python-version` or `.python-version` drift
+from the `Programming Language :: Python` classifiers, so change them together.
 
 ```bash
 uv sync --all-extras

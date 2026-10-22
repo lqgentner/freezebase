@@ -233,3 +233,5 @@ show_missing = true
 # sources, so no import needs to be ignored.
 [tool.pyrefly]
 preset = "strict"
+# Check against the oldest supported Python, not the interpreter in .venv.
+python-version = "3.12"
