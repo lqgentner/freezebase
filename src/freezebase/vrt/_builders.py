@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Literal
 
 from affine import Affine
@@ -188,28 +189,42 @@ def _mosaic_source(
     grid: Affine,
     nodata: float | None,
     resampling: Resampling,
-) -> Source:
-    """Build the source drawing band ``band`` (0-based) of a tile at its place on ``grid``."""
+) -> Source | None:
+    """Build the source of band ``band`` (0-based) of a tile; ``None`` if it holds no centre."""
     block_height, block_width = info.block_shapes[band]
+    tile = info.bounds
     rx, ry = grid.a, -grid.e
-    col = (info.bounds.left - grid.c) / rx
-    row = (grid.f - info.bounds.top) / ry
+    col = (tile.left - grid.c) / rx
+    row = (grid.f - tile.top) / ry
     on_grid = (
         abs(info.px - rx) <= _PIXEL_SIZE_TOL
         and abs(info.py - ry) <= _PIXEL_SIZE_TOL
         and abs(col - round(col)) <= _ALIGNMENT_TOL
         and abs(row - round(row)) <= _ALIGNMENT_TOL
     )
-    # Off the grid, the unrounded window georeferences the tile exactly.
-    dst_window = (
-        Window(round(col), round(row), info.width, info.height)
-        if on_grid
-        else Window(col, row, info.width * info.px / rx, info.height * info.py / ry)
-    )
+    if on_grid:
+        src_window = Window(0, 0, info.width, info.height)
+        dst_window = Window(round(col), round(row), info.width, info.height)
+    else:
+        # Only pixels whose centre is in the tile; left and top edges count as inside.
+        col0 = math.ceil(col - 0.5)
+        col1 = math.ceil((tile.right - grid.c) / rx - 0.5)
+        row0 = math.ceil(row - 0.5)
+        row1 = math.ceil((grid.f - tile.bottom) / ry - 0.5)
+        if col1 <= col0 or row1 <= row0:
+            return None
+        dst_window = Window(col0, row0, col1 - col0, row1 - row0)
+        # The fractional source window those pixels cover keeps the tile georeferenced.
+        src_window = Window(
+            (col0 - col) * rx / info.px,
+            (row0 - row) * ry / info.py,
+            (col1 - col0) * rx / info.px,
+            (row1 - row0) * ry / info.py,
+        )
     return Source(
         path=info.ref,
         band=band + 1,
-        src_window=Window(0, 0, info.width, info.height),
+        src_window=src_window,
         dst_window=dst_window,
         nodata=nodata,
         properties=SourceProperties(
@@ -281,8 +296,8 @@ def mosaic(
         pixel size, or else the union's top-left corner, and covers every tile.
     resampling : Resampling, optional
         Resampling for tiles not on the output grid, which are placed exactly rather than
-        snapped to it. One of nearest, bilinear, cubic, cubic_spline, lanczos, average,
-        mode or gauss.
+        snapped to it and fill only the output pixels whose centre they contain. One of
+        nearest, bilinear, cubic, cubic_spline, lanczos, average, mode or gauss.
     nodata : float | None, optional
         NODATA of every band and source, replacing the first tile's.
     band_names : Sequence[str] | None, optional
@@ -327,7 +342,11 @@ def mosaic(
         band_nodata = first.nodatavals[i] if nodata is None else nodata
         band = _band(first, i)
         band.nodata = band_nodata
-        band.sources = [_mosaic_source(info, i, grid, band_nodata, resampling) for info in infos]
+        band.sources = [
+            source
+            for info in infos
+            if (source := _mosaic_source(info, i, grid, band_nodata, resampling)) is not None
+        ]
         if band_names is not None:
             band.description = band_names[i]
         if color_interp is not None:

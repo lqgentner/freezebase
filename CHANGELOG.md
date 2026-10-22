@@ -31,7 +31,8 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 - `freezebase.vrt.mosaic(sources, bounds=, resolution=, resampling=, nodata=, band_names=,
   color_interp=)` mosaics tiles of any band count, later sources drawing over earlier ones;
   `VRT` inputs are nested. With `resolution="finest"` or `(x, y)`, tiles of mixed pixel
-  sizes or off the output grid are resampled and placed exactly, not snapped to it.
+  sizes or off the output grid are resampled and placed exactly, not snapped to it, and
+  fill only the output pixels whose centre they contain.
 
 ### Changed
 

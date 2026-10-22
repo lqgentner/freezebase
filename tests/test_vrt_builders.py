@@ -294,9 +294,32 @@ class TestMosaicMixedResolution:
         np.testing.assert_array_equal(data[mask], ref[mask])
         np.testing.assert_array_equal(data[:4, :6], _read(fine)[0])
         source = m.bands[0].sources[1]
-        assert source.dst_window == Window(6.3, 0, 12, 6)
+        # Output columns 6-17 have their centres in the tile, from 0.1 source pixel left of it.
+        assert source.dst_window == Window(6, 0, 12, 6)
+        assert source.src_window is not None
+        assert source.src_window.col_off == pytest.approx(-0.1)
+        assert (source.src_window.row_off, source.src_window.width) == (0, pytest.approx(4))
+        assert source.src_window.height == pytest.approx(2)
         assert source.resampling == Resampling.nearest
-        assert '<DstRect xOff="6.3' in m.to_xml()
+
+    def test_off_grid_tile_draws_only_where_it_holds_the_pixel_centre(
+        self, tmp_path: Path
+    ) -> None:
+        fine = make_tiff(tmp_path / "fine.tif")
+        # Overlaps the fine tile, covering part of column 4 and row 1 but not their centres.
+        coarse = make_tiff(
+            tmp_path / "coarse.tif", origin=(500047.0, 5199983.0), res=(30.0, 30.0), size=(4, 2)
+        )
+        m = mosaic([fine, coarse], resolution="finest")
+        with m.open() as ds:
+            data = ds.read(1)
+        expected = _reproject_onto(fine, m)
+        ref = _reproject_onto(coarse, m)
+        expected[~np.isnan(ref)] = ref[~np.isnan(ref)]
+        np.testing.assert_array_equal(data, expected)
+        # Previously the coarse tile's edge value overwrote these fine pixels.
+        np.testing.assert_array_equal(data[1:4, 4], _read(fine)[0, 1:4, 4])
+        np.testing.assert_array_equal(data[1, 4:6], _read(fine)[0, 1, 4:6])
 
     def test_finest_is_taken_per_axis(self, tmp_path: Path) -> None:
         a = make_tiff(tmp_path / "a.tif", res=(10.0, 20.0))
@@ -387,8 +410,19 @@ class TestMosaicMixedResolution:
         b = make_tiff(tmp_path / "b.tif", origin=(500065.0, 5200000.0))
         m = mosaic([a, b], resolution="finest")
         source = m.bands[0].sources[1]
-        assert source.dst_window == Window(6.5, 0, 6, 4)
+        assert source.dst_window == Window(6, 0, 6, 4)
+        assert source.src_window == Window(-0.5, 0, 6, 4)
         assert source.resampling == Resampling.nearest
+
+    def test_tile_holding_no_pixel_centre_is_dropped(self, tmp_path: Path) -> None:
+        a = make_tiff(tmp_path / "a.tif")
+        # Spans x 500061-500064, short of the pixel centre at 500065.
+        sliver = make_tiff(
+            tmp_path / "b.tif", origin=(500061.0, 5200000.0), res=(3.0, 10.0), size=(1, 4)
+        )
+        m = mosaic([a, sliver], resolution=(10.0, 10.0))
+        assert (m.width, m.height) == (7, 4)
+        assert len(m.bands[0].sources) == 1
 
     def test_tiles_must_still_match(self, tmp_path: Path) -> None:
         a = make_tiff(tmp_path / "a.tif")
