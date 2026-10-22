@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
-from freezebase.vrt._grid import RasterInfo, raster_info
+from affine import Affine
+from rasterio.enums import Resampling
+from rasterio.windows import Window
+
+from freezebase.vrt._grid import (
+    RasterInfo,
+    _assert_extent_aligned,
+    _assert_grid_aligned,
+    _validate_tiles,
+    raster_info,
+)
 from freezebase.vrt._model import VRT, Band, Source, SourceProperties
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from rasterio.coords import BoundingBox
     from rasterio.enums import ColorInterp
 
     from freezebase.vrt._model import AnyPath
@@ -151,5 +162,120 @@ def stack(
         transform=first.transform,
         width=first.width,
         height=first.height,
+        bands=out,
+    )
+
+
+def _mosaic_source(
+    info: RasterInfo, band: int, minx: float, maxy: float, nodata: float | None
+) -> Source:
+    """Build the source drawing band ``band`` (0-based) of a tile at its place on the grid."""
+    block_height, block_width = info.block_shapes[band]
+    bounds = info.bounds
+    return Source(
+        path=info.ref,
+        band=band + 1,
+        src_window=Window(0, 0, info.width, info.height),
+        dst_window=Window(
+            round((bounds.left - minx) / info.px),
+            round((maxy - bounds.top) / info.py),
+            info.width,
+            info.height,
+        ),
+        nodata=nodata,
+        properties=SourceProperties(
+            info.width, info.height, info.dtypes[band], block_width, block_height
+        ),
+    )
+
+
+def mosaic(
+    sources: Sequence[AnyPath | VRT],
+    *,
+    bounds: BoundingBox | tuple[float, float, float, float] | None = None,
+    resolution: Literal["finest"] | tuple[float, float] | None = None,
+    resampling: Resampling = Resampling.nearest,  # noqa: ARG001  # used once resolution is set
+    nodata: float | None = None,
+    band_names: Sequence[str] | None = None,
+    color_interp: Sequence[ColorInterp] | None = None,
+) -> VRT:
+    """Mosaic tiles of any band count on one grid; later sources draw over earlier ones.
+
+    Parameters
+    ----------
+    sources : Sequence[str | Path | UPath | VRT]
+        Tiles sharing a CRS, pixel size, band count, dtypes and NODATA values. A ``VRT``
+        is nested. Band *i* of the mosaic reads band *i* of every tile.
+    bounds : rasterio.coords.BoundingBox | tuple[float, float, float, float] | None, optional
+        Extent as ``(left, bottom, right, top)``, on the tiles' pixel grid. Defaults to the
+        union of the tiles.
+    resolution : {"finest"} | tuple[float, float] | None, optional
+        ``None`` requires one common pixel size. Other values are not implemented yet.
+    resampling : Resampling, optional
+        Resampling for tiles not on the output grid.
+    nodata : float | None, optional
+        NODATA of every band and source, replacing the first tile's.
+    band_names : Sequence[str] | None, optional
+        Description of each band, replacing the first tile's.
+    color_interp : Sequence[ColorInterp] | None, optional
+        Colour interpretation of each band, replacing the first tile's.
+
+    Returns
+    -------
+    VRT
+        A VRT with the first tile's band descriptions, colour interpretation and NODATA.
+
+    Raises
+    ------
+    ValueError
+        If ``sources`` is empty, the tiles are incompatible or off the pixel grid,
+        ``bounds`` is not on the grid, or ``band_names`` or ``color_interp`` do not match
+        the band count.
+    NotImplementedError
+        If ``resolution`` is not ``None``.
+    """
+    if resolution is not None:
+        msg = "mosaic supports resolution=None only."
+        raise NotImplementedError(msg)
+    if not sources:
+        msg = "sources must not be empty."
+        raise ValueError(msg)
+    infos = [raster_info(source) for source in sources]
+    _validate_tiles(infos)
+    first = infos[0]
+    if band_names is not None and len(band_names) != first.count:
+        msg = f"band_names has {len(band_names)} entries for {first.count} bands."
+        raise ValueError(msg)
+    if color_interp is not None and len(color_interp) != first.count:
+        msg = f"color_interp has {len(color_interp)} entries for {first.count} bands."
+        raise ValueError(msg)
+
+    px, py = first.px, first.py
+    if bounds is None:
+        minx = min(t.bounds.left for t in infos)
+        maxy = max(t.bounds.top for t in infos)
+        maxx = max(t.bounds.right for t in infos)
+        miny = min(t.bounds.bottom for t in infos)
+    else:
+        minx, miny, maxx, maxy = (float(v) for v in bounds)
+        _assert_extent_aligned(px, py, left=minx, bottom=miny, right=maxx, top=maxy)
+    _assert_grid_aligned(infos, minx, maxy)
+
+    out: list[Band] = []
+    for i in range(first.count):
+        band_nodata = first.nodatavals[i] if nodata is None else nodata
+        band = _band(first, i)
+        band.nodata = band_nodata
+        band.sources = [_mosaic_source(info, i, minx, maxy, band_nodata) for info in infos]
+        if band_names is not None:
+            band.description = band_names[i]
+        if color_interp is not None:
+            band.color_interp = color_interp[i]
+        out.append(band)
+    return VRT(
+        crs=first.crs,
+        transform=Affine(px, 0.0, minx, 0.0, -py, maxy),
+        width=round((maxx - minx) / px),
+        height=round((maxy - miny) / py),
         bands=out,
     )

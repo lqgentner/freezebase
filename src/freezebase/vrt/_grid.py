@@ -9,9 +9,11 @@ from rasterio.coords import BoundingBox
 from upath import UPath
 
 from freezebase.raster import rasterio_open
-from freezebase.vrt._model import VRT, _nodata_equal
+from freezebase.vrt._model import _GDAL_DTYPE_NAMES, VRT, _nodata_equal
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from affine import Affine
     from rasterio.crs import CRS
     from rasterio.enums import ColorInterp
@@ -29,8 +31,11 @@ __all__ = [
     "_PIXEL_SIZE_TOL",
     "RasterInfo",
     "_assert_extent_aligned",
+    "_assert_grid_aligned",
+    "_label",
     "_nodata_equal",
     "_snap_out",
+    "_validate_tiles",
     "raster_info",
 ]
 
@@ -131,3 +136,77 @@ def _snap_out(
         math.ceil(right / res_x) * res_x,
         math.ceil(top / res_y) * res_y,
     )
+
+
+def _label(info: RasterInfo, index: int) -> str:
+    """Name an input in error messages: the file name, or its position for a ``VRT``."""
+    return f"VRT input #{index}" if isinstance(info.ref, VRT) else info.ref.name
+
+
+def _validate_tiles(infos: Sequence[RasterInfo]) -> None:
+    """Raise unless the tiles can share one axis-aligned mosaic grid.
+
+    Parameters
+    ----------
+    infos : Sequence[RasterInfo]
+        Headers of the tiles; the first is the reference.
+
+    Raises
+    ------
+    ValueError
+        If CRS, band count, dtypes, NODATA, pixel size or rotation differ, or a dtype has
+        no GDAL name.
+    """
+    ref = infos[0]
+    ref_name = _label(ref, 0)
+    for dtype in ref.dtypes:
+        if dtype not in _GDAL_DTYPE_NAMES:
+            msg = f"Unsupported tile dtype '{dtype}' in '{ref_name}'."
+            raise ValueError(msg)
+    for i, t in enumerate(infos):
+        _validate_tile(t, _label(t, i), ref, ref_name)
+
+
+def _validate_tile(t: RasterInfo, name: str, ref: RasterInfo, ref_name: str) -> None:
+    """Validate one tile against the mosaic reference."""
+    if t.crs != ref.crs:
+        msg = f"All tiles must share a CRS; '{name}' differs from '{ref_name}'."
+        raise ValueError(msg)
+    if t.count != ref.count:
+        msg = (
+            f"All tiles must share a band count; '{name}' has {t.count} bands, "
+            f"'{ref_name}' has {ref.count}."
+        )
+        raise ValueError(msg)
+    if t.dtypes != ref.dtypes:
+        got, want = next((a, b) for a, b in zip(t.dtypes, ref.dtypes, strict=True) if a != b)
+        msg = f"All tiles must share a dtype; '{name}' is '{got}', '{ref_name}' is '{want}'."
+        raise ValueError(msg)
+    for got_nd, want_nd in zip(t.nodatavals, ref.nodatavals, strict=True):
+        if not _nodata_equal(got_nd, want_nd):
+            msg = (
+                f"All tiles must share a NODATA value; '{name}' is {got_nd}, "
+                f"'{ref_name}' is {want_nd}."
+            )
+            raise ValueError(msg)
+    if abs(t.px - ref.px) > _PIXEL_SIZE_TOL or abs(t.py - ref.py) > _PIXEL_SIZE_TOL:
+        msg = "All tiles must share the same pixel size to be mosaicked into a VRT"
+        raise ValueError(msg)
+    if abs(t.transform.b) > _PIXEL_SIZE_TOL or abs(t.transform.d) > _PIXEL_SIZE_TOL:
+        msg = f"Rotated/sheared tiles cannot be mosaicked into an axis-aligned VRT: '{name}'."
+        raise ValueError(msg)
+
+
+def _assert_grid_aligned(infos: Sequence[RasterInfo], minx: float, maxy: float) -> None:
+    """Reject tile origins outside the mosaic pixel grid."""
+    px, py = infos[0].px, infos[0].py
+    for i, t in enumerate(infos):
+        bounds = t.bounds
+        col = (bounds.left - minx) / px
+        row = (maxy - bounds.top) / py
+        if abs(col - round(col)) > _ALIGNMENT_TOL or abs(row - round(row)) > _ALIGNMENT_TOL:
+            msg = (
+                f"Tile '{_label(t, i)}' is not aligned to the common pixel grid; "
+                "its origin does not fall on an integer pixel offset."
+            )
+            raise ValueError(msg)
