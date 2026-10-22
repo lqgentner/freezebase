@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from xml.etree import ElementTree as ET
 
 from affine import Affine
+import pyproj
 import rasterio
 from rasterio.crs import CRS
 from rasterio.enums import Resampling
@@ -40,6 +41,9 @@ if TYPE_CHECKING:
 # GDAL's approximate transformer error, in source pixels.
 _APPROX_TOLERANCE = 0.125
 _NO_OPERATION = "Cannot find coordinate operations"
+_AXES_WITH_HEIGHT = 3
+# Elements GDAL writes for a source's scale, offset or colour table.
+_UNSUPPORTED_BAND_ELEMENT = re.compile(r"Unsupported VRT element <(Offset|Scale|ColorTable)>")
 
 type _Grid = tuple[CRS, Affine, int, int]
 
@@ -92,7 +96,7 @@ def warp(
         when the source's sentinel should not stay a valid-looking value, e.g. ``nan``.
     tolerance : float | {"auto"}, optional
         Error allowed when approximating the transformation, in source pixels; ``0`` is
-        exact. ``"auto"`` is 0.125.
+        exact. ``"auto"`` is 0.125, or 0 when a vertical shift applies.
     allow_ballpark : bool, optional
         Let PROJ fall back to a ballpark transformation, ignoring datum differences, when
         it lacks a grid or a datum link.
@@ -100,7 +104,8 @@ def warp(
     Returns
     -------
     VRT
-        A warped VRT; nothing is written.
+        A warped VRT; nothing is written. Heights are shifted between vertical datums when
+        both the source CRS and ``crs`` are compound or 3D.
 
     Raises
     ------
@@ -108,13 +113,14 @@ def warp(
         If neither ``crs`` nor ``like`` is given, ``like`` comes with ``crs``,
         ``resolution`` or ``bounds``, ``bounds`` comes without ``resolution``,
         ``resolution`` is not positive, ``bounds`` does not lie on the ``resolution`` grid,
-        ``tolerance`` is negative or NaN, the source has no CRS and no ``src_crs`` is given, or no
-        exact transformation is available and ``allow_ballpark`` is false, or the source has
-        a scale/offset or colour table the model cannot hold.
+        ``tolerance`` is negative or NaN, the source has no CRS and no ``src_crs`` is given,
+        only one of the source CRS and the target CRS has a vertical datum, no exact
+        transformation is available and ``allow_ballpark`` is false, or the source has a
+        scale/offset or colour table the model cannot hold.
     RuntimeError
         If GDAL's serialized transformer cannot be made exact or ballpark-free.
     """
-    tolerance = _resolve_tolerance(tolerance)
+    _check_tolerance(tolerance)
     ref = source if isinstance(source, VRT) else _absolute(UPath(source))
     with _opened(ref) as src:
         source_crs = CRS.from_user_input(src_crs) if src_crs is not None else src.crs
@@ -124,7 +130,11 @@ def warp(
         dst_crs, transform, width, height = _target_grid(
             src, source_crs, crs=crs, resolution=resolution, bounds=bounds, like=like, snap=snap
         )
+        vertical = _vertical_shift(source_crs, dst_crs)
+        tolerance = _resolve_tolerance(tolerance, vertical=vertical)
         extras: dict[str, Any] = {}
+        if vertical:
+            extras["APPLY_VERTICAL_SHIFT"] = "YES"
         if dtype is not None:
             extras["dtype"] = dtype
         if nodata is not None:
@@ -151,6 +161,8 @@ def warp(
     try:
         vrt = from_xml(xml)
     except ValueError as err:
+        if not _UNSUPPORTED_BAND_ELEMENT.search(str(err)):
+            raise
         msg = f"warp cannot keep the source's scale/offset or colour table: {err}"
         raise ValueError(msg) from err
     if vrt.warp is None:  # pragma: no cover  # GDAL always writes a warped VRT here
@@ -168,14 +180,47 @@ def warp(
     return vrt
 
 
-def _resolve_tolerance(tolerance: float | Literal["auto"]) -> float:
+def _check_tolerance(tolerance: float | Literal["auto"]) -> None:
+    """Raise unless ``tolerance`` is ``"auto"`` or a non-negative number."""
+    if tolerance != "auto" and not tolerance >= 0:
+        msg = f'tolerance must be "auto" or a non-negative number, got {tolerance}.'
+        raise ValueError(msg)
+
+
+def _resolve_tolerance(tolerance: float | Literal["auto"], *, vertical: bool) -> float:
     """Return the approximation error to warp with, in source pixels."""
     if tolerance == "auto":
-        return _APPROX_TOLERANCE
-    if not tolerance >= 0:
-        msg = f"tolerance must not be negative, got {tolerance}."
-        raise ValueError(msg)
+        # The approximation's error is capped in pixels, not metres of height.
+        return 0.0 if vertical else _APPROX_TOLERANCE
     return float(tolerance)
+
+
+def _has_vertical(crs: CRS) -> bool:
+    """Whether ``crs`` carries heights: a vertical or compound CRS, or a 3D geographic one."""
+    proj_crs = pyproj.CRS.from_wkt(crs.to_wkt(version="WKT2_2019"))
+    # pyproj's is_vertical also looks into a compound CRS's parts.
+    return proj_crs.is_vertical or (
+        proj_crs.is_geographic and len(proj_crs.axis_info) == _AXES_WITH_HEIGHT
+    )
+
+
+def _vertical_shift(source_crs: CRS, dst_crs: CRS) -> bool:
+    """Whether to shift heights; raise if only one CRS says which datum they refer to."""
+    source_vertical, dst_vertical = _has_vertical(source_crs), _has_vertical(dst_crs)
+    if source_vertical and not dst_vertical:
+        msg = (
+            f"The source CRS {_crs_name(source_crs)} has a vertical datum but the target CRS "
+            f"{_crs_name(dst_crs)} has none; pass a 3D or compound crs, or a 2D src_crs to keep "
+            "heights unconverted."
+        )
+        raise ValueError(msg)
+    if dst_vertical and not source_vertical:
+        msg = (
+            f"The target CRS {_crs_name(dst_crs)} has a vertical datum but the source CRS "
+            f"{_crs_name(source_crs)} has none; pass a 3D or compound src_crs, or a 2D crs."
+        )
+        raise ValueError(msg)
+    return source_vertical
 
 
 def _absolute(path: UPath) -> UPath:

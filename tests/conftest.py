@@ -5,8 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import pyproj.datadir
 import pytest
 import rasterio
+from rasterio.env import PROJDataFinder
 import rasterio.shutil
 
 from freezebase import raster
@@ -15,6 +17,32 @@ if TYPE_CHECKING:
     from upath import UPath
 
 _S3_PREFIXES = ("/vsis3/", "s3://")
+GRIDS = Path(pyproj.datadir.get_user_data_dir())
+_SWISS_GRIDS = (
+    "ch_swisstopo_chgeo2004_ETRS89_LN02.tif",
+    "ch_swisstopo_chgeo2004_ETRS89_LHN95.tif",
+)
+
+
+@pytest.fixture(scope="session")
+def proj_grids(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Return a PROJ data directory joining rasterio's PROJ data and pyproj's synced grids."""
+    missing = [name for name in _SWISS_GRIDS if not (GRIDS / name).is_file()]
+    if missing:
+        pytest.skip(
+            f"PROJ grids missing ({', '.join(missing)}); run pyproj sync --source-id ch_swisstopo"
+        )
+    proj_data = PROJDataFinder().search()
+    if proj_data is None:
+        pytest.skip("rasterio bundles no PROJ data")
+    joined = tmp_path_factory.mktemp("proj_data")
+    # rasterio's files come first, so its proj.db wins any name clash.
+    for directory in (Path(proj_data), GRIDS):
+        for file in directory.iterdir():
+            link = joined / file.name
+            if not link.exists():
+                link.symlink_to(file)
+    return joined
 
 
 @pytest.fixture
