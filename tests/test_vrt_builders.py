@@ -10,6 +10,7 @@ import pytest
 import rasterio
 from rasterio.coords import disjoint_bounds
 from rasterio.enums import ColorInterp, Resampling
+from rasterio.merge import merge
 from rasterio.transform import Affine
 from rasterio.warp import reproject
 from rasterio.windows import Window
@@ -133,7 +134,7 @@ class TestStack:
             stack([a], bands=[[2]])
 
     def test_empty_sources_raises(self) -> None:
-        with pytest.raises(ValueError, match="at least one"):
+        with pytest.raises(ValueError, match=r"^sources must not be empty\.$"):
             stack([])
 
 
@@ -248,19 +249,36 @@ class TestMosaicAligned:
         assert "ComplexSource" not in xml
         assert "None" not in xml
 
+    def test_matches_rasterio_merge(self, tmp_path: Path) -> None:
+        a = make_tiff(tmp_path / "a.tif", size=(6, 4))
+        b = make_tiff(tmp_path / "b.tif", size=(6, 4), origin=(500030.0, 5199980.0), fill=99)
+        c = make_tiff(tmp_path / "c.tif", size=(3, 3), origin=(500060.0, 5200010.0), fill=7)
+        with mosaic([a, b, c]).open() as ds:
+            got, transform = ds.read(), ds.transform
+        # merge draws the first source on top; mosaic draws the last.
+        with rasterio.open(c) as dc, rasterio.open(b) as db, rasterio.open(a) as da:
+            merged = merge([dc, db, da])
+        assert merged is not None
+        expected, expected_transform = merged
+        assert transform == expected_transform
+        np.testing.assert_array_equal(got, expected)
+
     def test_vrt_inputs_are_nested(self, tmp_path: Path) -> None:
         a = from_raster(make_tiff(tmp_path / "a.tif", count=2))
         b = make_tiff(tmp_path / "b.tif", count=2, origin=(500060.0, 5200000.0))
         vrt = mosaic([a, b])
         assert vrt.bands[1].sources[0].path is a
         assert vrt.bands[1].sources[0].band == 2
+        # As in from_raster: a nested VRT gets no file header.
+        assert vrt.bands[1].sources[0].properties is None
         with vrt.open() as ds:
             np.testing.assert_array_equal(ds.read()[:, :, 6:], _read(b))
 
     def test_vrt_input_is_named_in_errors(self, tmp_path: Path) -> None:
         a = make_tiff(tmp_path / "a.tif")
         b = from_raster(make_tiff(tmp_path / "b.tif", crs="EPSG:32633"))
-        with pytest.raises(ValueError, match="VRT input #1"):
+        # Previously 0-based, so the second input was "#1".
+        with pytest.raises(ValueError, match="VRT input #2"):
             mosaic([a, b])
 
     def test_bounds_and_off_grid_errors_as_before(self, tmp_path: Path) -> None:
@@ -617,13 +635,16 @@ class TestDerive:
         x = make_tiff(tmp_path / "x.tif")
         with pytest.raises(ValueError, match="no band 2"):
             derive([x, x], PixelFunction.div(), band=2)
-        with pytest.raises(ValueError, match="at least one"):
+        with pytest.raises(ValueError, match=r"^sources must not be empty\.$"):
             derive([], PixelFunction.div())
+        # Previously band=0 read band 1.
+        with pytest.raises(ValueError, match="no band 0"):
+            derive([x, x], PixelFunction.div(), band=0)
 
     def test_vrt_input_is_named_by_position_in_errors(self, tmp_path: Path) -> None:
         x = make_tiff(tmp_path / "x.tif")
         y = from_raster(make_tiff(tmp_path / "y.tif", origin=(500060.0, 5200000.0)))
-        with pytest.raises(ValueError, match="VRT input #1"):
+        with pytest.raises(ValueError, match="VRT input #2"):
             derive([x, y], PixelFunction.div())
 
     def test_source_without_nodata_is_simple(self, tmp_path: Path) -> None:

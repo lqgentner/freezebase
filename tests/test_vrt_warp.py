@@ -211,7 +211,7 @@ class TestGrid:
             ds.write(np.zeros((1, 2, 2), dtype="uint8"))
         with pytest.raises(ValueError, match=r"nocrs\.tif.*src_crs"):
             warp(src, crs="EPSG:3857", resolution=20.0)
-        with pytest.raises(ValueError, match=r"VRT input #0.*src_crs"):
+        with pytest.raises(ValueError, match=r"VRT input #1.*src_crs"):
             warp(from_raster(src), crs="EPSG:3857", resolution=20.0)
         with pytest.raises(ValueError, match=r"like \(nocrs\.tif\) has no CRS"):
             warp(make_tiff(tmp_path / "utm.tif"), like=src)

@@ -195,7 +195,7 @@ def stack(
         ``band_names`` or ``color_interp`` do not match.
     """
     if not sources:
-        msg = "stack needs at least one source."
+        msg = "sources must not be empty."
         raise ValueError(msg)
     if bands is not None and len(bands) != len(sources):
         msg = f"bands has {len(bands)} entries for {len(sources)} sources."
@@ -276,7 +276,9 @@ def _mosaic_source(
         src_window=src_window,
         dst_window=dst_window,
         nodata=nodata,
-        properties=SourceProperties(
+        properties=None
+        if isinstance(info.ref, VRT)
+        else SourceProperties(
             info.width, info.height, info.dtypes[band], block_width, block_height
         ),
         resampling=None if on_grid else resampling,
@@ -456,7 +458,7 @@ def derive(
     _check_nodata_fits(dtype, nodata)
     inputs = [sources] if isinstance(sources, (str, Path, UPath, VRT)) else list(sources)
     if not inputs:
-        msg = "derive needs at least one source."
+        msg = "sources must not be empty."
         raise ValueError(msg)
     infos = [raster_info(source) for source in inputs]
     _check_same_grid(infos)
@@ -467,7 +469,7 @@ def derive(
         wanted = _selected_bands(first, None if band is None else [band])
         groups = [[(first, b)] for b in wanted]
     else:
-        wanted = [band or 1]
+        wanted = [1 if band is None else band]
         for i, info in enumerate(infos):
             _selected_bands(info, wanted, i)
         groups = [[(info, wanted[0]) for info in infos]]

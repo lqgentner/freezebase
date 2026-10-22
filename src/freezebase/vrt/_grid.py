@@ -169,8 +169,8 @@ def _snap_out(
 
 
 def _label(info: RasterInfo, index: int) -> str:
-    """Name an input in error messages: the file name, or its position for a ``VRT``."""
-    return f"VRT input #{index}" if isinstance(info.ref, VRT) else info.ref.name
+    """Name an input in error messages: the file name, or its 1-based position for a ``VRT``."""
+    return f"VRT input #{index + 1}" if isinstance(info.ref, VRT) else info.ref.name
 
 
 def _check_north_up(info: RasterInfo, name: str) -> None:
