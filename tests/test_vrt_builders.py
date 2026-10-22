@@ -507,6 +507,15 @@ class TestDerive:
             a = ds.read(1)
         assert np.allclose(a, [[20.0] * 6 + [30.0] * 6] * 4)
 
+    def test_nodata_that_does_not_fit_dtype_raises(self, tmp_path: Path) -> None:
+        p = _write(tmp_path / "a.tif", np.array([[[0, 1, 2]]], dtype="uint16"), nodata=0)
+        # Previously GDAL dropped the NaN nodata, and nodata inputs read as valid zeros.
+        with pytest.raises(ValueError, match=r"nodata nan .*int16"):
+            derive(p, PixelFunction.scale(), dtype="int16")
+        with pytest.raises(ValueError, match=r"nodata 70000 .*int16"):
+            derive(p, PixelFunction.scale(), dtype="int16", nodata=70000)
+        assert derive(p, PixelFunction.scale(), dtype="int16", nodata=-1).bands[0].nodata == -1
+
     def test_db_of_nodata_zero_is_nan(self, tmp_path: Path) -> None:
         """A uint16 0 sentinel gives NaN, not -inf."""
         data = np.array([[[0, 10, 100]]], dtype="uint16")

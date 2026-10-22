@@ -40,7 +40,8 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 - `freezebase.vrt.derive(sources, function, dtype=, nodata=, description=, band=)` applies a
   GDAL pixel function to one input (every band) or several (one band from each). `VRT`
   inputs are nested whole, so the function sees mosaicked pixels; input NODATA is honoured
-  through `propagateNoData`, so a nodata input gives a nodata output.
+  through `propagateNoData`, so a nodata input gives a nodata output. A `nodata` that
+  doesn't fit in `dtype` (NaN or out of range for an integer type) raises `ValueError`.
 - `freezebase.vrt.warp(source, crs=, src_crs=, resolution=, bounds=, like=, resampling=,
   snap=, dtype=, nodata=, tolerance=, allow_ballpark=)` warps a raster or `VRT` onto an
   explicit grid (`resolution` may be `(x, y)`), onto the grid
@@ -49,7 +50,8 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   missing grid raises `ValueError` instead of silently ignoring a datum shift. `tolerance`
   is the approximation error in source pixels, `0` for exact; the default `"auto"` is 0.125
   for horizontal-only warps and exact when heights shift. Both settings are kept in the
-  written VRT.
+  written VRT. The dtype is never promoted implicitly, and a nodata that doesn't fit in
+  it raises `ValueError`.
 - `warp` shifts heights between vertical datums when the source CRS and `crs` differ and
   both are compound or 3D (e.g. `EPSG:2056+5728` to `EPSG:4979`), with exact transforms
   under `tolerance="auto"`. Heights in feet are converted as `gdalwarp` does. Warping between
@@ -91,6 +93,11 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   that value. Before, `10 * log10(nodata)` reached the output, e.g. `-inf` for a NODATA of
   0; now the output pixel is nodata (NaN). Mask `-inf` no longer; test for NaN instead.
 - `create_warped_vrt` takes `resolution` as a float, an `(x, y)` tuple or `None`.
+- **Breaking:** `create_warped_vrt` raises `ValueError` when the nodata does not fit in the
+  warped dtype. Before, `dtype="uint8"` over a NaN-nodata source wrote no nodata, so NaN
+  pixels became valid zeros, and `nodata=nan` over an integer source silently promoted the
+  output to float64. Now pass a nodata the dtype can hold (`dtype="uint8", nodata=255`), or
+  a float `dtype` with `nodata=nan`.
 - **Breaking:** `create_warped_vrt` is built on `freezebase.vrt.warp` and no longer ignores
   datum differences. Before, a missing PROJ datum grid fell back silently to a ballpark
   transformation with a zero shift, and heights were never shifted or converted. Now PROJ

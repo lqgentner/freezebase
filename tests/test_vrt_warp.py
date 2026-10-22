@@ -281,6 +281,38 @@ class TestPixels:
         assert data[0, 0] == pytest.approx(14 / 3)
 
 
+class TestNodataFits:
+    """A nodata the warped dtype cannot hold raises instead of turning into valid pixels."""
+
+    def test_nan_source_into_integer_dtype_raises(self, tmp_path: Path) -> None:
+        src = make_tiff(tmp_path / "f.tif")
+        # Previously NaN pixels became valid zeros under no nodata at all.
+        with pytest.raises(ValueError, match=r"nodata nan .*uint8"):
+            warp(src, crs="EPSG:32632", resolution=10.0, dtype="uint8")
+        w = warp(src, crs="EPSG:32632", resolution=10.0, dtype="uint8", nodata=255)
+        assert (w.bands[0].dtype, w.bands[0].nodata) == ("uint8", 255)
+
+    def test_nan_nodata_for_integer_source_raises(self, tmp_path: Path) -> None:
+        src = make_tiff(tmp_path / "u.tif", dtype="uint16", nodata=0)
+        # Previously rasterio promoted the warp to float64 without a word.
+        with pytest.raises(ValueError, match=r"nodata nan .*uint16"):
+            warp(src, crs="EPSG:32632", resolution=10.0, nodata=math.nan)
+        with pytest.raises(ValueError, match=r"nodata nan .*int16"):
+            warp(src, crs="EPSG:32632", resolution=10.0, dtype="int16", nodata=math.nan)
+
+    def test_out_of_range_nodata_raises(self, tmp_path: Path) -> None:
+        src = make_tiff(tmp_path / "i.tif", dtype="int16", nodata=-1)
+        with pytest.raises(ValueError, match=r"nodata -1.* uint8"):
+            warp(src, crs="EPSG:32632", resolution=10.0, dtype="uint8")
+        with pytest.raises(ValueError, match=r"nodata 0.5 .*int16"):
+            warp(src, crs="EPSG:32632", resolution=10.0, nodata=0.5)
+
+    def test_integer_source_keeps_its_dtype_with_integer_nodata(self, tmp_path: Path) -> None:
+        src = make_tiff(tmp_path / "u.tif", dtype="uint16", nodata=0)
+        w = warp(src, crs="EPSG:32632", resolution=10.0, nodata=65535)
+        assert (w.bands[0].dtype, w.bands[0].nodata) == ("uint16", 65535)
+
+
 class TestSources:
     def test_warp_of_an_in_memory_mosaic_round_trips(self, tmp_path: Path) -> None:
         a = make_tiff(tmp_path / "a.tif", fill=1.0)

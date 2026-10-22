@@ -7,6 +7,7 @@ import math
 from typing import TYPE_CHECKING, ClassVar, Literal, Self
 from xml.etree import ElementTree as ET
 
+import numpy as np
 from rasterio.enums import ColorInterp
 
 if TYPE_CHECKING:
@@ -44,11 +45,33 @@ _GDAL_DTYPE_NAMES = {
 }
 
 
+# The real types, which NumPy can describe.
+_NUMPY_DTYPES = frozenset(name for name in _GDAL_DTYPE_NAMES if not name.startswith("complex"))
+
+
 def _nodata_equal(a: float | None, b: float | None) -> bool:
     """Compare nodata values, NaN equal to NaN."""
     if a is None or b is None:
         return a is b
     return a == b or (math.isnan(a) and math.isnan(b))
+
+
+def _check_nodata_fits(dtype: str, nodata: float | None) -> None:
+    """Raise if ``nodata`` cannot be stored in ``dtype``, so GDAL would drop or alter it."""
+    if nodata is None or dtype not in _NUMPY_DTYPES:
+        return
+    kind = np.dtype(dtype)
+    if kind.kind in "iu":
+        info = np.iinfo(kind)
+        fits = math.isfinite(nodata) and nodata == int(nodata) and info.min <= nodata <= info.max
+    else:
+        fits = not math.isfinite(nodata) or abs(nodata) <= float(np.finfo(kind).max)
+    if not fits:
+        msg = (
+            f"nodata {nodata:g} does not fit in {dtype}; pass a nodata {dtype} can hold, "
+            "or a dtype that holds it."
+        )
+        raise ValueError(msg)
 
 
 def _fields_equal(a: Source | Band, b: Source | Band) -> bool:

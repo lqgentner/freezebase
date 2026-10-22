@@ -684,6 +684,30 @@ class TestColourTables:
             assert (ds.scales, ds.offsets) == ((0.01,), (5.0,))
 
 
+class TestWarpedVrtNodata:
+    def test_nan_source_into_integer_dtype_raises(self, tmp_path: Path) -> None:
+        make_tiff(tmp_path / "f.tif")
+        with pytest.raises(ValueError, match="nodata"):
+            create_warped_vrt(
+                tmp_path / "f.tif",
+                tmp_path / "w.vrt",
+                crs="EPSG:32632",
+                resolution=10,
+                dtype="uint8",
+            )
+
+    def test_nan_nodata_for_integer_source_raises(self, tmp_path: Path) -> None:
+        make_uint16_tiff(tmp_path / "u.tif")
+        with pytest.raises(ValueError, match="nodata"):
+            create_warped_vrt(
+                tmp_path / "u.tif",
+                tmp_path / "w.vrt",
+                crs="EPSG:32632",
+                resolution=10,
+                nodata=np.nan,
+            )
+
+
 class TestWarpedVrt:
     def test_reprojects_onto_the_requested_grid(self, tmp_path: Path) -> None:
         src = tmp_path / "utm.tif"

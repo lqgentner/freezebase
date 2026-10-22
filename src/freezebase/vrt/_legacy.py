@@ -210,7 +210,8 @@ def create_warped_vrt(
     ValueError
         If ``resolution`` is not positive, ``bounds`` is given and does not lie on the
         ``resolution`` grid, no exact transformation is available (e.g. a datum grid is
-        missing), or only one of the source CRS and ``crs`` has a vertical datum.
+        missing), only one of the source CRS and ``crs`` has a vertical datum, or the
+        nodata (``nodata``, else the source's) does not fit in the warped dtype.
     """
     warp(
         src_path,
