@@ -16,13 +16,15 @@ from upath import UPath
 from freezebase import raster
 from freezebase.raster import _to_vsi_uri, rasterio_open
 from freezebase.vrt._grid import (
-    _ALIGNMENT_TOL,
     _DENSIFY_PTS,
-    _PIXEL_SIZE_TOL,
     _assert_extent_aligned,
+    _assert_grid_aligned,
+    _label,
     _snap_out,
+    _validate_tiles,
+    raster_info,
 )
-from freezebase.vrt._model import _GDAL_DTYPE_NAMES, _nodata_equal
+from freezebase.vrt._model import _GDAL_DTYPE_NAMES
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -236,108 +238,6 @@ def create_rgb_vrt(
     _write_vrt(root, output_vrt)
 
 
-class _TileInfo(NamedTuple):
-    path: UPath
-    name: str
-    bounds: BoundingBox
-    width: int
-    height: int
-    px: float
-    py: float
-    shear_x: float
-    shear_y: float
-    band_count: int
-    dtype: str
-    nodata: float | None
-    description: str
-    crs: CRS
-    crs_wkt: str
-
-
-def _read_tile_info(path: UPath) -> _TileInfo:
-    with rasterio_open(path) as ds:
-        return _TileInfo(
-            path=path,
-            name=path.name,
-            bounds=ds.bounds,
-            width=ds.width,
-            height=ds.height,
-            px=ds.transform.a,
-            py=-ds.transform.e,
-            shear_x=ds.transform.b,
-            shear_y=ds.transform.d,
-            band_count=ds.count,
-            dtype=ds.dtypes[0],
-            nodata=ds.nodata,
-            description=ds.descriptions[0] or "",
-            crs=ds.crs,
-            crs_wkt=ds.crs.to_wkt(),
-        )
-
-
-def _validate_mosaic_tiles(tiles: list[_TileInfo]) -> None:
-    """Validate tiles for an axis-aligned, single-band mosaic.
-
-    Raises
-    ------
-    ValueError
-        If tile grids, data types, NODATA or band counts are incompatible.
-    """
-    ref = tiles[0]
-
-    if ref.band_count != 1:
-        msg = f"Only single-band tiles supported, got {ref.band_count} bands in '{ref.name}'."
-        raise ValueError(msg)
-    if ref.dtype not in _GDAL_DTYPE_NAMES:
-        msg = f"Unsupported tile dtype '{ref.dtype}' in '{ref.name}'."
-        raise ValueError(msg)
-
-    for t in tiles:
-        _validate_tile(t, ref)
-
-
-def _validate_tile(t: _TileInfo, ref: _TileInfo) -> None:
-    """Validate one tile against the mosaic reference."""
-    if t.band_count != 1:
-        msg = f"Only single-band tiles supported, got {t.band_count} bands in '{t.name}'."
-        raise ValueError(msg)
-    if t.crs != ref.crs:
-        msg = f"All tiles must share a CRS; '{t.name}' differs from '{ref.name}'."
-        raise ValueError(msg)
-    if t.dtype != ref.dtype:
-        msg = (
-            f"All tiles must share a dtype; '{t.name}' is '{t.dtype}', "
-            f"'{ref.name}' is '{ref.dtype}'."
-        )
-        raise ValueError(msg)
-    if not _nodata_equal(t.nodata, ref.nodata):
-        msg = (
-            f"All tiles must share a NODATA value; '{t.name}' is {t.nodata}, "
-            f"'{ref.name}' is {ref.nodata}."
-        )
-        raise ValueError(msg)
-    if abs(t.px - ref.px) > _PIXEL_SIZE_TOL or abs(t.py - ref.py) > _PIXEL_SIZE_TOL:
-        msg = "All tiles must share the same pixel size to be mosaicked into a VRT"
-        raise ValueError(msg)
-    if abs(t.shear_x) > _PIXEL_SIZE_TOL or abs(t.shear_y) > _PIXEL_SIZE_TOL:
-        msg = f"Rotated/sheared tiles cannot be mosaicked into an axis-aligned VRT: '{t.name}'."
-        raise ValueError(msg)
-
-
-def _assert_grid_aligned(tiles: list[_TileInfo], minx: float, maxy: float) -> None:
-    """Reject tile origins outside the mosaic pixel grid."""
-    px, py = tiles[0].px, tiles[0].py
-    for t in tiles:
-        col = (t.bounds.left - minx) / px
-        row = (maxy - t.bounds.top) / py
-        if abs(col - round(col)) > _ALIGNMENT_TOL or abs(row - round(row)) > _ALIGNMENT_TOL:
-            msg = (
-                f"Tile '{t.name}' is not aligned to the common pixel grid; "
-                "its origin does not fall on an integer pixel offset."
-            )
-            raise ValueError(msg)
-
-
 def build_vrt_mosaic(
     files: Sequence[AnyPath],
     dst_vrt: AnyPath,
@@ -371,8 +271,13 @@ def build_vrt_mosaic(
         raise ValueError(msg)
 
     dst_vrt = UPath(dst_vrt)
-    tiles = [_read_tile_info(UPath(f)) for f in files]
-    _validate_mosaic_tiles(tiles)
+    paths = [UPath(f) for f in files]
+    tiles = [raster_info(p) for p in paths]
+    for i, t in enumerate(tiles):
+        if t.count != 1:
+            msg = f"Only single-band tiles supported, got {t.count} bands in '{_label(t, i)}'."
+            raise ValueError(msg)
+    _validate_tiles(tiles)
 
     px, py = tiles[0].px, tiles[0].py
     if bounds is None:
@@ -387,25 +292,26 @@ def build_vrt_mosaic(
     mosaic_w = round((maxx - minx) / px)
     mosaic_h = round((maxy - miny) / py)
 
-    gdal_dtype = _GDAL_DTYPE_NAMES[tiles[0].dtype]
-    nodata = tiles[0].nodata
+    gdal_dtype = _GDAL_DTYPE_NAMES[tiles[0].dtypes[0]]
+    nodata = tiles[0].nodatavals[0]
 
     root = ET.Element("VRTDataset", rasterXSize=str(mosaic_w), rasterYSize=str(mosaic_h))
-    ET.SubElement(root, "SRS").text = tiles[0].crs_wkt
+    if tiles[0].crs is not None:
+        ET.SubElement(root, "SRS").text = tiles[0].crs.to_wkt()
     ET.SubElement(root, "GeoTransform").text = f"{minx}, {px}, 0, {maxy}, 0, {-py}"
 
     band = ET.SubElement(root, "VRTRasterBand", dataType=gdal_dtype, band="1")
     if nodata is not None:
         ET.SubElement(band, "NoDataValue").text = str(nodata)
     ET.SubElement(band, "ColorInterp").text = "Gray"
-    ET.SubElement(band, "Description").text = tiles[0].description
+    ET.SubElement(band, "Description").text = tiles[0].descriptions[0] or ""
 
     source_tag = "ComplexSource" if nodata is not None else "SimpleSource"
-    for t in tiles:
+    for path, t in zip(paths, tiles, strict=True):
         xoff = round((t.bounds.left - minx) / px)
         yoff = round((maxy - t.bounds.top) / py)
         source = ET.SubElement(band, source_tag)
-        text, relative = _source_ref(t.path, dst_vrt)
+        text, relative = _source_ref(path, dst_vrt)
         filename = ET.SubElement(source, "SourceFilename", relativeToVRT=relative)
         filename.text = text
         ET.SubElement(source, "SourceBand").text = "1"

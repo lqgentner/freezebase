@@ -9,8 +9,9 @@ import pytest
 import rasterio
 from rasterio.enums import ColorInterp
 from rasterio.transform import Affine
+from rasterio.windows import Window
 
-from freezebase.vrt import VRT, Source, from_raster, stack
+from freezebase.vrt import VRT, Source, from_raster, mosaic, stack
 from freezebase.vrt._grid import raster_info
 from tests.rasters import make_tiff
 
@@ -145,3 +146,119 @@ class TestRasterInfo:
         info = raster_info(from_raster(p))
         assert info.count == 2
         assert isinstance(info.ref, VRT)
+
+
+class TestMosaicAligned:
+    def test_two_adjacent_single_band_tiles(self, tmp_path: Path) -> None:
+        a = make_tiff(tmp_path / "a.tif")
+        b = make_tiff(tmp_path / "b.tif", origin=(500060.0, 5200000.0))
+        vrt = mosaic([a, b])
+        assert (vrt.width, vrt.height) == (12, 4)
+        with vrt.open() as ds:
+            data = ds.read(1)
+        np.testing.assert_array_equal(data[:, :6], _read(a)[0])
+        np.testing.assert_array_equal(data[:, 6:], _read(b)[0])
+        source = vrt.bands[0].sources[1]
+        assert source.src_window == Window(0, 0, 6, 4)
+        assert source.dst_window == Window(6, 0, 6, 4)
+        props = source.properties
+        assert props is not None
+        assert (props.width, props.height, props.dtype) == (6, 4, "float32")
+
+    def test_three_band_tiles_keep_every_band(self, tmp_path: Path) -> None:
+        names = ("r", "g", "b")
+        a = make_tiff(tmp_path / "a.tif", count=3, descriptions=names)
+        b = make_tiff(
+            tmp_path / "b.tif",
+            count=3,
+            origin=(500060.0, 5200000.0),
+            descriptions=("x", "y", "z"),
+        )
+        with mosaic([a, b]).open() as ds:
+            assert ds.count == 3
+            assert ds.descriptions == names
+            np.testing.assert_array_equal(ds.read()[:, :, 6:], _read(b))
+            np.testing.assert_array_equal(ds.read()[:, :, :6], _read(a))
+
+    def test_later_source_wins_where_valid(self, tmp_path: Path) -> None:
+        a = make_tiff(tmp_path / "a.tif", fill=1)
+        b = make_tiff(tmp_path / "b.tif", fill=2)
+        with rasterio.open(b, "r+") as ds:
+            data = ds.read(1)
+            data[0, 0] = np.nan
+            ds.write(data, 1)
+        with mosaic([a, b]).open() as ds:
+            data = ds.read(1)
+        assert data[0, 0] == 1
+        assert data[0, 1] == 2
+
+    def test_nodata_override_applies_to_sources(self, tmp_path: Path) -> None:
+        a = make_tiff(tmp_path / "a.tif", nodata=None)
+        b = make_tiff(tmp_path / "b.tif", nodata=None, origin=(500060.0, 5200000.0))
+        vrt = mosaic([a, b], nodata=0.0)
+        assert vrt.bands[0].nodata == 0.0
+        assert [s.nodata for s in vrt.bands[0].sources] == [0.0, 0.0]
+        assert "<ComplexSource" in vrt.to_xml()
+        assert "<NODATA>0" in vrt.to_xml()
+
+    def test_rejects_mismatched_band_count(self, tmp_path: Path) -> None:
+        a = make_tiff(tmp_path / "a.tif")
+        b = make_tiff(tmp_path / "b.tif", count=2, origin=(500060.0, 5200000.0))
+        with pytest.raises(ValueError, match="band"):
+            mosaic([a, b])
+
+    def test_rejects_mixed_nodata(self, tmp_path: Path) -> None:
+        a = make_tiff(tmp_path / "a.tif", nodata=None)
+        b = make_tiff(tmp_path / "b.tif", nodata=np.nan, origin=(500060.0, 5200000.0))
+        with pytest.raises(ValueError, match="NODATA"):
+            mosaic([a, b])
+
+    def test_without_nodata_writes_simple_sources(self, tmp_path: Path) -> None:
+        a = make_tiff(tmp_path / "a.tif", nodata=None)
+        xml = mosaic([a]).to_xml()
+        assert "<SimpleSource" in xml
+        assert "ComplexSource" not in xml
+        assert "None" not in xml
+
+    def test_vrt_inputs_are_nested(self, tmp_path: Path) -> None:
+        a = from_raster(make_tiff(tmp_path / "a.tif", count=2))
+        b = make_tiff(tmp_path / "b.tif", count=2, origin=(500060.0, 5200000.0))
+        vrt = mosaic([a, b])
+        assert vrt.bands[1].sources[0].path is a
+        assert vrt.bands[1].sources[0].band == 2
+        with vrt.open() as ds:
+            np.testing.assert_array_equal(ds.read()[:, :, 6:], _read(b))
+
+    def test_vrt_input_is_named_in_errors(self, tmp_path: Path) -> None:
+        a = make_tiff(tmp_path / "a.tif")
+        b = from_raster(make_tiff(tmp_path / "b.tif", crs="EPSG:32633"))
+        with pytest.raises(ValueError, match="VRT input #1"):
+            mosaic([a, b])
+
+    def test_bounds_and_off_grid_errors_as_before(self, tmp_path: Path) -> None:
+        a = make_tiff(tmp_path / "a.tif")
+        with pytest.raises(ValueError, match="whole number"):
+            mosaic([a], bounds=(500000, 5199960, 500065, 5200000))
+        off = make_tiff(tmp_path / "b.tif", origin=(500065.0, 5200000.0))
+        with pytest.raises(ValueError, match="aligned"):
+            mosaic([a, off])
+        wide = mosaic([a], bounds=(500000, 5199960, 500120, 5200040))
+        assert (wide.width, wide.height) == (12, 8)
+        assert wide.bands[0].sources[0].dst_window == Window(0, 4, 6, 4)
+
+    def test_rejects_empty_and_unimplemented_resolution(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="must not be empty"):
+            mosaic([])
+        a = make_tiff(tmp_path / "a.tif")
+        with pytest.raises(NotImplementedError):
+            mosaic([a], resolution="finest")
+
+    def test_names_and_color_interp(self, tmp_path: Path) -> None:
+        a = make_tiff(tmp_path / "a.tif", count=2)
+        vrt = mosaic([a], band_names=["p", "q"], color_interp=[ColorInterp.red, ColorInterp.green])
+        assert [b.description for b in vrt.bands] == ["p", "q"]
+        assert [b.color_interp for b in vrt.bands] == [ColorInterp.red, ColorInterp.green]
+        with pytest.raises(ValueError, match="entries"):
+            mosaic([a], band_names=["p"])
+        with pytest.raises(ValueError, match="entries"):
+            mosaic([a], color_interp=[ColorInterp.red])
