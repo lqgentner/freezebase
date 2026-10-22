@@ -20,6 +20,9 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   including VRTs written by freezebase 0.8 and `gdalbuildvrt`. `/vsis3/` sources become
   `s3://` paths with `storage_options`, or else those of an `s3://` `path`; elements the
   model cannot hold raise `ValueError`. `Band` and `Source` compare NaN nodata as equal.
+- `VRT.sources`, `VRT.source_files()`, `VRT.env()` and `VRT.open()`: inspect the files a VRT
+  reads, enter the local, S3 or HTTP environment they need (`ValueError` for sources needing
+  different credentials), and open a VRT from memory.
 
 ### Changed
 

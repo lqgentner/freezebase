@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 import math
 from pathlib import Path
@@ -45,7 +47,7 @@ def find(element: ET.Element, path: str) -> ET.Element:
     return found
 
 
-def vrt_over(path: Path, **band_kwargs: Any) -> VRT:
+def vrt_over(path: Path | UPath, **band_kwargs: Any) -> VRT:
     """Build a one-band VRT on the grid of ``path`` with one source reading its band 1."""
     with rasterio.open(path) as ds:
         crs, transform, width, height, dtype = (
@@ -739,3 +741,123 @@ class TestNodataEquality:
         assert Band("float32") != Band("uint8")
         assert Band("float32") != "float32"
         assert Source(UPath("/a.tif")) != "/a.tif"
+
+
+class TestSourcesAndEnv:
+    def test_sources_are_ordered_and_unique(self, tmp_path: Path) -> None:
+        a = UPath(make_tiff(tmp_path / "a.tif"))
+        b = UPath(make_tiff(tmp_path / "b.tif"))
+        inner = vrt_over(a)
+        bands = [
+            Band("float32", [Source(a), Source(inner), Source(b)]),
+            Band("float32", [Source(UPath(str(b))), Source(inner), Source(a)]),
+        ]
+        v = VRT(inner.crs, inner.transform, inner.width, inner.height, bands)
+        assert v.sources == [a, inner, b]
+        assert v.sources[1] is inner
+
+    def test_warp_source_is_included(self, tmp_path: Path) -> None:
+        a = UPath(make_tiff(tmp_path / "a.tif"))
+        v = vrt_over(a)
+        v.bands[0].sources = []
+        v.warp = Warp(a, "<GDALWarpOptions/>", (64, 64))
+        assert v.sources == [a]
+
+    def test_source_files_follow_vrt_files(self, tmp_path: Path) -> None:
+        a = UPath(make_tiff(tmp_path / "a.tif"))
+        b = UPath(make_tiff(tmp_path / "b.tif"))
+        warped = vrt_over(a)
+        warped.bands[0].sources.append(Source(b))
+        warped_path = warped.write(tmp_path / "warped.vrt")
+        outer = vrt_over(warped_path)
+        outer.bands[0].sources.append(Source(a))
+        assert outer.source_files() == [a, b]
+
+    def test_source_files_recurse_into_nested_vrts(self, tmp_path: Path) -> None:
+        a = UPath(make_tiff(tmp_path / "a.tif"))
+        b = UPath(make_tiff(tmp_path / "b.tif"))
+        inner = vrt_over(b)
+        outer = vrt_over(a)
+        outer.bands[0].sources.append(Source(inner))
+        assert outer.source_files() == [a, b]
+
+    def test_source_files_without_follow_stop_at_vrt_files(self, tmp_path: Path) -> None:
+        a = UPath(make_tiff(tmp_path / "a.tif"))
+        warped_path = vrt_over(a).write(tmp_path / "warped.vrt")
+        outer = vrt_over(warped_path)
+        assert outer.source_files(follow=False) == [warped_path]
+
+    def test_source_files_pass_storage_options_to_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        a = UPath(make_tiff(tmp_path / "a.tif"))
+        warped_path = vrt_over(a).write(tmp_path / "warped.vrt")
+        seen: list[Any] = []
+        real = read
+
+        def spy(path: UPath, *, storage_options: Any = None) -> VRT:
+            seen.append(storage_options)
+            return real(path, storage_options=storage_options)
+
+        monkeypatch.setattr("freezebase.vrt._io.read", spy)
+        vrt_over(warped_path).source_files(storage_options={"key": "k"})
+        assert seen == [{"key": "k"}]
+
+    def test_env_local_is_plain(self, tmp_path: Path) -> None:
+        v = vrt_over(make_tiff(tmp_path / "a.tif"))
+        with v.env():
+            assert not any(key.startswith("AWS_") for key in rasterio.env.getenv())
+
+    def test_env_without_sources_is_plain(self) -> None:
+        with VRT(None, UTM_GRID, 1, 1).env():
+            pass
+
+    def test_env_http_uses_http_env(self) -> None:
+        v = VRT(None, UTM_GRID, 1, 1, [Band("float32", [Source(UPath("https://h/a.tif"))])])
+        with v.env():
+            assert rasterio.env.getenv()["GDAL_DISABLE_READDIR_ON_OPEN"] == "EMPTY_DIR"
+
+    def test_env_s3_uses_s3_env(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        calls: list[UPath] = []
+
+        @contextmanager
+        def recorder(path: UPath) -> Iterator[None]:
+            calls.append(path)
+            yield
+
+        monkeypatch.setattr("freezebase.s3.s3_env", recorder)
+        first = UPath("s3://a/x.tif", key="k")
+        sources = [Source(UPath(make_tiff(tmp_path / "l.tif"))), Source(first)]
+        sources.append(Source(UPath("s3://b/y.tif", key="k")))
+        v = VRT(None, UTM_GRID, 1, 1, [Band("float32", sources)])
+        with v.env():
+            pass
+        assert calls == [first]
+
+    def test_env_rejects_mixed_credentials(self) -> None:
+        sources = [
+            Source(UPath("s3://a/x.tif", key="k1")),
+            Source(UPath("s3://b/y.tif", key="k2")),
+        ]
+        v = VRT(None, UTM_GRID, 1, 1, [Band("float32", sources)])
+        with pytest.raises(ValueError, match="different credentials") as info:
+            v.env()
+        assert "s3://a/x.tif" in str(info.value)
+        assert "s3://b/y.tif" in str(info.value)
+
+    def test_env_rejects_s3_mixed_with_http(self) -> None:
+        sources = [Source(UPath("s3://a/x.tif", key="k1")), Source(UPath("https://h/y.tif"))]
+        v = VRT(None, UTM_GRID, 1, 1, [Band("float32", sources)])
+        with pytest.raises(ValueError, match="different credentials"):
+            v.env()
+
+    def test_env_rejects_unsupported_protocol(self) -> None:
+        v = VRT(None, UTM_GRID, 1, 1, [Band("float32", [Source(UPath("memory://x.tif"))])])
+        with pytest.raises(ValueError, match="Unsupported protocol"):
+            v.env()
+
+    def test_open_reads_without_a_file(self, tmp_path: Path) -> None:
+        tile = make_tiff(tmp_path / "a.tif")
+        v = vrt_over(tile)
+        with v.open() as ds, rasterio.open(tile) as src:
+            np.testing.assert_array_equal(ds.read(1), src.read(1))
