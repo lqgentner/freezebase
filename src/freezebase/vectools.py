@@ -16,31 +16,45 @@ from shapely import (
 from shapely.geometry.base import BaseGeometry
 
 
-def save_and_read_parquet(gdf: gpd.GeoDataFrame, out_path: str | Path) -> gpd.GeoDataFrame:
-    """Atomically save a GeoDataFrame as GeoParquet and read it back.
+def write_parquet(
+    gdf: gpd.GeoDataFrame,
+    out_path: str | Path,
+    *,
+    compression_level: int = 15,
+    row_group_size: int = 100_000,
+) -> None:
+    """Atomically write a GeoDataFrame as zstd-compressed GeoParquet.
+
+    The file is staged beside ``out_path`` and renamed into place, so an interrupted
+    write never leaves a truncated file at ``out_path``.
 
     Parameters
     ----------
     gdf : gpd.GeoDataFrame
-        Data to save.
+        Data to write.
     out_path : str or Path
-        Output path.
-
-    Returns
-    -------
-    gpd.GeoDataFrame
-        Saved data read from disk.
+        Local output path.
+    compression_level : int, default 15
+        Zstandard level, 1 to 22. Higher levels write slower and smaller files;
+        reading is equally fast at every level.
+    row_group_size : int, default 100_000
+        Maximum rows per row group. Several groups let readers decode in parallel.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = out_path.with_name(f".{out_path.name}.{token_hex(8)}.tmp")
     try:
-        gdf.to_parquet(tmp_path, engine="pyarrow")
+        gdf.to_parquet(
+            tmp_path,
+            engine="pyarrow",
+            compression="zstd",
+            compression_level=compression_level,
+            row_group_size=row_group_size,
+        )
         tmp_path.replace(out_path)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
-    return gpd.read_parquet(out_path)
 
 
 def drop_z_if_zero(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
