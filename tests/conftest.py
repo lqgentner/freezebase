@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any
 
 import pyproj.datadir
 import pytest
@@ -15,32 +14,18 @@ import rasterio.shutil
 from freezebase import raster
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from upath import UPath
 
 _S3_PREFIXES = ("/vsis3/", "s3://")
-GRIDS = Path(pyproj.datadir.get_user_data_dir())
-_SWISS_GRIDS = (
-    "ch_swisstopo_chgeo2004_ETRS89_LN02.tif",
-    "ch_swisstopo_chgeo2004_ETRS89_LHN95.tif",
-)
-
-
-def skip_or_fail(reason: str) -> NoReturn:
-    """Skip locally, but fail under CI so a bad grid cache cannot silently skip tests."""
-    if os.environ.get("CI"):
-        pytest.fail(reason)
-    pytest.skip(reason)
+# swisstopo's CHGeo2004 geoid grids (CC0), as published on cdn.proj.org.
+GRIDS = Path(__file__).parent / "data" / "proj"
 
 
 @pytest.fixture(scope="session")
-def proj_grids(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Return a PROJ data directory joining rasterio's PROJ data and pyproj's synced grids."""
-    missing = [name for name in _SWISS_GRIDS if not (GRIDS / name).is_file()]
-    if missing:
-        reason = (
-            f"PROJ grids missing ({', '.join(missing)}); run pyproj sync --source-id ch_swisstopo"
-        )
-        skip_or_fail(reason)
+def proj_grids(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
+    """Yield a PROJ data directory joining rasterio's PROJ data and the test grids."""
     proj_data = PROJDataFinder().search()
     if proj_data is None:
         pytest.skip("rasterio bundles no PROJ data")
@@ -51,7 +36,11 @@ def proj_grids(tmp_path_factory: pytest.TempPathFactory) -> Path:
             link = joined / file.name
             if not link.exists():
                 link.symlink_to(file)
-    return joined
+    # pyproj computes the expected heights and reads grids from its own data directories.
+    previous = pyproj.datadir.get_data_dir()
+    pyproj.datadir.append_data_dir(str(GRIDS))
+    yield joined
+    pyproj.datadir.set_data_dir(previous)
 
 
 @pytest.fixture
