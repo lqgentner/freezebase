@@ -12,7 +12,7 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 - Python 3.15 support, verified in CI.
 - `vectools.write_parquet` writes a GeoDataFrame atomically as zstd-compressed
-  GeoParquet; `compression_level` and `row_group_size` are keyword arguments.
+  GeoParquet.
 
 ### Changed
 
@@ -34,9 +34,8 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   `MGRSGrid` uses: upper case, two-digit zone, no surrounding spaces. Before,
   `from_mgrs("4QFJ15").mgrs_code` was `"4QFJ15"`; now it is `"04QFJ15"`.
 - `GeoVectorData` caches its processed GeoParquet with zstd at level 15 in row
-  groups of at most 100 000 rows, instead of pyarrow's snappy in one row group of
-  up to a million. The files shrink by a quarter to a half and read as fast;
-  caches written by earlier versions stay valid and are not rewritten.
+  groups of at most 100 000 rows. Files shrink by a quarter to a half.
+  Caches written by earlier versions stay valid and are not rewritten.
 
 ### Removed
 
