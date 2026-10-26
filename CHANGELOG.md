@@ -26,6 +26,9 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   when a per-band sequence (`band_names`, `color_interp`, `band_tags`, `units`) does not
   hold one entry per band, as they already did for a VRT. Before, they raised
   `RuntimeError` after staging the write. Catch `ValueError` instead of `RuntimeError`.
+- **Breaking:** `rewrite_tiff`'s `band_names` and `color_interp` are keyword-only, as in
+  `write_cog`. Replace `rewrite_tiff(src, dst, profile, names)` with
+  `rewrite_tiff(src, dst, profile, band_names=names)`.
 
 ### Fixed
 

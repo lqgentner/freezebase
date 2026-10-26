@@ -1001,6 +1001,10 @@ class TestPerBandLengths:
 
         assert sorted(p.name for p in tmp_path.iterdir()) == ["src.tif"]
 
+    def test_rewrite_takes_band_metadata_by_keyword_only(self, tmp_path: Path) -> None:
+        with pytest.raises(TypeError):
+            rewrite_tiff(tmp_path / "src.tif", tmp_path / "dst.tif", None, ["VV"])  # pyrefly: ignore[bad-argument-count]  # the call under test
+
     def test_rewrite_of_a_missing_source_is_a_write_error(self, tmp_path: Path) -> None:
         with pytest.raises(RasterWriteError, match="Failed to rewrite"):
             rewrite_tiff(tmp_path / "missing.tif", tmp_path / "dst.tif", units=["natural"])
