@@ -57,7 +57,8 @@ navbar_style: mint
 nav_icons:
   sidebar:
     The MGRS grid: globe
-    Rasters on S3: box
+    Accessing S3: box
+    Reading and writing rasters: grid-3x3
     VRTs: layers
     Contributing: wrench
 
@@ -96,6 +97,7 @@ reference:
         - raster.COG_PROFILE
         - raster.GDAL_HTTP_OPTIONS
         - raster.RASTERIO_PROFILE_DEFAULTS
+        - raster.AnyPath
 
     - title: VRT generation
       desc: >-
@@ -138,6 +140,7 @@ reference:
         - s3.configured_endpoint_url
         - s3.list_object_sizes
         - s3.atomic_write_text
+        - s3.upload_object
         - s3.content_type_for
         - s3.CONTENT_TYPES
 
@@ -146,6 +149,8 @@ reference:
         Connection settings read from prefixed environment variables
       contents:
         - settings.S3Settings
+        - settings.ChecksumPolicy
+        - settings.AnyDir
 
     - title: Vector data
       desc: Cached vector datasets and GeoDataFrame helpers
