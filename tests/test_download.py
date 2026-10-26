@@ -27,6 +27,7 @@ from freezebase.download import (
     _sanitize_filename,
     _write_file,
 )
+from freezebase.errors import DownloadError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -510,9 +511,20 @@ class TestRedirectCredentialSafety:
         session = FakeSession({f"{HOST}/a": a, f"{HOST}/b": b})
         dl = make_downloader(session, auth=("user", "pass"))
 
-        with pytest.raises(RuntimeError, match="Exceeded maximum"):
+        with pytest.raises(DownloadError, match="Exceeded maximum"):
             dl(f"{HOST}/a", tmp_path)
         assert len(session.calls) == MAX_REDIRECTS + 1
+
+    def test_redirect_without_hostname_is_rejected(self, tmp_path: Path) -> None:
+        redirect = make_response(
+            status=302,
+            url=f"{HOST}/a",
+            headers={"Location": "file:///etc/passwd"},
+        )
+        dl = make_downloader(FakeSession({f"{HOST}/a": redirect}))
+
+        with pytest.raises(DownloadError, match="Hostname not found"):
+            dl(f"{HOST}/a", tmp_path)
 
     def test_auth_preserved_on_trusted_cross_host_redirect(self, tmp_path: Path) -> None:
         """A host named in `trusted_hosts` still receives the credentials.
@@ -605,7 +617,7 @@ class TestResponseClosedOnFailure:
         )
         dl = make_downloader(session)
 
-        with pytest.raises(RuntimeError, match="No downloadable file found"):
+        with pytest.raises(DownloadError, match="No downloadable file found"):
             dl(url=url, save_dir=tmp_path, filename="file.zip")
 
         assert session.closed == [url]
@@ -714,7 +726,7 @@ class TestFilenameInference:
         resp = make_response(url=url, headers={"Content-Type": "application/zip"})
         dl = make_downloader(FakeSession({url: resp}))
 
-        with pytest.raises(RuntimeError, match="Could not infer filename"):
+        with pytest.raises(DownloadError, match="Could not infer filename"):
             dl(url, tmp_path)
 
     def test_accepts_a_str_save_dir(self, tmp_path: Path) -> None:

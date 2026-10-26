@@ -8,6 +8,13 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## Unreleased
 
+### Added
+
+- `freezebase.errors` with `FreezebaseError`, the base of freezebase-specific errors, and
+  `DownloadError`. `HTTPDownloader` raises `DownloadError` where it raised `RuntimeError`
+  (a response that is not a file, a redirect without a host, too many redirects, no
+  inferable filename). It subclasses `RuntimeError`, so existing `except RuntimeError` handlers keep working.
+
 ### Fixed
 
 - `MGRSGrid` follows the curved WGS84 edges of its squares to within 5 cm, instead of
