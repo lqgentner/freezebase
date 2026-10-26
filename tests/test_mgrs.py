@@ -12,14 +12,17 @@ from shapely import (
     Polygon,
     area,
     box,
-    equals_exact,
     get_parts,
+    hausdorff_distance,
     intersection,
     is_prepared,
+    segmentize,
     union_all,
 )
+from shapely.geometry.base import BaseGeometry
 
 from freezebase.mgrs import (
+    _EDGE_TOLERANCE,
     MGRSGeoBox,
     MGRSGrid,
     UTMZones,
@@ -496,19 +499,59 @@ class TestMGRSGridAtAntimeridian:
         assert (bounds.maxx - bounds.minx < 1).all()
 
 
-def test_grid_geometries_are_the_projected_utm_squares() -> None:
-    grid = MGRSGrid(box(5.5, 45.5, 6.5, 46.5))  # spans zones 31 and 32
-    for zone in np.unique(grid.zones):
-        in_zone = grid.zones == zone
-        utm_squares = box(
-            grid.eastings[in_zone],
-            grid.northings[in_zone],
-            grid.eastings[in_zone] + 10_000,
-            grid.northings[in_zone] + 10_000,
-        )
-        expected = transform_shapely(utm_squares, utm_to_crs(int(zone), "N"), CRS(4326))
+class TestMGRSGridSquareEdges:
+    """Squares follow their UTM edges, which are curved in WGS84."""
 
-        assert equals_exact(grid.geometries[in_zone], expected, tolerance=0).all()
+    # Squares where a straight WGS84 edge strays furthest, 2 to 18 m, from the UTM one.
+    CODES = (
+        "32TMS35",  # 46 N
+        "33XWN08",  # 84 N
+        "21CWM07",  # 80 S
+        "31NAA73",  # equator, at the zone edge
+        # North edges halfway along a 100 km square, whose straight edge strays by 1 to 2 km.
+        "33XWN49",
+        "21CWM49",
+    )
+    EDGES = ("north", "south", "east", "west")
+
+    @staticmethod
+    def _near_edge(mgrs_code: str, edge: str, inset: float) -> BaseGeometry:
+        """Return a WGS84 point ``inset`` metres inside the middle of a square's edge."""
+        geobox = MGRSGeoBox.from_mgrs(mgrs_code)
+        minx, miny, maxx, maxy = geobox.extent.geom.bounds
+        x, y = {
+            "north": ((minx + maxx) / 2, maxy - inset),
+            "south": ((minx + maxx) / 2, miny + inset),
+            "east": (maxx - inset, (miny + maxy) / 2),
+            "west": (minx + inset, (miny + maxy) / 2),
+        }[edge]
+        return transform_shapely(Point(x, y), mgrs_to_crs(mgrs_code), CRS(4326))
+
+    @pytest.mark.parametrize("edge", EDGES)
+    @pytest.mark.parametrize("mgrs_code", CODES)
+    def test_point_just_inside_selects_only_its_square(self, mgrs_code: str, edge: str) -> None:
+        # Previously straight WGS84 edges put such points in a neighbouring square, or in none.
+        grid = MGRSGrid(self._near_edge(mgrs_code, edge, inset=0.1))
+
+        assert grid.mgrs_codes.tolist() == [mgrs_code]
+
+    @pytest.mark.parametrize("edge", EDGES)
+    @pytest.mark.parametrize("mgrs_code", CODES)
+    def test_point_just_outside_skips_the_square(self, mgrs_code: str, edge: str) -> None:
+        grid = MGRSGrid(self._near_edge(mgrs_code, edge, inset=-0.1))
+
+        assert mgrs_code not in grid.mgrs_codes
+
+    @pytest.mark.parametrize("mgrs_code", CODES)
+    def test_geometry_is_within_tolerance_of_the_utm_square(self, mgrs_code: str) -> None:
+        square = MGRSGeoBox.from_mgrs(mgrs_code).extent.geom
+        utm_crs = mgrs_to_crs(mgrs_code)
+        grid = MGRSGrid(transform_shapely(square.centroid, utm_crs, CRS(4326)))
+        (index,) = np.flatnonzero(grid.mgrs_codes == mgrs_code)
+        # Fill in the straight WGS84 edges so they keep their shape in UTM.
+        footprint = transform_shapely(segmentize(grid.geometries[index], 1e-4), CRS(4326), utm_crs)
+
+        assert hausdorff_distance(footprint, square, densify=1e-3) < _EDGE_TOLERANCE
 
 
 @pytest.mark.parametrize(

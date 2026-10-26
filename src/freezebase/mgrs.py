@@ -335,8 +335,14 @@ def _mgrs_10km_to_utm(match: re.Match[str]) -> tuple[int, Hemisphere, int, int]:
     if northing > _FALSE_NORTHING_SOUTH or not south <= latitude <= north:
         msg = f"MGRS reference {mgrs_code!r} lies outside latitude band {band}."
         raise ValueError(msg)
-    square = _utm_squares_to_wgs84(
-        zone, hemisphere, np.array([easting]), np.array([northing]), _10KM_SIZE
+    # Split the edges as `MGRSGrid` does for the square's 100 km row.
+    row_south = np.array([northing // _100KM_SIZE * _100KM_SIZE])
+    square = _utm_10km_squares_to_wgs84(
+        zone,
+        hemisphere,
+        np.array([easting]),
+        np.array([northing]),
+        _edge_segments(_row_latitudes(zone, hemisphere, row_south)),
     )
     if not _overlaps_zone(square, zone, hemisphere)[0]:
         msg = f"MGRS reference {mgrs_code!r} lies outside UTM zone {zone}{hemisphere}."
@@ -665,21 +671,74 @@ def _split_at_antimeridian(geoms: GeoArray) -> GeoArray:
     return split
 
 
-def _utm_squares_to_wgs84(
+# A straight WGS84 edge of length L strays from its UTM edge by at most
+# L² (tan|lat| + 0.11) / 8R; the 0.11 covers squares up to 6 degrees from the meridian.
+_EDGE_TOLERANCE = 0.05
+_EARTH_RADIUS = 6_371_000
+_MERIDIAN_OFFSET_CURVATURE = 0.11
+
+
+def _row_latitudes(
     zone: int,
     hemisphere: Hemisphere,
-    sw_x: NDArray[np.int32],
-    sw_y: NDArray[np.int32],
-    size: int,
+    row_south: NDArray[np.integer],
+) -> NDArray[np.float64]:
+    """Return the largest absolute latitude of each 100 km row."""
+    # At a given northing, latitude is furthest from the equator on the central meridian.
+    northings = np.stack([row_south, row_south + _100KM_SIZE]).astype(np.float64)
+    _, lat = _utm_to_wgs84(zone, hemisphere).transform(
+        np.full_like(northings, _FALSE_EASTING), northings
+    )
+    return np.abs(lat).max(axis=0)
+
+
+def _edge_sag(size: int, latitudes: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Return how far, in metres, a straight WGS84 edge of ``size`` metres may stray."""
+    curvature = np.tan(np.radians(latitudes)) + _MERIDIAN_OFFSET_CURVATURE
+    return size**2 * curvature / (8 * _EARTH_RADIUS)
+
+
+def _edge_segments(latitudes: NDArray[np.float64]) -> NDArray[np.intp]:
+    """Return how many segments keep 10 km edges at these latitudes within tolerance."""
+    sag = _edge_sag(_10KM_SIZE, latitudes)
+    return np.ceil(np.sqrt(sag / _EDGE_TOLERANCE)).astype(np.intp)
+
+
+def _sag_margin(size: int, latitudes: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Return a margin in degrees that covers how far straight WGS84 edges may stray."""
+    # Measured sags reach 1.05 times the bound, so the margin doubles it.
+    sag = 2 * _edge_sag(size, latitudes) / (_EARTH_RADIUS * np.cos(np.radians(latitudes)))
+    return np.degrees(sag)
+
+
+def _utm_10km_squares_to_wgs84(
+    zone: int,
+    hemisphere: Hemisphere,
+    sw_x: NDArray[np.integer],
+    sw_y: NDArray[np.integer],
+    segments: NDArray[np.intp],
 ) -> GeoArray:
-    """Return UTM squares as WGS84 polygons, split at the antimeridian."""
-    squares = shapely.box(sw_x, sw_y, sw_x + size, sw_y + size)
+    """Return 10 km UTM squares as WGS84 polygons with split edges, split at the antimeridian."""
+    squares = np.empty(len(sw_x), dtype=np.object_)
     transformer = _utm_to_wgs84(zone, hemisphere)
-    # `interleaved=False` selects the (x, y) -> (x, y) transformer overload, which
-    # shapely's stubs do not model.
-    # pyrefly: ignore [no-matching-overload]
-    projected = shapely.transform(squares, transformer.transform, interleaved=False)
-    return _split_at_antimeridian(projected)
+    for count in np.unique(segments):
+        selected = segments == count
+        corners = np.stack([sw_x[selected], sw_y[selected]], axis=-1)[:, np.newaxis]
+        utm_rings = corners + _10KM_SIZE * _unit_square_ring(int(count))
+        lon, lat = transformer.transform(utm_rings[..., 0].ravel(), utm_rings[..., 1].ravel())
+        squares[selected] = _rings_to_wgs84(np.stack([lon, lat], axis=-1).reshape(utm_rings.shape))
+    return squares
+
+
+@functools.cache
+def _unit_square_ring(segments: int) -> NDArray[np.float64]:
+    """Return the ring of the unit square with each edge split into ``segments`` segments."""
+    step = np.arange(segments) / segments
+    ones, zeros = np.ones(segments), np.zeros(segments)
+    # Same vertex order as `shapely.box`: SE, NE, NW, SW and back to SE.
+    x = np.concatenate([ones, 1 - step, zeros, step, [1]])
+    y = np.concatenate([step, ones, 1 - step, zeros, [0]])
+    return np.stack([x, y], axis=-1)
 
 
 def _utm_10km_rings(
@@ -715,7 +774,7 @@ def _utm_lattice_rings(
     se = corners[:, :-1, 1:]
     ne = corners[:, 1:, 1:]
     nw = corners[:, 1:, :-1]
-    # Same vertex order as `shapely.box`, so the polygons match `_utm_squares_to_wgs84`.
+    # Same vertex order as `shapely.box`.
     rings = np.stack([se, ne, nw, sw, se], axis=-2).reshape(-1, 5, 2)
     lower = np.minimum(np.minimum(sw, se), np.minimum(ne, nw)).reshape(-1, 2)
     upper = np.maximum(np.maximum(sw, se), np.maximum(ne, nw)).reshape(-1, 2)
@@ -896,20 +955,32 @@ class MGRSGrid:
             np.append(x_edges, x_edges[-1] + _100KM_SIZE)[np.newaxis],
             np.append(y_edges, y_edges[-1] + _100KM_SIZE)[np.newaxis],
         )
-        coarse_boxes_wgs = _rings_to_wgs84(coarse_rings)
         # 100 km squares only prune; slivers are dropped at 10 km, where the cutoff applies.
+        # Widening them by how far their edges may stray keeps every square they hold.
+        row_margins = _sag_margin(_100KM_SIZE, _row_latitudes(zone, hemisphere, y_edges))
+        coarse_boxes_wgs = shapely.buffer(
+            _rings_to_wgs84(coarse_rings),
+            np.repeat(row_margins, len(x_edges)),
+            join_style="mitre",
+        )
         shapely.prepare(zone_geom_wgs)
         mask = self._intersects_any(coarse_boxes_wgs)
         mask &= shapely.intersects(zone_geom_wgs, coarse_boxes_wgs)
 
         coarse_x, coarse_y = coarse_x[mask], coarse_y[mask]
         fine_x, fine_y = self._subdivide_coarse_coords(coarse_x, coarse_y)
+        latitudes = np.repeat(_row_latitudes(zone, hemisphere, coarse_y), _SQUARES_PER_100KM)
+        segments = _edge_segments(latitudes)
         rings, bounds = _utm_10km_rings(zone, hemisphere, coarse_x, coarse_y)
         squares = np.empty(len(rings), dtype=np.object_)
         # Squares split at the antimeridian take the envelope of their two parts.
         wraps = bounds[:, 2] - bounds[:, 0] > 180  # noqa: PLR2004
-        squares[wraps] = _rings_to_wgs84(rings[wraps])
+        squares[wraps] = _utm_10km_squares_to_wgs84(
+            zone, hemisphere, fine_x[wraps], fine_y[wraps], segments[wraps]
+        )
         bounds[wraps] = shapely.bounds(squares[wraps])
+        # Corner envelopes miss where edges bulge between the corners.
+        bounds += _sag_margin(_10KM_SIZE, latitudes)[:, np.newaxis] * np.array([-1, -1, 1, 1])
 
         # Only squares whose envelope meets the zone and a filter geometry become polygons.
         square_idx, filter_idx = self._envelope_pairs(bounds)
@@ -919,7 +990,9 @@ class MGRSGrid:
         needed = np.zeros(len(rings), dtype=np.bool_)
         needed[square_idx] = True
         needed &= ~wraps
-        squares[needed] = _rings_to_wgs84(rings[needed])
+        squares[needed] = _utm_10km_squares_to_wgs84(
+            zone, hemisphere, fine_x[needed], fine_y[needed], segments[needed]
+        )
 
         hits = shapely.intersects(self._filter_tree.geometries[filter_idx], squares[square_idx])
         mask = np.zeros(len(rings), dtype=np.bool_)

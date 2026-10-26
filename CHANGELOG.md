@@ -8,6 +8,12 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## Unreleased
 
+### Fixed
+
+- `MGRSGrid` follows the curved WGS84 edges of its squares to within 5 cm, instead of
+  joining their corners with straight lines that strayed up to 19 m. Points near a square's
+  edge were assigned to its neighbour, or to no square.
+
 ## [0.9.0] - 2026-10-26
 
 This release adds `freezebase.vrt`, a pure-Python way to build, inspect and warp GDAL VRTs.
