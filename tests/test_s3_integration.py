@@ -22,14 +22,14 @@ import uuid
 
 import numpy as np
 import pytest
+import rasterio
 from rasterio.transform import from_origin
+from upath import UPath
 
 pytest.importorskip("s3fs")
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-
-    from upath import UPath
 
 from freezebase.raster import (
     COG_PROFILE,
@@ -46,8 +46,9 @@ from freezebase.s3 import (
     list_object_sizes,
     make_s3_upath,
     resolve_endpoint_url,
+    s3_env,
 )
-from freezebase.vrt import create_warped_vrt
+from freezebase.vrt import VRT, create_warped_vrt, mosaic, read, warp
 
 _ENDPOINT = os.getenv("FREEZEBASE_TEST_S3_ENDPOINT")
 _KEY = os.getenv("FREEZEBASE_TEST_S3_KEY")
@@ -213,6 +214,108 @@ class TestCreateWarpedVrtS3:
         assert s3_key.exists()
         with rasterio_open(s3_key) as ds:
             assert ds.crs.to_epsg() == 3857
+
+
+class TestWarpS3:
+    def test_path_source_keeps_its_storage_options(self, s3_key: UPath) -> None:
+        write_cog(np.full((HEIGHT, WIDTH), 1.0, dtype=np.float32), s3_key, _RASTER_PROFILE)
+
+        w = warp(s3_key, crs="EPSG:3857", resolution=20.0)
+
+        assert w.warp is not None
+        source = w.warp.source
+        assert isinstance(source, UPath)
+        assert source == s3_key
+        assert source.storage_options == s3_key.storage_options
+        with w.open() as ds:
+            assert np.nanmax(ds.read(1)) == 1.0
+
+    def test_in_memory_mosaic_of_s3_tiles(self, s3_key: UPath, s3_key2: UPath) -> None:
+        write_cog(np.full((HEIGHT, WIDTH), 1.0, dtype=np.float32), s3_key, _RASTER_PROFILE)
+        shifted = _RASTER_PROFILE | {
+            "transform": from_origin(500000 + WIDTH * 10, 5200000, 10, 10)
+        }
+        write_cog(np.full((HEIGHT, WIDTH), 2.0, dtype=np.float32), s3_key2, shifted)
+
+        w = warp(mosaic([s3_key, s3_key2]), crs="EPSG:3857", resolution=20.0)
+
+        assert w.warp is not None
+        assert isinstance(w.warp.source, VRT)
+        assert w.source_files() == [s3_key, s3_key2]
+        assert all(f.storage_options == s3_key.storage_options for f in w.source_files())
+        with w.open() as ds:
+            assert {1.0, 2.0} <= set(np.unique(ds.read(1)).tolist())
+
+
+class TestVrtOnS3:
+    @pytest.fixture
+    def prefix(self, bucket_root: UPath) -> Iterator[UPath]:
+        """Yield a unique prefix in the bucket, emptied afterwards."""
+        prefix = bucket_root / uuid.uuid4().hex
+        yield prefix
+        if prefix.exists():
+            prefix.rmdir(recursive=True)
+
+    @staticmethod
+    def _upload_tiles(prefix: UPath) -> list[UPath]:
+        """Write two side-by-side tiles to ``<prefix>/tiles/``."""
+        tiles: list[UPath] = []
+        for index, value in enumerate((1.0, 2.0)):
+            profile = _RASTER_PROFILE | {
+                "transform": from_origin(500000 + index * WIDTH * 10, 5200000, 10, 10)
+            }
+            tile = prefix / "tiles" / f"t{index}.tif"
+            write_cog(np.full((HEIGHT, WIDTH), value, dtype=np.float32), tile, profile)
+            tiles.append(tile)
+        return tiles
+
+    def test_vrt_with_dotdot_sources_reopens(self, prefix: UPath) -> None:
+        tiles = self._upload_tiles(prefix)
+
+        written = mosaic(tiles).write(prefix / "vrts" / "m.vrt")
+
+        assert "../tiles/t0.tif" in written.read_text()
+        parsed = read(written)
+        assert parsed.source_files() == tiles
+        with parsed.open() as ds:
+            data = ds.read(1)
+        assert set(np.unique(data).tolist()) == {1.0, 2.0}
+
+    def test_env_and_open_on_s3_sources(self, prefix: UPath) -> None:
+        tiles = self._upload_tiles(prefix)
+        m = mosaic(tiles)
+
+        with m.env(), rasterio.open(m.to_xml()) as ds:
+            assert set(np.unique(ds.read(1)).tolist()) == {1.0, 2.0}
+        with m.open() as ds:
+            data = ds.read(1)
+        assert data.shape == (HEIGHT, 2 * WIDTH)
+        assert set(np.unique(data).tolist()) == {1.0, 2.0}
+
+    def test_source_files_follow_a_local_vrt_to_s3(self, prefix: UPath, tmp_path: Path) -> None:
+        tiles = self._upload_tiles(prefix)
+        remote = mosaic(tiles).write(prefix / "m.vrt")
+        local = warp(remote, crs="EPSG:3857", resolution=20.0).write(tmp_path / "warped.vrt")
+
+        files = read(local).source_files(storage_options=prefix.storage_options)
+
+        assert files == tiles
+        assert all(f.storage_options == prefix.storage_options for f in files)
+
+    def test_open_through_two_local_vrts_to_s3(self, prefix: UPath, tmp_path: Path) -> None:
+        tiles = self._upload_tiles(prefix)
+        warped = [
+            warp(tile, crs="EPSG:3857", resolution=20.0).write(tmp_path / f"w{i}.vrt")
+            for i, tile in enumerate(tiles)
+        ]
+        # Building reads the local VRTs' headers, which reach S3 too.
+        with s3_env(prefix):
+            final = read(mosaic(warped).write(tmp_path / "final.vrt"))
+
+        # Previously env() followed the local VRTs without options: bare s3:// tiles.
+        with final.open(storage_options=prefix.storage_options) as ds:
+            data = ds.read(1)
+        assert {1.0, 2.0} <= set(np.unique(data[np.isfinite(data)]).tolist())
 
 
 class TestUploadsThroughS3fs:

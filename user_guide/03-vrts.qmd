@@ -1,0 +1,182 @@
+---
+title: "VRTs"
+---
+
+A GDAL VRT is an XML file that describes a raster built from other rasters. `freezebase.vrt`
+reads, builds, edits and writes them as plain Python objects, so no GDAL Python bindings are
+needed. Building a VRT reads the headers of its sources; no pixels are read until you open
+the result.
+
+## The model
+
+A `VRT` holds a CRS, a transform, a size and a list of `Band`s. Each `Band` lists the
+`Source`s it draws from, in draw order: a later source wins where they overlap. A source is
+a file, or another `VRT` nested inline. A `PixelFunction` on a band makes it a derived band.
+
+```python
+from freezebase import vrt
+
+v = vrt.from_raster("scene.tif")
+v.bands[0].description = "VH"
+v.bands[0].nodata = 0.0
+v.write("scene.vrt")
+```
+
+The objects are mutable, so editing is attribute assignment. Paths in memory are always
+absolute `UPath`s; relative paths exist only in the written XML.
+
+## The four verbs
+
+- `vrt.mosaic(sources)` joins tiles, later tiles drawing over earlier ones. Pass `bounds`
+  to fix the extent and `resolution` to resample tiles of mixed pixel size.
+- `vrt.warp(source, crs=...)` reprojects onto an explicit grid, onto the grid rasterio
+  derives, or onto the grid of a reference raster (`like`).
+- `vrt.stack(sources)` stacks the bands of rasters on one grid.
+- `vrt.derive(sources, function)` applies a GDAL pixel function such as
+  `PixelFunction.db()` or `PixelFunction.div()`.
+
+```python
+from freezebase import vrt
+
+tiles = ["a.tif", "b.tif"]
+web = vrt.warp(vrt.mosaic(tiles), crs="EPSG:3857", resolution=20.0)
+db = vrt.derive(web, vrt.PixelFunction.db())
+```
+
+`vrt.from_raster` builds a 1:1 VRT over one file, and `vrt.read` parses an existing VRT
+file into the model, including those written by `gdalbuildvrt`.
+
+## Chaining in memory vs on disk
+
+Every verb accepts a path or a `VRT`, and returns a `VRT`. A `VRT` passed as a source is
+nested inside the new one, so a chain stays in memory until you write it.
+
+```python
+from freezebase import vrt
+
+tiles = ["a.tif", "b.tif"]
+warped = vrt.warp(vrt.mosaic(tiles), crs="EPSG:3857", resolution=20.0)
+chain = vrt.derive(warped, vrt.PixelFunction.db())
+with chain.open() as ds:  # no file written
+    data = ds.read(1)
+```
+
+To keep a step as a file, write it and use the returned path as the next source:
+
+```python
+from freezebase import vrt
+
+tiles = ["a.tif", "b.tif"]
+zone = vrt.mosaic(tiles).write("zone.vrt")
+web = vrt.warp(zone, crs="EPSG:3857", resolution=20.0).write("web.vrt")
+```
+
+Nested VRTs need GDAL 3.11 or newer. Use the written form when other tools open the file
+or when the chain is long.
+
+## Path policy
+
+`VRT.write` writes a source relative to the VRT when both are on the same store: local, or
+the same S3 bucket. That includes `../` paths. A source on another store is written as an
+absolute GDAL path (`/vsis3/...`, `/vsicurl/...`), and `relative=False` writes every path
+absolute.
+
+On `vrt.read`, relative paths resolve against the VRT's location and `/vsis3/` paths
+become `s3://` paths. They take the storage options of an `s3://` VRT, or those you pass:
+
+```python
+from freezebase import vrt
+from freezebase.s3 import make_s3_upath
+
+root = make_s3_upath("s3://bucket/run", profile="research")
+local = vrt.read("warped.vrt", storage_options=root.storage_options)
+tiles = local.source_files(storage_options=root.storage_options)
+```
+
+`source_files()` lists the leaf files a VRT reads: it recurses into nested VRTs and follows
+`.vrt` files. A followed file is only scanned for source paths, so it may hold elements
+`vrt.read` refuses, such as `<UseMaskBand>`. Following an `https://` VRT file needs
+aiohttp, which the `s3` extra installs. `VRT.sources` lists only the direct sources,
+without any I/O.
+
+## Credentials and threads
+
+`VRT.env()` returns the rasterio environment that can read every source: plain for local
+files, the credentialed S3 environment for S3, the HTTP one for public HTTP(S). It raises
+`ValueError` if the sources need different credentials. `VRT.open()` is `env()` plus
+`rasterio.open` on the in-memory VRT.
+
+```python
+import rasterio
+
+path = chain.write("chain.vrt")
+with chain.env(), rasterio.open(path) as ds:
+    data = ds.read(1)
+```
+
+`env()` and `open()` take `storage_options` too, for the S3 sources of `.vrt` files they
+follow. A followed file without options of its own inherits those of the VRT that
+references it. Here a local mosaic points at local warped VRTs, whose tiles are on S3:
+
+```python
+from freezebase import vrt
+from freezebase.s3 import make_s3_upath, s3_env
+
+tiles = [make_s3_upath(f"s3://bucket/tiles/{name}.tif", profile="research") for name in "ab"]
+warped = [
+    vrt.warp(tile, crs="EPSG:3857", resolution=20.0).write(f"warped_{i}.vrt")
+    for i, tile in enumerate(tiles)
+]
+with s3_env(tiles[0]):  # mosaic reads the warped VRTs' headers, which reach S3
+    final = vrt.mosaic(warped).write("final.vrt")
+
+options = tiles[0].storage_options
+with vrt.read(final).open(storage_options=options) as ds:  # final -> warped_* -> S3
+    data = ds.read(1)
+```
+
+::: {.callout-important}
+## Enter `env()` in the main thread
+
+Credentials set inside a worker thread do not reach GDAL's own reader threads. When you
+read with a thread pool, enter `env()` once in the main thread, around the pool.
+:::
+
+## Vertical shifts
+
+`warp` shifts heights when the source CRS and `crs` both have a vertical datum or are 3D,
+for example `EPSG:2056+5728` to `EPSG:4979`. Nothing else needs to be requested.
+
+- `tolerance="auto"` is 1/8 pixel for horizontal-only warps, and exact when a vertical
+  shift applies.
+- Ballpark transformations are refused by default, so a missing grid raises `ValueError`.
+  `allow_ballpark=True` opts out.
+- A vertical source into a 2D target raises, and so does a 2D source into a vertical
+  target. For the first, pass a 2D `src_crs` to keep heights unconverted. For the second,
+  pass a 3D or compound `src_crs`, or a 2D `crs`.
+- Vertical units such as feet are converted as `gdalwarp` converts them.
+- Only single-band rasters are shifted, as by `gdalwarp`, and only without a scale or
+  offset. Other sources raise `ValueError`: warp the height band alone, convert stored
+  values to heights first, or pass a 2D `src_crs`.
+
+Making the grids reachable is up to you. Download them, then point PROJ at them:
+
+```bash
+python -m pyproj sync --source-id ch_swisstopo
+```
+
+Either set `PROJ_NETWORK=ON` before the process starts, or enter
+`rasterio.Env(PROJ_DATA=<dir>)` with a directory that holds rasterio's PROJ data and the
+grids:
+
+```python
+import rasterio
+
+proj_dir = "/path/to/proj_data"  # rasterio's PROJ data plus the synced grids
+with rasterio.Env(PROJ_DATA=proj_dir):
+    shifted = vrt.warp("dem.tif", crs="EPSG:4979", src_crs="EPSG:2056+5728")
+```
+
+PROJ caches each grid lookup, found or missing, for the whole process. Set up the grids,
+and `PROJ_DATA` or `PROJ_NETWORK`, before PROJ's first use in the process: changing
+`PROJ_DATA` later does not clear a cached miss.

@@ -19,6 +19,7 @@ from rasterio.merge import merge
 import rasterio.shutil
 from upath import UPath
 
+from freezebase.download import TRANSIENT_HTTP_STATUS_CODES
 from freezebase.utils import file_sha256
 
 if TYPE_CHECKING:
@@ -55,6 +56,23 @@ COG_PROFILE: dict[str, Any] = {
 }
 """Default GDAL ``COG`` creation profile."""
 
+# GDAL retries independently from botocore/s3fs.
+GDAL_HTTP_RETRY_CODES = ",".join(str(code) for code in sorted({403, *TRANSIENT_HTTP_STATUS_CODES}))
+GDAL_HTTP_MAX_RETRY = 5
+GDAL_HTTP_RETRY_DELAY_S = 1
+
+GDAL_HTTP_OPTIONS: Mapping[str, str] = {
+    "GDAL_HTTP_TIMEOUT": "30",
+    "GDAL_HTTP_CONNECTTIMEOUT": "10",
+    "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
+    "VSI_CACHE": "TRUE",
+    "VSI_CACHE_SIZE": "25000000",
+    "GDAL_HTTP_MAX_RETRY": str(GDAL_HTTP_MAX_RETRY),
+    "GDAL_HTTP_RETRY_DELAY": str(GDAL_HTTP_RETRY_DELAY_S),
+    "GDAL_HTTP_RETRY_CODES": GDAL_HTTP_RETRY_CODES,
+}
+"""GDAL configuration for reading public ``http(s)`` rasters through ``/vsicurl/``."""
+
 _SHA256_MULTIHASH_PREFIX = "1220"
 """Multihash function+length header for a raw SHA-256 digest, per ``file:checksum``."""
 
@@ -77,13 +95,31 @@ _COG_CREATION_OPTIONS = (
 
 
 @contextmanager
+def http_env(**options: str) -> Generator[None]:
+    """Return a rasterio environment for public HTTP(S) sources, without credentials.
+
+    Parameters
+    ----------
+    **options : str
+        GDAL configuration options that override `GDAL_HTTP_OPTIONS`.
+
+    Returns
+    -------
+    AbstractContextManager
+        Context manager that applies the options while active.
+    """
+    with rasterio.env.Env(**{**GDAL_HTTP_OPTIONS, **options}):
+        yield
+
+
+@contextmanager
 def _env_for_path(path: AnyPath) -> Generator[None]:
-    """Enter a local or credentialed S3 rasterio environment.
+    """Enter a local, credentialed S3 or public HTTP(S) rasterio environment.
 
     Raises
     ------
     ValueError
-        If ``path`` uses a protocol other than local (``""``) or ``"s3"``.
+        If ``path`` uses a protocol other than local (``""``), ``"s3"``, ``"http"`` or ``"https"``.
     """
     path = UPath(path)
     match path.protocol:
@@ -96,18 +132,21 @@ def _env_for_path(path: AnyPath) -> Generator[None]:
 
             with s3_env(path):
                 yield
+        case "http" | "https":
+            with http_env():
+                yield
         case p:
             msg = f"Unsupported protocol '{p}'."
             raise ValueError(msg)
 
 
 def _to_vsi_uri(path: AnyPath) -> str:
-    """Return a GDAL path, converting S3 paths to ``/vsis3/`` URIs.
+    """Return a GDAL path, converting S3 and HTTP(S) paths to ``/vsis3/`` and ``/vsicurl/`` URIs.
 
     Raises
     ------
     ValueError
-        If ``path`` uses a protocol other than local (``""``) or ``"s3"``.
+        If ``path`` uses a protocol other than local (``""``), ``"s3"``, ``"http"`` or ``"https"``.
     """
     path = UPath(path)
     match path.protocol:
@@ -115,6 +154,8 @@ def _to_vsi_uri(path: AnyPath) -> str:
             return str(path)
         case "s3":
             return f"/vsis3/{path.path}"
+        case "http" | "https":
+            return f"/vsicurl/{path}"
         case p:
             msg = f"Unsupported protocol '{p}'."
             raise ValueError(msg)
@@ -178,7 +219,7 @@ def rasterio_open(
     mode: Literal["r", "r+", "w", "w+"] = "r",
     **kwargs: Any,
 ) -> AbstractContextManager[DatasetReader | DatasetWriter]:
-    """Open a local or S3-backed rasterio dataset.
+    """Open a local, S3-backed or public HTTP(S) rasterio dataset.
 
     On S3, a write mode opens a local copy that is uploaded once the dataset
     closes without an error; ``"r+"`` downloads the object first.
@@ -200,7 +241,7 @@ def rasterio_open(
     Raises
     ------
     ValueError
-        If ``path`` uses a protocol other than local (``""``) or ``"s3"``.
+        If ``path`` uses a protocol other than local (``""``), ``"s3"``, ``"http"`` or ``"https"``.
     """
     return _rasterio_open(path, mode, **kwargs)
 

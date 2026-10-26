@@ -58,6 +58,7 @@ nav_icons:
   sidebar:
     The MGRS grid: globe
     Rasters on S3: box
+    VRTs: layers
     Contributing: wrench
 
 # API Reference Structure
@@ -92,14 +93,31 @@ reference:
         - raster.get_utm_zone_string
         - raster.get_epsg_string
         - raster.utm_zone_to_crs
+        - raster.http_env
         - raster.COG_PROFILE
+        - raster.GDAL_HTTP_OPTIONS
         - raster.RASTERIO_PROFILE_DEFAULTS
 
     - title: VRT generation
-      desc: Build VRT files without the Python GDAL dependency
+      desc: >-
+        Inspectable VRTs: build, edit, read and write without the GDAL Python bindings
       contents:
+        - vrt.VRT
+        - vrt.Band
+        - vrt.Source
+        - vrt.PixelFunction
+        - vrt.SourceProperties
+        - vrt.Warp
+        - vrt.mosaic
+        - vrt.warp
+        - vrt.stack
+        - vrt.derive
+        - vrt.from_raster
+        - vrt.read
         - vrt.create_decibel_vrt
         - vrt.create_rgb_vrt
+        - vrt.create_rgba_vrt
+        - vrt.create_warped_vrt
         - vrt.build_vrt_mosaic
 
     - title: Downloads
