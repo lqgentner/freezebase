@@ -536,8 +536,8 @@ def rewrite_tiff(
     Raises
     ------
     ValueError
-        If ``move`` is set for a ``VRT`` source, or a per-band sequence for a ``VRT`` does
-        not hold one entry per band, or its bands differ in dtype or nodata.
+        If ``move`` is set for a ``VRT`` source, a per-band sequence does not hold one
+        entry per band, or the bands of a ``VRT`` differ in dtype or nodata.
     RasterWriteError
         If the rewrite fails.
     """
@@ -575,6 +575,20 @@ def rewrite_tiff(
 
     src_file = UPath(src_file)
     in_place = src_file == dst_file
+    per_band = {
+        "band_names": band_names,
+        "color_interp": color_interp,
+        "band_tags": band_tags,
+        "units": units,
+    }
+    if any(v is not None for v in per_band.values()):
+        try:
+            with rasterio_open(src_file) as src:
+                count = src.count
+        except Exception as e:
+            msg = f"Failed to rewrite GeoTIFF: {e}"
+            raise RasterWriteError(msg) from e
+        _check_band_lengths(count, **per_band)
     # The stage helpers configure each backend independently.
     stage = _rewrite_via_memory if dst_file.protocol == "s3" else _rewrite_via_tempfile
     try:
@@ -1030,6 +1044,13 @@ def write_cog(
         )
     # Keeps a masked array's mask, which rasterio fills with nodata.
     array = np.asanyarray(data)
+    _check_band_lengths(
+        1 if array.ndim == 2 else array.shape[0],  # noqa: PLR2004
+        band_names=band_names,
+        color_interp=color_interp,
+        band_tags=band_tags,
+        units=units,
+    )
     profile = _require_profile(profile)
     mem_profile = build_rasterio_profile(profile)
     mem_profile.pop("driver", None)

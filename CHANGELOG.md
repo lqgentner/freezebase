@@ -20,6 +20,13 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
   Both subclass `RuntimeError`, so existing `except RuntimeError` handlers keep working.
 
+### Changed
+
+- **Breaking:** `write_cog` from an array and `rewrite_tiff` from a file raise `ValueError`
+  when a per-band sequence (`band_names`, `color_interp`, `band_tags`, `units`) does not
+  hold one entry per band, as they already did for a VRT. Before, they raised
+  `RuntimeError` after staging the write. Catch `ValueError` instead of `RuntimeError`.
+
 ### Fixed
 
 - `MGRSGrid` follows the curved WGS84 edges of its squares to within 5 cm, instead of

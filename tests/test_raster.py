@@ -880,15 +880,23 @@ class TestMetadataInjection:
             assert ds.units == ("dB",)
         assert sorted(p.name for p in tmp_path.iterdir()) == ["dst.tif", "src.tif"]
 
-    def test_rewrite_leaves_no_staging_file_on_failure(self, tmp_path: Path) -> None:
+    def test_rewrite_leaves_no_staging_file_on_failure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         src = tmp_path / "src.tif"
         dst = tmp_path / "dst.tif"
         make_tiff(src)
 
-        # A unit for a band that does not exist fails during injection, after
-        # the staging copy has already been written.
-        with pytest.raises(RasterWriteError):
-            rewrite_tiff(src, dst, profile=COG_PROFILE, tags={"A": "1"}, units=["natural", "dB"])
+        def fail(*_args: object, **_kwargs: object) -> None:
+            msg = "injection failed"
+            raise OSError(msg)
+
+        # Fails after the staging copy has been written.
+        monkeypatch.setattr(raster, "_inject_band_metadata", fail)
+        with pytest.raises(RasterWriteError, match="injection failed"):
+            rewrite_tiff(src, dst, profile=COG_PROFILE, tags={"A": "1"})
 
         assert not dst.exists()
         assert sorted(p.name for p in tmp_path.iterdir()) == ["src.tif"]
@@ -971,11 +979,11 @@ class TestPerBandLengths:
         kwargs: dict[str, Any],
         expected: str,
     ) -> None:
-        with pytest.raises(RasterWriteError, match=f"{expected} must hold one entry per band"):
+        with pytest.raises(ValueError, match=f"{expected} must hold one entry per band"):
             write_cog(self._data(), tmp_path / "out.tif", self.profile, **kwargs)
 
     def test_write_cog_rejects_a_long_sequence(self, tmp_path: Path) -> None:
-        with pytest.raises(RasterWriteError, match="one entry per band"):
+        with pytest.raises(ValueError, match="one entry per band"):
             write_cog(
                 self._data(),
                 tmp_path / "out.tif",
@@ -987,11 +995,18 @@ class TestPerBandLengths:
         src = tmp_path / "src.tif"
         write_cog(self._data(), src, self.profile, band_names=["VV", "VH"])
 
-        with pytest.raises(RasterWriteError, match="units must hold one entry per band"):
+        # Previously raised RuntimeError after staging the copy.
+        with pytest.raises(ValueError, match="units must hold one entry per band"):
             rewrite_tiff(src, tmp_path / "dst.tif", units=["natural"])
 
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["src.tif"]
+
+    def test_rewrite_of_a_missing_source_is_a_write_error(self, tmp_path: Path) -> None:
+        with pytest.raises(RasterWriteError, match="Failed to rewrite"):
+            rewrite_tiff(tmp_path / "missing.tif", tmp_path / "dst.tif", units=["natural"])
+
     def test_a_rejected_write_leaves_nothing_behind(self, tmp_path: Path) -> None:
-        with pytest.raises(RasterWriteError):
+        with pytest.raises(ValueError, match="units must hold one entry per band"):
             write_cog(self._data(), tmp_path / "out.tif", self.profile, units=["natural"])
 
         assert list(tmp_path.iterdir()) == []
