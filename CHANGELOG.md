@@ -8,6 +8,8 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## Unreleased
 
+## [0.10.0] - 2026-10-26
+
 ### Added
 
 - `freezebase.errors` with `FreezebaseError`, the base of freezebase-specific errors,
