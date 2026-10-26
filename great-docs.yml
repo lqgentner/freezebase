@@ -132,6 +132,7 @@ reference:
       contents:
         - errors.FreezebaseError
         - errors.DownloadError
+        - errors.RasterWriteError
 
     - title: S3
       desc: >-

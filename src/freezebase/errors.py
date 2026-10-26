@@ -9,3 +9,7 @@ class FreezebaseError(Exception):
 
 class DownloadError(FreezebaseError, RuntimeError):
     """A download could not be completed."""
+
+
+class RasterWriteError(FreezebaseError, RuntimeError):
+    """A raster could not be written."""

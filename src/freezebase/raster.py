@@ -20,6 +20,7 @@ import rasterio.shutil
 from upath import UPath
 
 from freezebase.download import TRANSIENT_HTTP_STATUS_CODES
+from freezebase.errors import RasterWriteError
 from freezebase.utils import file_sha256
 
 if TYPE_CHECKING:
@@ -537,7 +538,7 @@ def rewrite_tiff(
     ValueError
         If ``move`` is set for a ``VRT`` source, or a per-band sequence for a ``VRT`` does
         not hold one entry per band, or its bands differ in dtype or nodata.
-    RuntimeError
+    RasterWriteError
         If the rewrite fails.
     """
     from freezebase.vrt import VRT  # noqa: PLC0415  # freezebase.vrt imports raster
@@ -590,7 +591,7 @@ def rewrite_tiff(
         )
     except Exception as e:
         msg = f"Failed to rewrite GeoTIFF: {e}"
-        raise RuntimeError(msg) from e
+        raise RasterWriteError(msg) from e
 
     if move and not in_place:
         src_file.unlink()
@@ -629,7 +630,7 @@ def _rewrite_vrt(
             _encode_cog(vrt.to_xml(), dst_file, {"driver": driver, **dst_profile}, checksum=False)
     except Exception as e:
         msg = f"Failed to rewrite GeoTIFF: {e}"
-        raise RuntimeError(msg) from e
+        raise RasterWriteError(msg) from e
 
 
 def _rewrite_via_memory(
@@ -897,7 +898,7 @@ def _write_cog_from_vrt(
         vrt = _wrap_for_nodata(vrt, profile.get("nodata"))
     except OSError as e:
         msg = f"Failed to write COG: {e}"
-        raise RuntimeError(msg) from e
+        raise RasterWriteError(msg) from e
     if profile.get("dtype") is not None or profile.get("nodata") is not None:
         _cast_and_check(vrt, profile.get("dtype"))
     _require_uniform_bands(vrt)
@@ -908,7 +909,7 @@ def _write_cog_from_vrt(
             digest = _encode_cog(xml, dst_file, _cog_creation_options(profile), checksum=checksum)
     except Exception as e:
         msg = f"Failed to write COG: {e}"
-        raise RuntimeError(msg) from e
+        raise RasterWriteError(msg) from e
 
     logger.debug("Wrote COG to '%s'", dst_file.name)
     return digest
@@ -1011,7 +1012,7 @@ def write_cog(
         dtype is unknown, a nodata value does not fit the dtype, a raster path has a
         colour table or is south-up, or the bands differ in dtype or nodata without
         ``profile`` setting it.
-    RuntimeError
+    RasterWriteError
         If the write fails.
     """
     dst_file = UPath(dst_file)
@@ -1058,7 +1059,7 @@ def write_cog(
             )
     except Exception as e:
         msg = f"Failed to write COG: {e}"
-        raise RuntimeError(msg) from e
+        raise RasterWriteError(msg) from e
 
     logger.debug("Wrote COG to '%s'", dst_file.name)
     return digest

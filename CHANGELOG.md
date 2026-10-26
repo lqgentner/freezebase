@@ -10,10 +10,13 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ### Added
 
-- `freezebase.errors` with `FreezebaseError`, the base of freezebase-specific errors, and
-  `DownloadError`. `HTTPDownloader` raises `DownloadError` where it raised `RuntimeError`
-  (a response that is not a file, a redirect without a host, too many redirects, no
-  inferable filename). It subclasses `RuntimeError`, so existing `except RuntimeError` handlers keep working.
+- `freezebase.errors` with `FreezebaseError`, the base of freezebase-specific errors,
+  `DownloadError` and `RasterWriteError`. Where `RuntimeError` was raised before:
+  - `HTTPDownloader` raises `DownloadError` (a response that is not a file, a redirect
+    without a host, too many redirects, no inferable filename).
+  - `write_cog` and `rewrite_tiff` raise `RasterWriteError` when the write fails.
+
+  Both subclass `RuntimeError`, so existing `except RuntimeError` handlers keep working.
 
 ### Fixed
 
