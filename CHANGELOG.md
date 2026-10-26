@@ -63,7 +63,8 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   a vertical and a 2D CRS raises `ValueError`: pass a 2D `src_crs` to keep heights
   unconverted from a vertical source, and a 3D or compound `src_crs` (or a 2D `crs`) for a
   2D source and a vertical target. Only single-band rasters without a scale or offset are
-  shifted; a multi-band or scaled source raises `ValueError`. PROJ needs the grids, e.g. via `PROJ_DATA`.
+  shifted; a multi-band or scaled source raises `ValueError`. PROJ needs the grids, e.g. via
+  `PROJ_DATA`.
 - `VRT.metadata_domains` holds dataset metadata of named domains, such as the
   `IMAGE_STRUCTURE` interleaving GDAL records for a warped multi-band raster.
 - The model maps the complex dtypes `complex_int16`, `complex_int32`, `complex64` and
@@ -73,6 +74,19 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 - `Band.scale` and `Band.offset` hold a band's `<Scale>` and `<Offset>`. `from_raster`,
   `stack`, `mosaic` and `warp` carry them from their inputs; `mosaic` tiles must share
   them. A colour table, which the model cannot hold, raises `ValueError` in all four.
+- `write_cog` accepts a `VRT` or a raster path and streams it to a COG through GDAL, without
+  loading it into memory; `profile` is optional for those inputs. A `nodata` in `profile`
+  that differs from a band's moves that band's old nodata pixels to the new value, for any
+  VRT (mosaic, warped, derived), by nesting it; `nodata=None` keeps the VRT's. A `dtype`
+  casts every band. `ValueError` if a nodata value does not fit the dtype. Array-likes,
+  including masked arrays, still go through `np.asanyarray`. A cast rounds and clamps
+  out-of-range values, so a valid value can become the nodata value (300 cast to `uint8`
+  with nodata 255 reads as nodata). Bands that differ in dtype, or in nodata, raise
+  `ValueError` unless `profile` sets `dtype` or `nodata`; so does `rewrite_tiff` for such a
+  `VRT`.
+- `rewrite_tiff` accepts a `VRT`, applying `band_names`, `units`, `color_interp`, `tags` and
+  `band_tags` to a copy of it and encoding it to the driver in `profile`; `move=True` with a
+  `VRT` raises `ValueError`.
 
 ### Changed
 
@@ -151,6 +165,20 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ### Removed
 
+- **Breaking:** `merge_tiffs`, which wrote a GTiff with the first source's profile, the
+  first file winning overlaps (`method="last"` is `vrt.mosaic(files)`, unreversed). The
+  `FileNotFoundError` pre-check and the "Failed to merge GeoTIFFs" `RuntimeError` are gone:
+  a mismatch now raises `ValueError` from `vrt.mosaic` (incompatible tiles), and a failed
+  write raises `RuntimeError("Failed to write COG")` from `write_cog`. Before:
+  `merge_tiffs([a, b], "out.tif")`. After:
+  `write_cog(vrt.mosaic(list(reversed(files)), band_names=..., nodata=...), "out.tif")` for
+  a COG (`write_cog` writes a COG, not the first source's profile), or
+  `rewrite_tiff(vrt.mosaic(list(reversed(files))), "out.tif", profile)` for a GTiff.
+  `mosaic` lets later files win, hence the reversal; band names, nodata, dtype and grid
+  origin now come from the last file, so pass `band_names=` and `nodata=` to keep the first
+  file's. `mosaic` raises `ValueError` for tiles that differ in nodata, dtype or band
+  count, which `rasterio.merge` accepted. `min`, `max`, `sum`, `count` and `mem_limit_mb`
+  have no replacement.
 - **Breaking:** `MGRSGrid.utm_to_mgrs`, an undocumented `np.vectorize` wrapper
   around `mgrs.MGRS().UTMToMGRS` that grid construction left on the instance.
   Before: `grid.utm_to_mgrs(zones, hemispheres, eastings, northings,

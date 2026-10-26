@@ -8,17 +8,17 @@
 [![pyrefly](https://img.shields.io/endpoint?url=https://pyrefly.org/badge.json)](https://github.com/facebook/pyrefly)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-Lightweight geospatial helpers for reproducible MGRS grids and S3-backed raster workflows.
+Raster I/O on the MGRS grid, locally or on S3.
 
-freezebase grew out of large-scale glacier mapping, where scattered areas of
-interest require several local projections and large raster collections live
-in object storage.
+freezebase grew out of large-scale glacier mapping, where study areas are
+scattered across several UTM zones and large raster collections live in object
+storage.
 
-The centrepiece of freezebase is **`MGRSGrid`**: a 10 km grid for the UTM-covered
-world that gives every MGRS code a dataset-independent target backed by an
-[`odc.geo.GeoBox`](https://odc-geo.readthedocs.io/en/latest/intro-geobox.html).
-Rasters resampled to the same code and resolution share their CRS, transform,
-and shape. See
+Its centrepiece is **`MGRSGrid`**, a 10 km grid covering the world between 80°S
+and 84°N. Each MGRS square is an
+[`odc.geo.GeoBox`](https://odc-geo.readthedocs.io/en/latest/intro-geobox.html)
+with a fixed CRS, transform and shape, so rasters resampled onto the same square
+at the same resolution line up pixel for pixel. See
 [The MGRS grid](https://lqgentner.github.io/freezebase/user-guide/mgrs-grid.html)
 for the reasoning.
 
@@ -36,8 +36,12 @@ uv add freezebase
 pip install freezebase
 ```
 
-S3 support is optional; see [Raster and S3 helpers](#raster-and-s3-helpers)
-below.
+S3 support needs the `s3` extra, which adds `s3fs`, `fsspec`, `boto3` and
+`pydantic-settings`:
+
+```bash
+uv add "freezebase[s3]"
+```
 
 ## MGRS quick start
 
@@ -48,80 +52,85 @@ from shapely import box
 
 from freezebase.mgrs import MGRSGrid
 
-grid = MGRSGrid(box(8.4, 47.3, 8.6, 47.5))  # Zürich, WGS84
+grid = MGRSGrid(box(8.4, 47.3, 8.6, 47.5))  # Zurich, WGS84
 gdf = grid.to_geodataframe()  # mgrs_code, zone, epsg, geometry, ...
 square = grid[0]  # an odc.geo GeoBox per grid square
 ```
 
-Each square is an `MGRSGeoBox` — a subclass of
+Each square is an `MGRSGeoBox`, a subclass of
 [`odc.geo.GeoBox`](https://odc-geo.readthedocs.io/en/latest/intro-geobox.html)
-carrying the CRS, affine transform, and shape needed to resample any raster onto
-it. Reconstruct one from its code alone, without building a grid:
+with the CRS, transform and shape needed to resample any raster onto it. You can
+also rebuild a square from its code alone, without building a grid:
 
 ```python
 from freezebase.mgrs import MGRSGeoBox
 
-square = MGRSGeoBox.from_mgrs("32TMS35", resolution=10.0)  # 1000 x 1000 px, EPSG:32632
+square = MGRSGeoBox.from_mgrs("32TMT55", resolution=10.0)  # 1000 x 1000 px, EPSG:32632
 ```
 
-## Raster and S3 helpers
+## Rasters on S3
 
-The raster helpers use [Rasterio](https://rasterio.readthedocs.io/) for local
-I/O. For object storage, freezebase bridges Rasterio/GDAL with
-[Universal Pathlib](https://universal-pathlib.readthedocs.io/), so filesystem
-operations and raster I/O use the same per-path credentials and endpoint
-configuration.
+freezebase connects [Rasterio](https://rasterio.readthedocs.io/) with
+[Universal Pathlib](https://universal-pathlib.readthedocs.io/): an S3 path
+carries its own credentials and endpoint, and both file operations and raster
+reads and writes use them.
 
-Rewrite a local GeoTIFF as a Cloud-Optimized GeoTIFF:
-
-```python
-from freezebase.raster import COG_PROFILE, rewrite_tiff
-
-rewrite_tiff("in.tif", "out.tif", profile=COG_PROFILE)  # copy
-rewrite_tiff("in.tif", "out.tif", profile=COG_PROFILE, move=True)  # move
-```
-
-### The `s3` extra
-
-S3 support needs the optional `s3fs`, `fsspec`, `boto3`, and `pydantic-settings`
-dependencies:
-
-```bash
-uv add "freezebase[s3]"
-```
-
-Credentials and endpoint configuration travel with each path. Named profiles
-make it possible to select different stores without attaching raw credential
-values:
+Any S3-compatible bucket works. A named AWS profile selects the credentials
+without putting keys in your code:
 
 ```python
 from freezebase.s3 import make_s3_upath
 
-aws_path = make_s3_upath("s3://aws-bucket/data", profile="research")
-ceph_path = make_s3_upath(
-    "s3://ceph-bucket/data",
-    profile="ceph-research",
+s3_path = make_s3_upath(
+    "s3://my-bucket/data",
+    profile="example",
     endpoint_url="https://objects.example.org",
 )
+# No AWS credentials required
+s3_anon_path = make_s3_upath("s3://copernicus-dem-30m/", anon=True)
 ```
 
-An explicitly selected profile also prevents boto from falling back to ambient
-`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` values from the shell.
+Selecting a profile also stops boto from falling back to `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` in the environment.
 
-The same configured path works for pathlib-style discovery and Rasterio reads:
+The same path works with pathlib methods such as `exists()` and with Rasterio:
 
 ```python
 from freezebase.raster import rasterio_open
 
-scene = aws_path / "scene.tif"
+scene = s3_path / "scene.tif"
 if scene.exists():
     with rasterio_open(scene) as src:
         data = src.read(1)
 ```
 
-Public buckets use `anon=True`. See [Rasters on
-S3](https://lqgentner.github.io/freezebase/user-guide/rasters-on-s3.html) for
-authentication patterns, custom endpoints, and S3-to-S3 copies.
+See [Rasters on S3](https://lqgentner.github.io/freezebase/user-guide/rasters-on-s3.html)
+for authentication, custom endpoints and copies between buckets.
+
+## VRTs
+
+A [GDAL VRT](https://gdal.org/en/stable/drivers/raster/vrt.html) describes a
+raster built from other rasters without copying their pixels. `freezebase.vrt`
+builds VRTs in Python with Rasterio alone, without the GDAL command-line tools.
+Mosaic one COG per square of the Zurich grid above and reproject the mosaic to
+the Swiss grid, EPSG:2056:
+
+```python
+from freezebase import vrt
+from freezebase.raster import write_cog
+
+tiles = [f"{code}.tif" for code in grid.to_geodataframe()["mgrs_code"]]
+mosaic = vrt.mosaic(tiles)
+lv95 = vrt.warp(mosaic, crs="EPSG:2056", resolution=10.0)
+write_cog(lv95, "zurich_lv95.tif")
+```
+
+`vrt.mosaic` needs tiles in one CRS, so the squares must lie in the same UTM
+zone. No pixels are read until `write_cog` streams them into a Cloud Optimized
+GeoTIFF. `write_cog` also takes a raster file or a NumPy array, and the tiles and
+the COG can be local or on S3. See
+[VRTs](https://lqgentner.github.io/freezebase/user-guide/vrts.html) for stacking
+bands, converting values and editing a VRT before writing it.
 
 ## Other helpers
 
@@ -136,7 +145,7 @@ with HTTPDownloader(auth=("user", "pass")) as download:
 
 ## Documentation
 
-Full documentation, including the MGRS grid guide and the S3 raster guide, is at
+Full documentation, including guides to the MGRS grid, rasters on S3 and VRTs, is at
 **<https://lqgentner.github.io/freezebase/>**.
 
 ## Support
@@ -155,4 +164,4 @@ uv run pytest
 ```
 
 See the [contributing guide](https://lqgentner.github.io/freezebase/user-guide/contributing.html)
-for the full checks, the S3 integration tests, and how to build these docs.
+for the full checks, the S3 integration tests and how to build the docs.
