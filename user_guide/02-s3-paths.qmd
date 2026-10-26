@@ -1,0 +1,176 @@
+---
+title: "S3 paths and credentials"
+---
+
+[Universal Pathlib](https://universal-pathlib.readthedocs.io/) makes S3 objects as easy to
+handle as local files, but Rasterio cannot use the configuration of its paths. An `s3://`
+`UPath` supports `/`, `.exists()`, `.glob()` and `.open()` like a `pathlib.Path`, and carries
+its credentials and endpoint in its `storage_options`.
+[Rasterio](https://rasterio.readthedocs.io/) can open the same `s3://` URI through GDAL, but
+GDAL takes credentials and endpoint from its own configuration and ignores those of the
+`UPath`. Without a bridge, raster I/O on S3 needs the same configuration set up twice.
+
+freezebase provides that bridge. `make_s3_upath()` builds an S3 `UPath`, and the raster
+helpers, such as `rasterio_open()`, pass the path's configuration on to GDAL. One path then
+serves file operations and raster I/O alike, and two paths in one process can point at
+different accounts or at S3-compatible stores such as MinIO or Ceph:
+
+```python
+from freezebase.raster import rasterio_open
+from freezebase.s3 import make_s3_upath
+
+# The named profile travels with this path and all paths derived from it.
+path = make_s3_upath("s3://my-bucket/scene.tif", profile="research")
+if path.exists():
+    with rasterio_open(path) as src:
+        data = src.read(1)
+```
+
+This page shows how to build such paths. [Reading and writing rasters](03-rasters.qmd) covers
+the raster helpers.
+
+::: {.callout-note}
+## Install the S3 extra
+
+S3 support needs s3fs, fsspec, boto3 and pydantic-settings (the last for
+`freezebase.settings`):
+
+```bash
+pip install "freezebase[s3]"
+```
+
+These are imported lazily, so local raster operations work with the base installation.
+:::
+
+## Choosing credentials
+
+Each path uses one of four credential sources: a named profile, explicit keys, anonymous
+access or boto's default credential chain.
+
+### A named profile
+
+If your credentials are stored as a profile in the AWS configuration files, pass the
+profile's name. This is the recommended approach: the credentials stay in those files, out of
+your code and environment variables, and the path stores only the name.
+
+```ini
+# ~/.aws/credentials
+[research]
+aws_access_key_id = ...
+aws_secret_access_key = ...
+```
+
+```python
+aws_path = make_s3_upath("s3://aws-bucket/data", profile="research")
+```
+
+Paths derived from `aws_path` inherit the profile, and s3fs and Rasterio each load it when they
+access the store.
+
+A profile can also set the endpoint of an S3-compatible store, so the code needs no URL:
+
+```ini
+# ~/.aws/config
+[profile ceph-research]
+region = eu-central-1
+endpoint_url = https://objects.example.org
+```
+
+```python
+ceph_path = make_s3_upath("s3://ceph-bucket/data", profile="ceph-research")
+```
+
+An `endpoint_url` argument overrides the endpoint from the configuration:
+
+```python
+ceph_path = make_s3_upath(
+    "s3://ceph-bucket/data",
+    profile="ceph-research",
+    endpoint_url="https://objects.example.org",
+)
+```
+
+::: {.callout-note collapse="true"}
+## A profiled path ignores credentials in the environment
+
+A path with a profile is never signed with an `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY`
+set in the shell, because boto skips its environment-variable credential provider once a
+profile is selected. Credentials meant for one service are therefore not sent to another.
+:::
+
+### Explicit keys
+
+Explicit keys suit credentials that come from an application's own secret store rather than
+an AWS configuration file:
+
+```python
+custom = make_s3_upath(
+    "s3://imagery/scene.tif",
+    key=...,
+    secret=...,
+    token=...,  # optional STS/session token
+    endpoint_url="https://objects.example.org",
+    region="eu-central-1",
+)
+```
+
+::: {.callout-warning}
+## Treat these paths as sensitive
+
+Explicit `key`, `secret` and `token` values are stored in the `UPath`'s `storage_options`. Do
+not log, publish or serialize those options. A named profile keeps the credential values off
+the path.
+:::
+
+### Anonymous access
+
+Public buckets need anonymous access, which has to be requested explicitly:
+
+```python
+public = make_s3_upath("s3://public-bucket/scene.tif", anon=True)
+```
+
+### The default credential chain
+
+Without a profile, keys or `anon=True`, both s3fs and GDAL use boto's default credential
+chain. This picks up environment variables and workload roles, but the identity a path uses
+is no longer visible on the path.
+
+## Settings from environment variables
+
+`S3Settings` reads a profile, an endpoint and checksum policies from environment variables
+under a prefix you choose. Its `resolve_path()` turns a local location into a `Path` and an
+`s3://` URI into a `UPath`:
+
+```python
+from freezebase.settings import S3Settings
+
+# Reads MYAPP_S3_PROFILE, MYAPP_S3_ENDPOINT_URL, and the two
+# MYAPP_S3_*_CHECKSUM_* policies for S3-compatible gateways.
+s3 = S3Settings.from_env("MYAPP_S3_")
+data_dir = s3.resolve_path("s3://my-bucket/data")  # a UPath
+scratch = s3.resolve_path("~/scratch")  # a Path
+```
+
+An `s3://` URI needs a configured profile. The endpoint is optional, since it can come from
+the profile's configuration.
+
+## Long-running processes
+
+freezebase caches Rasterio sessions and configured endpoints, so a configuration change
+during a process needs `clear_aws_session_cache()`. Resolving them means reading the AWS
+configuration files, so sessions are cached by their credential settings and endpoints by
+profile, and later reads and writes reuse them. Refreshable credentials, such as STS or SSO
+profiles, still rotate on their own. After changing static credentials, the AWS config files
+or the endpoint environment variables while a process runs, call `clear_aws_session_cache()`
+so the next access resolves them again.
+
+## Retries and checksums
+
+`make_s3_upath()` also sets retries for both s3fs and GDAL, and checksum defaults that avoid
+the checksum trailers some S3-compatible gateways reject.
+
+## Next steps
+
+[Reading and writing rasters](03-rasters.qmd) uses these paths to read a public DEM, write
+COGs and copy rasters between stores.

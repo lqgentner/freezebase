@@ -104,8 +104,10 @@ if scene.exists():
         data = src.read(1)
 ```
 
-See [Rasters on S3](https://lqgentner.github.io/freezebase/user-guide/rasters-on-s3.html)
-for authentication, custom endpoints and copies between buckets.
+See [S3 paths and credentials](https://lqgentner.github.io/freezebase/user-guide/s3-paths.html)
+for authentication and custom endpoints, and
+[Reading and writing rasters](https://lqgentner.github.io/freezebase/user-guide/rasters.html)
+for COG writes and copies between buckets.
 
 ## VRTs
 

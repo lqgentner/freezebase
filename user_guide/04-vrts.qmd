@@ -205,6 +205,9 @@ write_cog(dem, "dem.tif", {"dtype": "int16", "nodata": -9999})
 
 ## VRTs on S3
 
+An S3 source is a `UPath` built with `make_s3_upath()`, and keeps that path's credentials and
+endpoint. [S3 paths and credentials](02-s3-paths.qmd) describes the options.
+
 ### How source paths are saved
 
 In Python, every source path is absolute. When `VRT.write` saves a VRT, it stores a source
