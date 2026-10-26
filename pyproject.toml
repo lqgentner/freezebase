@@ -1,6 +1,6 @@
 [project]
 name = "freezebase"
-description = "Lightweight geospatial helpers for reproducible MGRS grids and S3-backed raster workflows."
+description = "Raster I/O on the MGRS grid, locally or on S3."
 authors = [
   { name = "Luis Gentner" , email = "luis.gentner@geo.uzh.ch"},
 ]
