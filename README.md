@@ -104,7 +104,7 @@ if scene.exists():
         data = src.read(1)
 ```
 
-See [S3 paths and credentials](https://lqgentner.github.io/freezebase/user-guide/s3-paths.html)
+See [Accessing S3](https://lqgentner.github.io/freezebase/user-guide/accessing-s3.html)
 for authentication and custom endpoints, and
 [Reading and writing rasters](https://lqgentner.github.io/freezebase/user-guide/rasters.html)
 for COG writes and copies between buckets.

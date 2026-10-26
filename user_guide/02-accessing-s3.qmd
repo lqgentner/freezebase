@@ -1,5 +1,5 @@
 ---
-title: "S3 paths and credentials"
+title: "Accessing S3"
 ---
 
 [Universal Pathlib](https://universal-pathlib.readthedocs.io/) makes S3 objects as easy to

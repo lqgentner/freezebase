@@ -15,7 +15,7 @@ freezebase provides raster helpers that work the same on local files and on S3:
 or an existing raster as a Cloud-Optimized GeoTIFF (COG), and `rewrite_tiff()` converts or
 copies an existing raster or VRT. Paths can be local or S3 `UPath`s, and on S3 the helpers use
 the credentials and endpoint stored on the path; `rasterio_open()` also reads public `http://`
-and `https://` URLs. [S3 paths and credentials](02-s3-paths.qmd) shows how to build an S3 path.
+and `https://` URLs. [Accessing S3](02-accessing-s3.qmd) shows how to build an S3 path.
 
 ## Read a raster
 
