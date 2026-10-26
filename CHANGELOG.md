@@ -8,203 +8,94 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## Unreleased
 
+## [0.9.0] - 2026-10-26
+
+This release adds `freezebase.vrt`, a pure-Python way to build, inspect and warp GDAL VRTs.
+MGRS no longer depends on the `mgrs` package, and Python 3.15 is supported.
+
 ### Added
 
-- Python 3.15 support, verified in CI.
-- `vectools.write_parquet` writes a GeoDataFrame atomically as zstd-compressed
-  GeoParquet.
-- `http://` / `https://` paths in `rasterio_open` and every reader built on it, read
-  through `/vsicurl/` with `GDAL_HTTP_OPTIONS`; `http_env()`.
-- `freezebase.vrt.VRT`, an editable model of a GDAL VRT (`Band`, `Source`,
-  `SourceProperties`, `PixelFunction`, `Warp`), serialized with `VRT.to_xml()`.
-  A `Source` may be another `VRT`, nested inline (needs GDAL ≥ 3.11).
-- `freezebase.vrt.read(path, *, storage_options=None)` parses a VRT file into the model,
-  including VRTs written by freezebase 0.8 and `gdalbuildvrt`. `/vsis3/` sources become
-  `s3://` paths with `storage_options`, or else those of an `s3://` `path`; elements the
-  model cannot hold, or repeated ones GDAL would read only the first of, raise
-  `ValueError`. `Band` and `Source` compare NaN nodata as equal.
-  A band without `<ColorInterp>` reads as `ColorInterp.undefined`, as GDAL reads it.
-- `VRT.sources`, `VRT.source_files()`, `VRT.env()` and `VRT.open()`: list a VRT's direct
-  sources without I/O, list the files it reads, enter the local, S3 or HTTP environment
-  they need (`ValueError` for sources needing different credentials), and open a VRT from
-  memory. `source_files()`, `env()` and `open()` follow `.vrt` files down a chain,
-  scanning them only for source paths, so foreign elements such as `<UseMaskBand>` don't
-  stop them; paths on other GDAL virtual file systems, such as `/vsizip/`, are skipped.
-  Their `storage_options` applies to the S3 sources of followed files, and a followed
-  file without options inherits those of the VRT that references it.
-- `freezebase.vrt.from_raster(path)` builds a 1:1 VRT over a raster, and
-  `freezebase.vrt.stack(sources, bands=, band_names=, color_interp=)` stacks the bands of
-  rasters or VRTs on one grid (`ValueError` pointing at `warp` when the grids differ).
-- `freezebase.vrt.mosaic(sources, bounds=, resolution=, resampling=, nodata=, band_names=,
-  color_interp=)` mosaics tiles of any band count, later sources drawing over earlier ones;
-  `VRT` inputs are nested. With `resolution="finest"` or `(x, y)`, tiles of mixed pixel
-  sizes or off the output grid are resampled and placed exactly, not snapped to it, and
-  fill only the output pixels whose centre they contain. `nodata` sets the bands' NODATA
-  and must fit in their dtype; each tile's own NODATA pixels stay transparent under it.
-- `freezebase.vrt.derive(sources, function, dtype=, nodata=, description=, band=)` applies a
-  GDAL pixel function to one input (every band) or several (one band from each). `VRT`
-  inputs are nested whole, so the function sees mosaicked pixels; input NODATA is honoured
-  through `propagateNoData`, so a nodata input gives a nodata output. A `nodata` that
-  doesn't fit in `dtype` (NaN or out of range for an integer type) raises `ValueError`, and
-  so does an input band with a scale or offset, which pixel functions would ignore.
-- `freezebase.vrt.warp(source, crs=, src_crs=, resolution=, bounds=, like=, resampling=,
-  snap=, dtype=, nodata=, tolerance=, allow_ballpark=)` warps a raster or `VRT` onto an
-  explicit grid (`resolution` may be `(x, y)`), onto the grid
-  `rasterio.warp.calculate_default_transform` derives, or onto a reference raster's grid
-  (`like`). PROJ ballpark transformations are refused unless `allow_ballpark=True`, so a
-  missing grid raises `ValueError` instead of silently ignoring a datum shift. `tolerance`
-  is the approximation error in source pixels, `0` for exact; the default `"auto"` is 0.125
-  for horizontal-only warps and exact when heights shift. Both settings are kept in the
-  written VRT. The dtype is never promoted implicitly, and a nodata that doesn't fit in
-  it raises `ValueError`.
-- `warp` shifts heights between vertical datums when the source CRS and `crs` differ and
-  both are compound or 3D (e.g. `EPSG:2056+5728` to `EPSG:4979`), with exact transforms
-  under `tolerance="auto"`. Heights in feet are converted as `gdalwarp` does. Warping between
-  a vertical and a 2D CRS raises `ValueError`: pass a 2D `src_crs` to keep heights
-  unconverted from a vertical source, and a 3D or compound `src_crs` (or a 2D `crs`) for a
-  2D source and a vertical target. Only single-band rasters without a scale or offset are
-  shifted; a multi-band or scaled source raises `ValueError`. PROJ needs the grids, e.g. via
-  `PROJ_DATA`.
-- `VRT.metadata_domains` holds dataset metadata of named domains, such as the
-  `IMAGE_STRUCTURE` interleaving GDAL records for a warped multi-band raster.
-- The model maps the complex dtypes `complex_int16`, `complex_int32`, `complex64` and
-  `complex128` to GDAL's `CInt16`, `CInt32`, `CFloat32` and `CFloat64`, so `from_raster`,
-  `stack`, `mosaic` and `warp` take complex rasters. `derive` raises `ValueError`
-  ("complex data types are not supported") for a complex input.
-- `Band.scale` and `Band.offset` hold a band's `<Scale>` and `<Offset>`. `from_raster`,
-  `stack`, `mosaic` and `warp` carry them from their inputs; `mosaic` tiles must share
-  them. A colour table, which the model cannot hold, raises `ValueError` in all four.
-- `write_cog` accepts a `VRT` or a raster path and streams it to a COG through GDAL, without
-  loading it into memory; `profile` is optional for those inputs. A `nodata` in `profile`
-  that differs from a band's moves that band's old nodata pixels to the new value, for any
-  VRT (mosaic, warped, derived), by nesting it; `nodata=None` keeps the VRT's. A `dtype`
-  casts every band. `ValueError` if a nodata value does not fit the dtype. Array-likes,
-  including masked arrays, still go through `np.asanyarray`. A cast rounds and clamps
-  out-of-range values, so a valid value can become the nodata value (300 cast to `uint8`
-  with nodata 255 reads as nodata). Bands that differ in dtype, or in nodata, raise
-  `ValueError` unless `profile` sets `dtype` or `nodata`; so does `rewrite_tiff` for such a
-  `VRT`.
-- `rewrite_tiff` accepts a `VRT`, applying `band_names`, `units`, `color_interp`, `tags` and
-  `band_tags` to a copy of it and encoding it to the driver in `profile`; `move=True` with a
-  `VRT` raises `ValueError`.
+- Python 3.15 support.
+- `freezebase.vrt`, an editable model of GDAL VRTs (`VRT`, `Band`, `Source`, …) that reads
+  existing VRT files (`vrt.read`) and writes them (`VRT.to_xml`, `VRT.write`). Builders:
+  - `from_raster`: a 1:1 VRT over a raster.
+  - `stack`: combine the bands of rasters on one grid.
+  - `mosaic`: mosaic tiles of any band count, including mixed resolutions.
+  - `derive`: apply a GDAL pixel function.
+  - `warp`: reproject onto an explicit grid, a derived grid or a reference raster's grid,
+    shifting heights between vertical datums when both CRSs are compound or 3D.
+
+  VRTs can be nested and opened from memory (`VRT.open()`), and they list the files and
+  credentials they need (`VRT.source_files()`, `VRT.env()`).
+- `write_cog` accepts a `VRT` or a raster path, and `rewrite_tiff` accepts a `VRT`. Both
+  stream through GDAL without loading the data into memory.
+- `http://` and `https://` paths in `rasterio_open` and the readers built on it; `http_env()`.
+- `vectools.write_parquet` writes a GeoDataFrame atomically as zstd-compressed GeoParquet.
 
 ### Changed
 
-- **Breaking:** `build_vrt_mosaic`, `create_decibel_vrt`, `create_rgb_vrt` and
-  `create_rgba_vrt` write every source on the VRT's store (local, or the same S3 bucket)
-  relative to the VRT, `../` included. Before, only a source beside the VRT was relative
-  and any other was absolute: `/data/tiles/a.tif` from `/data/vrts/m.vrt` is now
-  `../tiles/a.tif`. A VRT moved together with its sources still opens; a VRT moved alone
-  no longer does, so move both, or build with `freezebase.vrt` and write with
-  `VRT.write(path, relative=False)`. `create_warped_vrt` still writes absolute paths.
-- `build_vrt_mosaic` accepts multi-band tiles, complex tiles (before, a `ValueError`) and
-  tiles without a CRS (before, an `AttributeError`).
-- **Breaking:** `build_vrt_mosaic` takes each band's colour interpretation from the first
-  tile. Before, it was always gray; now an RGB tile gives red, green and blue bands, and a
-  tile with none gives undefined. Pass `color_interp` to `freezebase.vrt.mosaic` to choose
-  them.
-- **Breaking:** `build_vrt_mosaic` and `create_rgb_vrt` raise `ValueError` for a south-up
-  input (positive pixel height). Before, they wrote a south-up VRT; now warp the input
-  north-up first, e.g. with `freezebase.vrt.warp`. `mosaic`, `stack` and `from_raster`
-  refuse such rasters too.
-- **Breaking:** `build_vrt_mosaic`, `create_rgb_vrt` and `create_warped_vrt` raise
-  `ValueError` for an input with a colour table. Before, `build_vrt_mosaic` and
-  `create_rgb_vrt` dropped the table and `create_warped_vrt` kept it; now expand the input
-  to RGB(A) first, e.g. with `gdal_translate -expand rgba`.
-- **Breaking:** `create_decibel_vrt` and `create_rgb_vrt` raise `ValueError` ("complex
-  data types are not supported") for complex inputs. Before, they read the real parts:
-  `create_decibel_vrt` gave the dB of the real part, and `create_rgb_vrt` the real parts
-  and their ratio or difference. Now convert the input to a real dtype first, e.g. to its
-  intensity.
-- **Breaking:** `create_decibel_vrt` and `create_rgb_vrt` raise `ValueError` for an input
-  with a scale or offset. Before, they computed on the raw stored values (`create_decibel_vrt`
-  gave the dB of the raw counts); now convert the input to physical values first.
-  `create_rgb_vrt` writes no scale or offset on its bands, as before.
-- **Breaking:** `build_vrt_mosaic` writes the tiles' scale and offset, and raises
-  `ValueError` for tiles whose scale or offset differ. Before, it wrote neither, so readers
-  saw the raw stored values.
-- **Breaking:** `create_decibel_vrt` writes nodata where a source with non-NaN NODATA holds
-  that value. Before, `10 * log10(nodata)` reached the output, e.g. `-inf` for a NODATA of
-  0; now the output pixel is nodata (NaN). Mask `-inf` no longer; test for NaN instead.
-- `create_warped_vrt` takes `resolution` as a float, an `(x, y)` tuple or `None`.
-- **Breaking:** `create_warped_vrt` raises `ValueError` when the nodata does not fit in the
-  warped dtype. Before, `dtype="uint8"` over a NaN-nodata source wrote no nodata, so NaN
-  pixels became valid zeros, and `nodata=nan` over an integer source silently promoted the
-  output to float64. Now pass a nodata the dtype can hold (`dtype="uint8", nodata=255`), or
-  a float `dtype` with `nodata=nan`.
-- **Breaking:** `create_warped_vrt` is built on `freezebase.vrt.warp` and no longer ignores
-  datum differences. Before, a missing PROJ datum grid fell back silently to a ballpark
-  transformation with a zero shift, and heights were never shifted or converted. Now PROJ
-  raises `ValueError` when it has no exact transformation (install the grids, e.g. via
-  `PROJ_DATA`). A vertical source with a 2D target, or the reverse, raises `ValueError`
-  (pass a 2D `src_crs` through `warp` to keep heights unconverted), and heights are shifted
-  and converted between units when both CRSs are compound or 3D. That raises `ValueError`
-  for a multi-band source, which `gdalwarp` would not shift, and for a source with a scale
-  or offset, whose raw stored values GDAL would shift instead of the heights (before, the
-  output kept the source's raw values; now convert the source to heights first).
-- `mgrs` is no longer a dependency. MGRS references are now computed with NumPy
-  and pyproj, giving the same codes and squares as `mgrs` (GeoTrans) except for
-  the fixes below. `MGRSGrid` builds about five times faster, and far faster
-  for detailed areas of interest, whose many vertices no longer slow down the
-  test of each square.
-- **Breaking:** `MGRSGeoBox.from_mgrs` raises `ValueError` for every reference
-  that uses letters its zone lacks or names a square outside its latitude band
-  or UTM zone. Before, GeoTrans rejected some with `mgrs.core.MGRSError` (band X
-  in zones 32, 34 and 36; letters not used in the zone; squares past the
-  equator), only warned about squares outside their band
-  (`from_mgrs("32TMA00")` emitted a `RuntimeWarning`), and silently accepted
-  squares outside their zone (`from_mgrs("31VFH00")` returned a square at 5°E,
-  east of where zone 31V ends at 3°E). Now all of these raise `ValueError`;
-  catch that instead of `MGRSError`.
-- **Breaking:** `MGRSGeoBox.from_mgrs` stores the reference in the form
-  `MGRSGrid` uses: upper case, two-digit zone, no surrounding spaces. Before,
-  `from_mgrs("4QFJ15").mgrs_code` was `"4QFJ15"`; now it is `"04QFJ15"`.
-- `GeoVectorData` caches its processed GeoParquet with zstd at level 15 in row
-  groups of at most 100 000 rows. Files shrink by a quarter to a half.
-  Caches written by earlier versions stay valid and are not rewritten.
+- `mgrs` is no longer a dependency: MGRS codes are computed with NumPy and pyproj, and
+  `MGRSGrid` builds about five times faster.
+- `GeoVectorData` caches are a quarter to a half smaller. Existing caches stay valid.
+- `build_vrt_mosaic` accepts multi-band, complex and CRS-less tiles. `create_warped_vrt`
+  accepts an `(x, y)` resolution.
+- **Breaking:** the VRT helpers (`build_vrt_mosaic`, `create_decibel_vrt`,
+  `create_rgb_vrt`, `create_rgba_vrt`, `create_warped_vrt`) are built on `freezebase.vrt`
+  and refuse inputs they used to handle incorrectly:
+  - Sources on the VRT's store are written relative to the VRT (`../tiles/a.tif`, before
+    `/data/tiles/a.tif`), except in `create_warped_vrt`. Move a VRT together with its
+    sources, or write it with `VRT.write(path, relative=False)`.
+  - South-up inputs and inputs with a colour table raise `ValueError`. Warp south-up inputs
+    north-up first, and expand colour tables to RGB(A) first, for example with
+    `gdal_translate -expand rgba`.
+  - `create_decibel_vrt` and `create_rgb_vrt` raise `ValueError` for complex inputs and for
+    inputs with a scale or offset. Convert them to real, physical values first.
+  - `build_vrt_mosaic` takes each band's colour interpretation from the first tile (before,
+    always gray). It writes the tiles' scale and offset (before, none) and raises
+    `ValueError` if the tiles disagree.
+  - `create_decibel_vrt` writes NaN where a source holds its NODATA value. Before, the
+    output held values such as `-inf` for a NODATA of 0.
+  - `create_warped_vrt` raises `ValueError` when nodata doesn't fit the output dtype (before,
+    NaN silently became 0 in `uint8`). It also raises when PROJ has no exact datum
+    transformation (before, a silent zero shift); install the grids, e.g. via `PROJ_DATA`.
+    Heights are now shifted between compound or 3D CRSs, and a vertical/2D CRS pair raises
+    `ValueError`.
+- **Breaking:** `MGRSGeoBox.from_mgrs` raises `ValueError` for every invalid reference.
+  Before, it raised `mgrs.core.MGRSError`, emitted a `RuntimeWarning` or returned a wrong
+  square. Catch `ValueError` instead of `MGRSError`.
+- **Breaking:** `MGRSGeoBox.from_mgrs` normalizes the code it stores:
+  `from_mgrs("4QFJ15").mgrs_code` is now `"04QFJ15"` (before, `"4QFJ15"`).
 
 ### Removed
 
-- **Breaking:** `merge_tiffs`, which wrote a GTiff with the first source's profile, the
-  first file winning overlaps (`method="last"` is `vrt.mosaic(files)`, unreversed). The
-  `FileNotFoundError` pre-check and the "Failed to merge GeoTIFFs" `RuntimeError` are gone:
-  a mismatch now raises `ValueError` from `vrt.mosaic` (incompatible tiles), and a failed
-  write raises `RuntimeError("Failed to write COG")` from `write_cog`. Before:
-  `merge_tiffs([a, b], "out.tif")`. After:
-  `write_cog(vrt.mosaic(list(reversed(files)), band_names=..., nodata=...), "out.tif")` for
-  a COG (`write_cog` writes a COG, not the first source's profile), or
-  `rewrite_tiff(vrt.mosaic(list(reversed(files))), "out.tif", profile)` for a GTiff.
-  `mosaic` lets later files win, hence the reversal; band names, nodata, dtype and grid
-  origin now come from the last file, so pass `band_names=` and `nodata=` to keep the first
-  file's. `mosaic` raises `ValueError` for tiles that differ in nodata, dtype or band
-  count, which `rasterio.merge` accepted. `min`, `max`, `sum`, `count` and `mem_limit_mb`
-  have no replacement.
-- **Breaking:** `MGRSGrid.utm_to_mgrs`, an undocumented `np.vectorize` wrapper
-  around `mgrs.MGRS().UTMToMGRS` that grid construction left on the instance.
-  Before: `grid.utm_to_mgrs(zones, hemispheres, eastings, northings,
-  MGRSPrecision=1)`. After: read `grid.mgrs_codes`, which holds the grid's codes.
-- **Breaking:** `vectools.save_and_read_parquet`, which wrote a GeoDataFrame and
-  read the whole file back. Before: `save_and_read_parquet(gdf, path)`. After:
-  `write_parquet(gdf, path)`, followed by `gpd.read_parquet(path)` where the
-  frame is needed.
+- **Breaking:** `merge_tiffs`. Mosaic with `freezebase.vrt.mosaic` instead. Later files
+  win, so reverse the list to keep the old first-wins behaviour:
+
+  ```python
+  # Before
+  merge_tiffs(files, "out.tif")
+  # After, as a COG
+  write_cog(vrt.mosaic(files[::-1], band_names=..., nodata=...), "out.tif")
+  # After, as a GTiff with a given profile
+  rewrite_tiff(vrt.mosaic(files[::-1]), "out.tif", profile)
+  ```
+
+  Tiles must agree in nodata, dtype and band count. The `min`, `max`, `sum` and `count`
+  methods and `mem_limit_mb` have no replacement.
+- **Breaking:** `MGRSGrid.utm_to_mgrs` (undocumented). Read `grid.mgrs_codes` instead.
+- **Breaking:** `vectools.save_and_read_parquet`. Use `write_parquet(gdf, path)`, then
+  `gpd.read_parquet(path)` if you need the frame.
 
 ### Fixed
 
-- **Breaking:** `MGRSGrid` no longer mislabels zone-31 squares on the 3°E edge of
-  zone 31V (56–64°N). Before, squares that touched the zone only along that edge
-  were included and named after a different zone-32 square, e.g. `32VJH22` for
-  the zone-31 square at easting 500000, so codes repeated and `from_mgrs`
-  rebuilt the wrong square. Now those squares are dropped, and zone-31 squares
-  that reach past 64°N keep a `31V` code.
-- **Breaking:** `MGRSGrid` no longer names squares in band X in zones 32, 34 and
-  36, which have no band X. Before, the one square per zone straddling 72°N was
-  coded from its SW corner just north of it, e.g. `32XNE69`, and `from_mgrs`
-  rejected that code. Now it is `32WNE69`.
-- **Breaking:** `MGRSGrid` geometries no longer wrap around the globe at the
-  antimeridian. Before, a square crossing 180° became a polygon spanning every
-  longitude, and squares beyond 180° were kept in zones 1–6 and 55–60 because
-  that polygon overlapped them. Now crossing squares are split at 180° into a
-  two-part `MultiPolygon`, and the spurious squares are gone.
+- **Breaking:** `MGRSGrid` fixes three edge cases, which changes some codes and geometries:
+  - Zone-31 squares that only touch the 3°E edge of zone 31V (56–64°N) are dropped. Before,
+    they were named after zone-32 squares (e.g. `32VJH22`), so codes repeated.
+  - Squares straddling 72°N in zones 32, 34 and 36 get band W (`32WNE69`). Before, they got
+    band X (`32XNE69`), which those zones don't have.
+  - Squares crossing the antimeridian are split into a two-part `MultiPolygon`. Before, they
+    became a polygon spanning every longitude, and spurious squares appeared in zones 1–6
+    and 55–60.
 
 ## [0.8.0] - 2026-09-21
 
