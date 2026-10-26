@@ -25,6 +25,7 @@ from rich.progress import (
 )
 import tenacity
 
+from freezebase.errors import DownloadError
 from freezebase.progress import create_progress
 from freezebase.utils import shorten_string
 
@@ -233,6 +234,9 @@ class HTTPDownloader:
             If the filename is unsafe.
         FileExistsError
             If the target exists unless ``overwrite`` is true.
+        DownloadError
+            If the response is not a downloadable file, a redirect has no host,
+            the redirects exceed the limit, or no filename can be inferred.
         """
         # Closing the session alone does not close this streamed response.
         with contextlib.closing(self._follow_redirects(url)) as response:
@@ -243,7 +247,7 @@ class HTTPDownloader:
                     f"No downloadable file found for URL: '{url}'. "
                     "Make sure the authentication is correct."
                 )
-                raise RuntimeError(msg)
+                raise DownloadError(msg)
 
             explicit_filename = filename is not None
             if not filename:
@@ -251,7 +255,7 @@ class HTTPDownloader:
                 filename = _extract_filename_from_cd(cd) or _extract_filename_from_url(url)
                 if not filename:
                     msg = "Could not infer filename. Please specify with `filename=` argument."
-                    raise RuntimeError(msg)
+                    raise DownloadError(msg)
 
             safe_name = _sanitize_filename(filename, explicit=explicit_filename)
 
@@ -292,7 +296,7 @@ class HTTPDownloader:
             new_parsed = urlparse(new_url)
             if new_parsed.hostname is None:
                 msg = "Hostname not found in redirect Location header."
-                raise RuntimeError(msg)
+                raise DownloadError(msg)
 
             is_trusted = (
                 new_parsed.hostname == prev_parsed.hostname
@@ -306,7 +310,7 @@ class HTTPDownloader:
             url = new_url
 
         msg = f"Exceeded maximum of {MAX_REDIRECTS} redirects for URL."
-        raise RuntimeError(msg)
+        raise DownloadError(msg)
 
     def close(self) -> None:
         """Close the session."""

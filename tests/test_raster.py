@@ -17,6 +17,7 @@ from rasterio.transform import from_origin
 from upath import UPath
 
 from freezebase import raster
+from freezebase.errors import RasterWriteError
 from freezebase.raster import (
     COG_PROFILE,
     GDAL_HTTP_OPTIONS,
@@ -289,7 +290,7 @@ class TestRewriteTiffLocal:
         make_tiff(src, fill=1.0)
         make_tiff(dst, fill=9.0)
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RasterWriteError):
             rewrite_tiff(src, dst, profile={"driver": "NotARealDriver"})
 
         # The pre-existing destination must survive the failed rewrite intact,
@@ -358,7 +359,7 @@ class TestRewriteTiffLocal:
         path = tmp_path / "tile.tif"
         make_tiff(path)
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RasterWriteError):
             rewrite_tiff(path, path, profile={"driver": "NotARealDriver"})
 
         assert not list(tmp_path.glob(f".{path.name}.*.tmp"))
@@ -413,7 +414,7 @@ class TestRewriteTiffVrt:
         make_tiff(src)
         make_tiff(dst, fill=9.0)
 
-        with pytest.raises(RuntimeError, match="Failed to rewrite"):
+        with pytest.raises(RasterWriteError, match="Failed to rewrite"):
             rewrite_tiff(from_raster(src), dst, {"driver": "NotARealDriver"})
 
         assert not list(tmp_path.glob(f".{dst.name}.*.tmp"))
@@ -473,7 +474,7 @@ class TestRewriteTiffVrt:
         scratch.mkdir()
         monkeypatch.setattr(tempfile, "tempdir", str(scratch))
 
-        with pytest.raises(RuntimeError, match="Failed to rewrite"):
+        with pytest.raises(RasterWriteError, match="Failed to rewrite"):
             rewrite_tiff(
                 from_raster(src), UPath("s3://bucket/out/x.tif"), {"driver": "NotADriver"}
             )
@@ -625,7 +626,7 @@ class TestWriteCog:
             "nodata": np.nan,
         }
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RasterWriteError):
             write_cog(data, dst, {**profile, "dtype": "not-a-real-dtype"})
 
         assert not dst.exists()
@@ -765,7 +766,7 @@ class TestWriteCog:
             "nodata": np.nan,
         }
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RasterWriteError):
             write_cog(data, dst, {**profile, "dtype": "not-a-real-dtype"}, checksum=True)
 
         assert not dst.exists()
@@ -879,15 +880,23 @@ class TestMetadataInjection:
             assert ds.units == ("dB",)
         assert sorted(p.name for p in tmp_path.iterdir()) == ["dst.tif", "src.tif"]
 
-    def test_rewrite_leaves_no_staging_file_on_failure(self, tmp_path: Path) -> None:
+    def test_rewrite_leaves_no_staging_file_on_failure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         src = tmp_path / "src.tif"
         dst = tmp_path / "dst.tif"
         make_tiff(src)
 
-        # A unit for a band that does not exist fails during injection, after
-        # the staging copy has already been written.
-        with pytest.raises(RuntimeError):
-            rewrite_tiff(src, dst, profile=COG_PROFILE, tags={"A": "1"}, units=["natural", "dB"])
+        def fail(*_args: object, **_kwargs: object) -> None:
+            msg = "injection failed"
+            raise OSError(msg)
+
+        # Fails after the staging copy has been written.
+        monkeypatch.setattr(raster, "_inject_band_metadata", fail)
+        with pytest.raises(RasterWriteError, match="injection failed"):
+            rewrite_tiff(src, dst, profile=COG_PROFILE, tags={"A": "1"})
 
         assert not dst.exists()
         assert sorted(p.name for p in tmp_path.iterdir()) == ["src.tif"]
@@ -970,11 +979,11 @@ class TestPerBandLengths:
         kwargs: dict[str, Any],
         expected: str,
     ) -> None:
-        with pytest.raises(RuntimeError, match=f"{expected} must hold one entry per band"):
+        with pytest.raises(ValueError, match=f"{expected} must hold one entry per band"):
             write_cog(self._data(), tmp_path / "out.tif", self.profile, **kwargs)
 
     def test_write_cog_rejects_a_long_sequence(self, tmp_path: Path) -> None:
-        with pytest.raises(RuntimeError, match="one entry per band"):
+        with pytest.raises(ValueError, match="one entry per band"):
             write_cog(
                 self._data(),
                 tmp_path / "out.tif",
@@ -986,11 +995,22 @@ class TestPerBandLengths:
         src = tmp_path / "src.tif"
         write_cog(self._data(), src, self.profile, band_names=["VV", "VH"])
 
-        with pytest.raises(RuntimeError, match="units must hold one entry per band"):
+        # Previously raised RuntimeError after staging the copy.
+        with pytest.raises(ValueError, match="units must hold one entry per band"):
             rewrite_tiff(src, tmp_path / "dst.tif", units=["natural"])
 
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["src.tif"]
+
+    def test_rewrite_takes_band_metadata_by_keyword_only(self, tmp_path: Path) -> None:
+        with pytest.raises(TypeError):
+            rewrite_tiff(tmp_path / "src.tif", tmp_path / "dst.tif", None, ["VV"])  # pyrefly: ignore[bad-argument-count]  # the call under test
+
+    def test_rewrite_of_a_missing_source_is_a_write_error(self, tmp_path: Path) -> None:
+        with pytest.raises(RasterWriteError, match="Failed to rewrite"):
+            rewrite_tiff(tmp_path / "missing.tif", tmp_path / "dst.tif", units=["natural"])
+
     def test_a_rejected_write_leaves_nothing_behind(self, tmp_path: Path) -> None:
-        with pytest.raises(RuntimeError):
+        with pytest.raises(ValueError, match="units must hold one entry per band"):
             write_cog(self._data(), tmp_path / "out.tif", self.profile, units=["natural"])
 
         assert list(tmp_path.iterdir()) == []
@@ -1190,7 +1210,7 @@ class TestS3WritesUploadThroughS3fs:
         monkeypatch.setattr(raster, "_upload", refuse)
         src = tmp_path / "src.tif"
         make_tiff(src)
-        with pytest.raises(RuntimeError, match="AccessDenied"):
+        with pytest.raises(RasterWriteError, match="AccessDenied"):
             rewrite_tiff(src, UPath(self.dst), move=True)
         assert src.exists()
 
@@ -1347,7 +1367,7 @@ class TestWriteCogFromVrt:
             raise OSError(msg)
 
         monkeypatch.setattr(rasterio.shutil, "copy", copy_then_fail)
-        with pytest.raises(RuntimeError, match="disk full"):
+        with pytest.raises(RasterWriteError, match="disk full"):
             write_cog(src, tmp_path / "o.tif")
         assert not list(tmp_path.glob(".*.tmp"))
         assert not (tmp_path / "o.tif").exists()
@@ -1514,7 +1534,7 @@ class TestWriteCogInputs:
             raise rasterio.errors.RasterioIOError(msg)
 
         monkeypatch.setattr("freezebase.vrt.stack", fail)
-        with pytest.raises(RuntimeError, match="Failed to write COG: cannot open"):
+        with pytest.raises(RasterWriteError, match="Failed to write COG: cannot open"):
             write_cog(src, tmp_path / "o.tif", {"nodata": 9})
 
 

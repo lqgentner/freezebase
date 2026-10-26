@@ -127,6 +127,13 @@ reference:
         - download.HTTPDownloader
         - download.retry_request
 
+    - title: Errors
+      desc: Exceptions specific to freezebase
+      contents:
+        - errors.FreezebaseError
+        - errors.DownloadError
+        - errors.RasterWriteError
+
     - title: S3
       desc: >-
         S3 `UPath` construction and retry configuration

@@ -20,6 +20,7 @@ import rasterio.shutil
 from upath import UPath
 
 from freezebase.download import TRANSIENT_HTTP_STATUS_CODES
+from freezebase.errors import RasterWriteError
 from freezebase.utils import file_sha256
 
 if TYPE_CHECKING:
@@ -499,9 +500,9 @@ def rewrite_tiff(
     src_file: AnyPath | VRT,
     dst_file: AnyPath,
     profile: dict[str, Any] | None = None,
+    *,
     band_names: list[str] | None = None,
     color_interp: list[ColorInterp] | None = None,
-    *,
     tags: Mapping[str, str] | None = None,
     band_tags: Sequence[Mapping[str, str]] | None = None,
     units: list[str] | None = None,
@@ -535,9 +536,9 @@ def rewrite_tiff(
     Raises
     ------
     ValueError
-        If ``move`` is set for a ``VRT`` source, or a per-band sequence for a ``VRT`` does
-        not hold one entry per band, or its bands differ in dtype or nodata.
-    RuntimeError
+        If ``move`` is set for a ``VRT`` source, a per-band sequence does not hold one
+        entry per band, or the bands of a ``VRT`` differ in dtype or nodata.
+    RasterWriteError
         If the rewrite fails.
     """
     from freezebase.vrt import VRT  # noqa: PLC0415  # freezebase.vrt imports raster
@@ -574,6 +575,20 @@ def rewrite_tiff(
 
     src_file = UPath(src_file)
     in_place = src_file == dst_file
+    per_band = {
+        "band_names": band_names,
+        "color_interp": color_interp,
+        "band_tags": band_tags,
+        "units": units,
+    }
+    if any(v is not None for v in per_band.values()):
+        try:
+            with rasterio_open(src_file) as src:
+                count = src.count
+        except Exception as e:
+            msg = f"Failed to rewrite GeoTIFF: {e}"
+            raise RasterWriteError(msg) from e
+        _check_band_lengths(count, **per_band)
     # The stage helpers configure each backend independently.
     stage = _rewrite_via_memory if dst_file.protocol == "s3" else _rewrite_via_tempfile
     try:
@@ -590,7 +605,7 @@ def rewrite_tiff(
         )
     except Exception as e:
         msg = f"Failed to rewrite GeoTIFF: {e}"
-        raise RuntimeError(msg) from e
+        raise RasterWriteError(msg) from e
 
     if move and not in_place:
         src_file.unlink()
@@ -629,7 +644,7 @@ def _rewrite_vrt(
             _encode_cog(vrt.to_xml(), dst_file, {"driver": driver, **dst_profile}, checksum=False)
     except Exception as e:
         msg = f"Failed to rewrite GeoTIFF: {e}"
-        raise RuntimeError(msg) from e
+        raise RasterWriteError(msg) from e
 
 
 def _rewrite_via_memory(
@@ -897,7 +912,7 @@ def _write_cog_from_vrt(
         vrt = _wrap_for_nodata(vrt, profile.get("nodata"))
     except OSError as e:
         msg = f"Failed to write COG: {e}"
-        raise RuntimeError(msg) from e
+        raise RasterWriteError(msg) from e
     if profile.get("dtype") is not None or profile.get("nodata") is not None:
         _cast_and_check(vrt, profile.get("dtype"))
     _require_uniform_bands(vrt)
@@ -908,7 +923,7 @@ def _write_cog_from_vrt(
             digest = _encode_cog(xml, dst_file, _cog_creation_options(profile), checksum=checksum)
     except Exception as e:
         msg = f"Failed to write COG: {e}"
-        raise RuntimeError(msg) from e
+        raise RasterWriteError(msg) from e
 
     logger.debug("Wrote COG to '%s'", dst_file.name)
     return digest
@@ -1011,7 +1026,7 @@ def write_cog(
         dtype is unknown, a nodata value does not fit the dtype, a raster path has a
         colour table or is south-up, or the bands differ in dtype or nodata without
         ``profile`` setting it.
-    RuntimeError
+    RasterWriteError
         If the write fails.
     """
     dst_file = UPath(dst_file)
@@ -1029,6 +1044,13 @@ def write_cog(
         )
     # Keeps a masked array's mask, which rasterio fills with nodata.
     array = np.asanyarray(data)
+    _check_band_lengths(
+        1 if array.ndim == 2 else array.shape[0],  # noqa: PLR2004
+        band_names=band_names,
+        color_interp=color_interp,
+        band_tags=band_tags,
+        units=units,
+    )
     profile = _require_profile(profile)
     mem_profile = build_rasterio_profile(profile)
     mem_profile.pop("driver", None)
@@ -1058,7 +1080,7 @@ def write_cog(
             )
     except Exception as e:
         msg = f"Failed to write COG: {e}"
-        raise RuntimeError(msg) from e
+        raise RasterWriteError(msg) from e
 
     logger.debug("Wrote COG to '%s'", dst_file.name)
     return digest

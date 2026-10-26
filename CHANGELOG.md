@@ -8,6 +8,28 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## Unreleased
 
+## [0.10.0] - 2026-10-26
+
+### Added
+
+- `freezebase.errors` with `FreezebaseError`, the base of freezebase-specific errors,
+  `DownloadError` and `RasterWriteError`. Where `RuntimeError` was raised before:
+  - `HTTPDownloader` raises `DownloadError` (a response that is not a file, a redirect
+    without a host, too many redirects, no inferable filename).
+  - `write_cog` and `rewrite_tiff` raise `RasterWriteError` when the write fails.
+
+  Both subclass `RuntimeError`, so existing `except RuntimeError` handlers keep working.
+
+### Changed
+
+- **Breaking:** `write_cog` from an array and `rewrite_tiff` from a file raise `ValueError`
+  when a per-band sequence (`band_names`, `color_interp`, `band_tags`, `units`) does not
+  hold one entry per band, as they already did for a VRT. Before, they raised
+  `RuntimeError` after staging the write. Catch `ValueError` instead of `RuntimeError`.
+- **Breaking:** `rewrite_tiff`'s `band_names` and `color_interp` are keyword-only, as in
+  `write_cog`. Replace `rewrite_tiff(src, dst, profile, names)` with
+  `rewrite_tiff(src, dst, profile, band_names=names)`.
+
 ### Fixed
 
 - `MGRSGrid` follows the curved WGS84 edges of its squares to within 5 cm, instead of
