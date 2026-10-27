@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 import contextlib
 from functools import partial
 import logging
 from pathlib import Path
 import re
 from secrets import token_hex
-from typing import TYPE_CHECKING, Any, Literal, Self, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Literal, Self, cast, overload
 from urllib.parse import unquote, urljoin, urlparse
 
 import requests
@@ -30,7 +29,7 @@ from freezebase.progress import create_progress
 from freezebase.utils import shorten_string
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
     from requests.auth import AuthBase
     from upath import UPath
@@ -57,8 +56,6 @@ _WINDOWS_RESERVED_NAMES = frozenset(
     | {f"COM{i}" for i in range(1, 10)}
     | {f"LPT{i}" for i in range(1, 10)},
 )
-
-WrappedFn = TypeVar("WrappedFn", bound=Callable[..., Any])
 
 _DOWNLOAD_COLUMNS: list[str | ProgressColumn] = [
     TextColumn("{task.fields[filename]}"),
@@ -92,11 +89,11 @@ def _is_transient_request_error(
     return False
 
 
-def retry_request(
+def retry_request[**P, R](
     logger: logging.Logger,
     *,
     extra_status_codes: frozenset[int] = frozenset(),
-) -> Callable[[WrappedFn], WrappedFn]:
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """
     Create a `tenacity` retry decorator for HTTP requests using the `requests` library.
 
@@ -121,7 +118,7 @@ def retry_request(
 
     Returns
     -------
-    Callable[[WrappedFn], WrappedFn]
+    Callable[[Callable[P, R]], Callable[P, R]]
         Configured retry decorator.
     """
     return tenacity.retry(
@@ -131,9 +128,6 @@ def retry_request(
         retry=tenacity.retry_if_exception(
             partial(_is_transient_request_error, extra_status_codes=extra_status_codes),
         ),
-        # tenacity's LoggerProtocol demands a `log()` taking arbitrary keywords,
-        # which `logging.Logger.log` does not; it only ever gets called positionally.
-        # pyrefly: ignore [bad-argument-type]
         before_sleep=tenacity.before_sleep_log(logger, logging.INFO),
     )
 
