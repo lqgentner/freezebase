@@ -8,6 +8,12 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## Unreleased
 
+### Changed
+
+- `retry_request` is annotated as preserving the decorated function's signature
+  (`Callable[[Callable[P, R]], Callable[P, R]]`), matching tenacity 9.2. The
+  module-level `WrappedFn` type variable it used is removed.
+
 ## [0.10.0] - 2026-10-26
 
 ### Added

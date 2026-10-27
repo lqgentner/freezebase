@@ -78,6 +78,7 @@ class FakeSession:
             self.closed.append(url)
             original_close()
 
+        # pyrefly: ignore [method-assign] -- instance patch to record closes
         resp.close = _close
         return resp
 
