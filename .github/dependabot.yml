@@ -37,6 +37,21 @@ updates:
           - "great-docs"
           - "matplotlib"
           - "contextily"
+      # Everything else (runtime and transitive packages). Declared last, so
+      # the groups above win for their members. Majors stay out and get their
+      # own PRs, since they are the updates that tend to need code changes.
+      python-dependencies:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      # Security updates ignore the groups above unless a group opts in, so
+      # without this each advisory opens its own PR.
+      security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   # Actions used by the CI/docs/publish workflows.
   - package-ecosystem: "github-actions"
