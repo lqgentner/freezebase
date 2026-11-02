@@ -79,12 +79,16 @@ _SHA256_MULTIHASH_PREFIX = "1220"
 """Multihash function+length header for a raw SHA-256 digest, per ``file:checksum``."""
 
 _COG_CREATION_OPTIONS = (
+    "bigtiff",
     "blocksize",
     "compress",
+    "geotiff_version",
     "interleave",
     "level",
     "max_z_error",
     "max_z_error_overview",
+    "nbits",
+    "num_threads",
     "overviews",
     "overview_count",
     "overview_quality",
@@ -93,6 +97,21 @@ _COG_CREATION_OPTIONS = (
     "overview_compress",
     "predictor",
     "quality",
+    "sparse_ok",
+    "statistics",
+)
+
+# COG options that reproject the output away from the grid the caller built.
+_COG_REPROJECTION_OPTIONS = (
+    "add_alpha",
+    "aligned_levels",
+    "extent",
+    "res",
+    "target_srs",
+    "tiling_scheme",
+    "warp_resampling",
+    "zoom_level",
+    "zoom_level_strategy",
 )
 
 
@@ -744,6 +763,17 @@ def _cog_creation_options(profile: Mapping[str, Any]) -> dict[str, Any]:
     return options
 
 
+def _reject_reprojection_options(profile: Mapping[str, Any] | None) -> None:
+    """Raise if ``profile`` asks the COG driver to reproject."""
+    keys = [key for key in _COG_REPROJECTION_OPTIONS if key in (profile or {})]
+    if keys:
+        msg = (
+            f"write_cog does not reproject, but {', '.join(keys)} would change the output "
+            "grid. Reproject with freezebase.vrt.warp first."
+        )
+        raise ValueError(msg)
+
+
 def _require_profile(profile: dict[str, Any] | None) -> dict[str, Any]:
     """Return the profile an array write needs."""
     if profile is None:
@@ -1025,10 +1055,12 @@ def write_cog(
         If ``profile`` is missing for an array, a per-band sequence has the wrong length, the
         dtype is unknown, a nodata value does not fit the dtype, a raster path has a
         colour table or is south-up, or the bands differ in dtype or nodata without
-        ``profile`` setting it.
+        ``profile`` setting it, or ``profile`` holds a ``COG`` option that reprojects,
+        such as ``target_srs`` or ``tiling_scheme``.
     RasterWriteError
         If the write fails.
     """
+    _reject_reprojection_options(profile)
     dst_file = UPath(dst_file)
     if _is_vrt_input(data):
         return _write_cog_from_vrt(

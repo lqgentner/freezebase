@@ -8,17 +8,32 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## Unreleased
 
+### Added
+
+- `upload_object(..., content_type=...)` sets the content type stored on S3, for a
+  suffix `content_type_for` does not know.
+
 ### Changed
 
 - `retry_request` is annotated as preserving the decorated function's signature
   (`Callable[[Callable[P, R]], Callable[P, R]]`), matching tenacity 9.2. The
   module-level `WrappedFn` type variable it used is removed.
+- **Breaking:** `write_cog` raises `ValueError` for `COG` creation options that
+  reproject the output (`target_srs`, `tiling_scheme`, `res`, `extent`, `zoom_level`,
+  `zoom_level_strategy`, `aligned_levels`, `warp_resampling`, `add_alpha`). Before,
+  they were ignored. Reproject with `freezebase.vrt.warp` and pass the result to
+  `write_cog`.
 - `HTTPDownloader` downloads to a remote directory through a local temporary file and
   uploads it once complete. On S3 the upload goes through `upload_object`, so the object
   gets a content type and its size is checked.
 
 ### Fixed
 
+- `write_cog` passes the `bigtiff`, `geotiff_version`, `nbits`, `num_threads`,
+  `sparse_ok` and `statistics` creation options to the `COG` driver instead of
+  dropping them.
+- `content_type_for` knows `.webp`, `.gpkg` and `.fgb`, and falls back to Python's
+  built-in `mimetypes` table (not the system's) before `application/octet-stream`.
 - `HTTPDownloader` no longer leaves a truncated file in a remote directory when the
   download fails partway; an existing file there is kept.
 

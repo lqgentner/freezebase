@@ -718,8 +718,15 @@ class TestContentTypeFor:
             ("COH12_VV.TIF", "image/tiff; application=geotiff; profile=cloud-optimized"),
             ("coh12_rgb.pmtiles", "application/vnd.pmtiles"),
             ("wordmark.svg", "image/svg+xml"),
+            ("thumbnail.webp", "image/webp"),
+            ("roads.gpkg", "application/geopackage+sqlite3"),
+            ("roads.fgb", "application/vnd.fgb"),
+            # Unlisted, from Python's built-in table.
+            ("archive.zip", "application/zip"),
+            ("report.PDF", "application/pdf"),
+            # Known to neither; also not read from the system's mime.types.
+            ("points.copc.laz", DEFAULT_CONTENT_TYPE),
             ("LICENSE", DEFAULT_CONTENT_TYPE),
-            ("archive.zip", DEFAULT_CONTENT_TYPE),
         ],
     )
     def test_by_suffix(self, name: str, expected: str) -> None:
@@ -774,6 +781,20 @@ class TestUploadObject:
         monkeypatch.setattr(target.fs, "info", _info(3))
         upload_object(b"abc", target)
         assert calls == [("b/k/x.tif", {"ContentType": CONTENT_TYPES[".tif"]})]
+
+    def test_an_explicit_content_type_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        target = make_s3_upath("s3://b/k/points.copc.laz", key="a", secret="b")
+        calls: list[dict[str, Any]] = []
+
+        def pipe_file(_path: str, _data: bytes, **kwargs: Any) -> None:
+            calls.append(kwargs)
+
+        monkeypatch.setattr(target.fs, "pipe_file", pipe_file)
+        monkeypatch.setattr(target.fs, "info", _info(3))
+
+        upload_object(b"abc", target, content_type="application/vnd.laszip+copc")
+
+        assert calls == [{"ContentType": "application/vnd.laszip+copc"}]
 
     def test_a_refused_put_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         target = make_s3_upath("s3://b/k/x.tif", key="a", secret="b")

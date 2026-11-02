@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from functools import lru_cache
+import mimetypes
 from pathlib import Path, PurePosixPath
 from secrets import token_hex
 from typing import TYPE_CHECKING, Any, cast
@@ -54,9 +55,10 @@ CLIENT_CREDENTIAL_KEYS = ("aws_access_key_id", "aws_secret_access_key", "aws_ses
 DEFAULT_CONTENT_TYPE = "application/octet-stream"
 
 # Content type per suffix, as an object should be served to a browser or a
-# client. A bucket serves what the upload declared, and `mimetypes` knows none
-# of the cloud-native suffixes, so without this a COG downloads instead of
-# opening by range request and a README saves instead of rendering.
+# client. A bucket serves what the upload declared, and Python's `mimetypes`
+# knows none of the cloud-native suffixes, so without this a COG downloads
+# instead of opening by range request. Only suffixes Python's own table lacks
+# or gets wrong belong here.
 CONTENT_TYPES: Mapping[str, str] = {
     ".json": "application/json",
     ".geojson": "application/geo+json",
@@ -65,9 +67,13 @@ CONTENT_TYPES: Mapping[str, str] = {
     ".tif": "image/tiff; application=geotiff; profile=cloud-optimized",
     ".tiff": "image/tiff; application=geotiff; profile=cloud-optimized",
     ".pmtiles": "application/vnd.pmtiles",
+    ".gpkg": "application/geopackage+sqlite3",
+    ".fgb": "application/vnd.fgb",
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
+    # Python's table lists .webp only from 3.13.
+    ".webp": "image/webp",
     ".svg": "image/svg+xml",
     ".yaml": "application/yaml",
     ".yml": "application/yaml",
@@ -75,6 +81,10 @@ CONTENT_TYPES: Mapping[str, str] = {
     ".txt": "text/plain",
     ".html": "text/html",
 }
+
+# Python's built-in table only: the system's would make the answer depend on the
+# machine.
+_PYTHON_CONTENT_TYPES: Mapping[str, str] = mimetypes.MimeTypes().types_map[True]
 
 
 def content_type_for(path: str | Path | UPath) -> str:
@@ -88,10 +98,11 @@ def content_type_for(path: str | Path | UPath) -> str:
     Returns
     -------
     str
-        A media type from :data:`CONTENT_TYPES`, or ``application/octet-stream``
-        for an unlisted suffix rather than a guess.
+        A media type from :data:`CONTENT_TYPES`, else from Python's built-in
+        ``mimetypes`` table, else ``application/octet-stream``.
     """
-    return CONTENT_TYPES.get(PurePosixPath(str(path)).suffix.lower(), DEFAULT_CONTENT_TYPE)
+    suffix = PurePosixPath(str(path)).suffix.lower()
+    return CONTENT_TYPES.get(suffix) or _PYTHON_CONTENT_TYPES.get(suffix, DEFAULT_CONTENT_TYPE)
 
 
 def _retry_transient_s3_errors(exc: Exception) -> bool:
@@ -479,7 +490,9 @@ def atomic_write_text(path: str | Path | UPath, text: str) -> None:
         raise
 
 
-def upload_object(src: bytes | Path, dst: str | Path | UPath) -> None:
+def upload_object(
+    src: bytes | Path, dst: str | Path | UPath, *, content_type: str | None = None
+) -> None:
     """Upload bytes or a local file to an object store and confirm it arrived.
 
     Every object freezebase writes to a store goes through here rather than
@@ -494,8 +507,10 @@ def upload_object(src: bytes | Path, dst: str | Path | UPath) -> None:
     src : bytes or Path
         Content, or a local file to upload.
     dst : str, Path, or UPath
-        Destination object. On S3 its content type comes from
-        :func:`content_type_for`.
+        Destination object.
+    content_type : str or None, optional
+        Content type to store on S3, by default :func:`content_type_for` of ``dst``.
+        Other stores do not take one.
 
     Raises
     ------
@@ -513,7 +528,11 @@ def upload_object(src: bytes | Path, dst: str | Path | UPath) -> None:
     fs = target.fs
     key = str(target.path)
     # ContentType is the s3fs spelling; other fsspec stores name it differently.
-    extra = {"ContentType": content_type_for(target)} if target.protocol in S3_PROTOCOLS else {}
+    extra = (
+        {"ContentType": content_type or content_type_for(target)}
+        if target.protocol in S3_PROTOCOLS
+        else {}
+    )
     size = len(src) if isinstance(src, bytes) else Path(src).stat().st_size
     try:
         if isinstance(src, bytes):
