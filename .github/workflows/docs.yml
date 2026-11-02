@@ -23,6 +23,8 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+          # Own cache entry, as in ci.yml: only this job installs the docs group.
+          cache-suffix: docs
 
       - name: Set up Quarto
         uses: quarto-dev/quarto-actions/setup@v2
