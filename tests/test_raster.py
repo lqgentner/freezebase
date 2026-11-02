@@ -1061,6 +1061,36 @@ class TestCogCreationOptions:
             assert src.block_shapes == [(128, 128)]
             assert src.overviews(1) == []
 
+    @pytest.mark.parametrize("from_vrt", [False, True])
+    def test_write_cog_forwards_encoding_options(self, tmp_path: Path, from_vrt: bool) -> None:
+        # Previously dropped bigtiff, statistics and num_threads silently.
+        src = tmp_path / "src.tif"
+        write_cog(self._data(), src, self.profile)
+        dst = tmp_path / "big.tif"
+        options = {"bigtiff": "YES", "statistics": "YES", "num_threads": "ALL_CPUS"}
+
+        write_cog(src if from_vrt else self._data(), dst, {**self.profile, **options})
+
+        assert dst.read_bytes()[:4] == b"II+\x00"  # BigTIFF magic
+        with rasterio.open(dst) as ds:
+            assert "STATISTICS_MEAN" in ds.tags(1)
+
+    @pytest.mark.parametrize("from_vrt", [False, True])
+    @pytest.mark.parametrize(
+        "option", [{"target_srs": "EPSG:4326"}, {"tiling_scheme": "GoogleMapsCompatible"}]
+    )
+    def test_write_cog_refuses_reprojection_options(
+        self, tmp_path: Path, from_vrt: bool, option: dict[str, str]
+    ) -> None:
+        src = tmp_path / "src.tif"
+        write_cog(self._data(), src, self.profile)
+        dst = tmp_path / "warped.tif"
+
+        with pytest.raises(ValueError, match="does not reproject"):
+            write_cog(src if from_vrt else self._data(), dst, {**self.profile, **option})
+
+        assert not dst.exists()
+
     def test_write_cog_respects_a_lossy_bound(self, tmp_path: Path) -> None:
         data = self._data()
         dst = tmp_path / "bounded.tif"
