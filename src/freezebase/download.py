@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 import re
 from secrets import token_hex
+import tempfile
 from typing import TYPE_CHECKING, Literal, Self, cast, overload
 from urllib.parse import unquote, urljoin, urlparse
 
@@ -36,9 +37,11 @@ if TYPE_CHECKING:
 
 DEFAULT_TIMEOUT = 30
 CHUNK_SIZE = 1024 * 1024  # 1 MiB
-REMOTE_BLOCK_SIZE = 64 * 1024 * 1024  # 64 MiB
 
 MAX_REDIRECTS = 30
+
+# Matches `freezebase.s3.S3_PROTOCOLS`, which needs the s3 extra to import.
+_S3_PROTOCOLS = frozenset({"s3", "s3a"})
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +214,8 @@ class HTTPDownloader:
         url : str
             Source URL.
         save_dir : str, Path, or UPath
-            Destination directory.
+            Destination directory. A remote directory receives the file only once it
+            has downloaded completely to a local temporary directory.
         filename : str, optional
             Output name, inferred from the response or URL when omitted.
         overwrite : bool, default False
@@ -367,35 +371,49 @@ def _write_file[T: Path | UPath](
         msg = f"Target already exists: '{filepath}'. Pass `overwrite=True` to replace it."
         raise FileExistsError(msg)
 
+    # Only local UPaths inherit Path.
+    if isinstance(filepath, Path):
+        _stream_to_local(response, filepath, show_progress=show_progress)
+        return filepath
+
+    # A store would commit a stream cut short, so the upload starts only once the
+    # download is complete.
+    with tempfile.TemporaryDirectory() as staging_dir:
+        staged = Path(staging_dir) / filepath.name
+        _stream_to_local(response, staged, show_progress=show_progress)
+        _upload(staged, filepath)
+    return filepath
+
+
+def _stream_to_local(response: requests.Response, filepath: Path, *, show_progress: bool) -> None:
+    """Stream a response to a local file, leaving nothing behind on failure."""
     filename = shorten_string(filepath.name, 30)
     progress = create_progress(show_progress=show_progress, columns=_DOWNLOAD_COLUMNS)
     total = _get_filesize(response)
+    partial_filepath = filepath.with_name(f"{filepath.name}.{token_hex(8)}.partial")
+    try:
+        with progress:
+            task_id = progress.add_task("Download", filename=filename, total=total)
+            with partial_filepath.open("wb") as f:
+                for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
+                    f.write(chunk)
+                    progress.update(task_id, advance=len(chunk))
+            progress.update(task_id, refresh=True)
+        partial_filepath.replace(filepath)
+    except BaseException:
+        partial_filepath.unlink(missing_ok=True)
+        raise
 
-    # Only local UPaths inherit Path.
-    if isinstance(filepath, Path):
-        partial_filepath = filepath.with_name(f"{filepath.name}.{token_hex(8)}.partial")
-        try:
-            with progress:
-                task_id = progress.add_task("Download", filename=filename, total=total)
-                with partial_filepath.open("wb") as f:
-                    for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
-                        f.write(chunk)
-                        progress.update(task_id, advance=len(chunk))
-                progress.update(task_id, refresh=True)
-            partial_filepath.replace(filepath)
-        except BaseException:
-            partial_filepath.unlink(missing_ok=True)
-            raise
-        return filepath
 
-    with progress:
-        task_id = progress.add_task("Download", filename=filename, total=total)
-        with filepath.open("wb", block_size=REMOTE_BLOCK_SIZE) as f:
-            for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
-                f.write(chunk)
-                progress.update(task_id, advance=len(chunk))
-        progress.update(task_id, refresh=True)
-    return filepath
+def _upload(src: Path, dst: UPath) -> None:
+    """Upload a local file to a remote path."""
+    if dst.protocol in _S3_PROTOCOLS:
+        # The s3 extra is optional, and other stores do not need it.
+        from freezebase.s3 import upload_object  # noqa: PLC0415
+
+        upload_object(src, dst)
+    else:
+        dst.fs.put_file(str(src), dst.path)
 
 
 def _rewrite_redirect_method(status_code: int, method: str) -> str:

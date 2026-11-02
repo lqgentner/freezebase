@@ -23,6 +23,9 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   `zoom_level_strategy`, `aligned_levels`, `warp_resampling`, `add_alpha`). Before,
   they were ignored. Reproject with `freezebase.vrt.warp` and pass the result to
   `write_cog`.
+- `HTTPDownloader` downloads to a remote directory through a local temporary file and
+  uploads it once complete. On S3 the upload goes through `upload_object`, so the object
+  gets a content type and its size is checked.
 
 ### Fixed
 
@@ -31,6 +34,8 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   dropping them.
 - `content_type_for` knows `.webp`, `.gpkg` and `.fgb`, and falls back to Python's
   built-in `mimetypes` table (not the system's) before `application/octet-stream`.
+- `HTTPDownloader` no longer leaves a truncated file in a remote directory when the
+  download fails partway; an existing file there is kept.
 
 ## [0.10.0] - 2026-10-26
 
