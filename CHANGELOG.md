@@ -13,6 +13,18 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 - `retry_request` is annotated as preserving the decorated function's signature
   (`Callable[[Callable[P, R]], Callable[P, R]]`), matching tenacity 9.2. The
   module-level `WrappedFn` type variable it used is removed.
+- `HTTPDownloader` downloads to a remote directory through a local temporary file and
+  uploads it once complete. On S3 the upload goes through `upload_object`, so the object
+  gets a content type and its size is checked.
+
+### Removed
+
+- **Breaking:** `freezebase.download.REMOTE_BLOCK_SIZE`, which nothing uses any more.
+
+### Fixed
+
+- `HTTPDownloader` no longer leaves a truncated file in a remote directory when the
+  download fails partway; an existing file there is kept.
 
 ## [0.10.0] - 2026-10-26
 

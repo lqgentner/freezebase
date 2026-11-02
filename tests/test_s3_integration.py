@@ -15,15 +15,17 @@ Configure with:
 
 from __future__ import annotations
 
+import io
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 import uuid
 
 import numpy as np
 import pytest
 import rasterio
 from rasterio.transform import from_origin
+import requests
 from upath import UPath
 
 pytest.importorskip("s3fs")
@@ -31,6 +33,7 @@ pytest.importorskip("s3fs")
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+from freezebase.download import _write_file
 from freezebase.raster import (
     COG_PROFILE,
     rasterio_open,
@@ -440,7 +443,7 @@ class TestListObjectSizes:
 
 class TestAtomicWriteText:
     def test_one_put(self, bucket_root: UPath) -> None:
-        target = bucket_root / f"{uuid.uuid4().hex}.json"
+        target = bucket_root / f"{uuid.uuid4().hex}.pmtiles"
         try:
             atomic_write_text(target, "{}")
             assert target.read_text() == "{}"
@@ -477,3 +480,47 @@ class TestConfiguredEndpoint:
             target.unlink(missing_ok=True)
             root.fs.clear_instance_cache()
             clear_aws_session_cache()
+
+
+class TestDownloadToS3:
+    """A download to S3 lands whole, with its content type, or not at all."""
+
+    @staticmethod
+    def _response(raw: io.RawIOBase | io.BytesIO) -> requests.Response:
+        resp = requests.Response()
+        resp.status_code = 200
+        resp.raw = raw
+        return resp
+
+    def test_download_declares_its_content_type(self, bucket_root: UPath) -> None:
+        target = bucket_root / f"{uuid.uuid4().hex}.pmtiles"
+        try:
+            _write_file(self._response(io.BytesIO(b"{}")), target, show_progress=False)
+
+            target.fs.invalidate_cache(str(target.path))
+            assert target.read_bytes() == b"{}"
+            assert target.fs.info(str(target.path))["ContentType"] == CONTENT_TYPES[".pmtiles"]
+        finally:
+            target.unlink(missing_ok=True)
+
+    def test_interrupted_download_leaves_no_object(self, bucket_root: UPath) -> None:
+        class Interrupted(io.RawIOBase):
+            sent = False
+
+            @override
+            def readable(self) -> bool:
+                return True
+
+            @override
+            def read(self, size: int = -1) -> bytes:
+                if self.sent:
+                    raise requests.ConnectionError
+                self.sent = True
+                return b"truncated"
+
+        target = bucket_root / f"{uuid.uuid4().hex}.zip"
+        with pytest.raises(requests.ConnectionError):
+            _write_file(self._response(Interrupted()), target, show_progress=False)
+
+        target.fs.invalidate_cache(str(target.path))
+        assert not target.exists()
