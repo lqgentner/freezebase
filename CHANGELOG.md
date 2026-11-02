@@ -13,7 +13,7 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 ### Added
 
 - `upload_object(..., content_type=...)` sets the file type that S3 reports to browsers,
-  for formats freezebase does not recognise.
+  for formats freezebase does not recognize.
 
 ### Changed
 
@@ -63,7 +63,7 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 - `MGRSGrid` follows the curved WGS84 edges of its squares to within 5 cm, instead of
   joining their corners with straight lines that strayed up to 19 m. Points near a square's
-  edge were assigned to its neighbour, or to no square.
+  edge were assigned to its neighbor, or to no square.
 
 ## [0.9.0] - 2026-10-26
 
@@ -102,12 +102,12 @@ MGRS no longer depends on the `mgrs` package, and Python 3.15 is supported.
   - Sources on the VRT's store are written relative to the VRT (`../tiles/a.tif`, before
     `/data/tiles/a.tif`), except in `create_warped_vrt`. Move a VRT together with its
     sources, or write it with `VRT.write(path, relative=False)`.
-  - South-up inputs and inputs with a colour table raise `ValueError`. Warp south-up inputs
-    north-up first, and expand colour tables to RGB(A) first, for example with
+  - South-up inputs and inputs with a color table raise `ValueError`. Warp south-up inputs
+    north-up first, and expand color tables to RGB(A) first, for example with
     `gdal_translate -expand rgba`.
   - `create_decibel_vrt` and `create_rgb_vrt` raise `ValueError` for complex inputs and for
     inputs with a scale or offset. Convert them to real, physical values first.
-  - `build_vrt_mosaic` takes each band's colour interpretation from the first tile (before,
+  - `build_vrt_mosaic` takes each band's color interpretation from the first tile (before,
     always gray). It writes the tiles' scale and offset (before, none) and raises
     `ValueError` if the tiles disagree.
   - `create_decibel_vrt` writes NaN where a source holds its NODATA value. Before, the
@@ -126,7 +126,7 @@ MGRS no longer depends on the `mgrs` package, and Python 3.15 is supported.
 ### Removed
 
 - **Breaking:** `merge_tiffs`. Mosaic with `freezebase.vrt.mosaic` instead. Later files
-  win, so reverse the list to keep the old first-wins behaviour:
+  win, so reverse the list to keep the old first-wins behavior:
 
   ```python
   # Before
@@ -191,7 +191,7 @@ MGRS no longer depends on the `mgrs` package, and Python 3.15 is supported.
   the `s3` extra.
 - `configured_endpoint_url(profile)` performs botocore's own configured
   endpoint lookup (`AWS_ENDPOINT_URL_S3`, `AWS_ENDPOINT_URL`, the `services`
-  section, the profile's `endpoint_url`, honouring
+  section, the profile's `endpoint_url`, honoring
   `ignore_configured_endpoint_urls`), cached per profile and cleared by
   `clear_aws_session_cache`. `resolve_endpoint_url(path)` returns the endpoint
   a path's requests go to: an `endpoint_url` on the path, else one inside
@@ -229,7 +229,7 @@ MGRS no longer depends on the `mgrs` package, and Python 3.15 is supported.
 - `subprocess_s3_env` builds the S3 environment variables a child process needs
   to open `/vsis3/` paths.
 - `create_warped_vrt` reprojects a raster onto a fixed target grid, and
-  `create_rgba_vrt` colour-maps a raster into a 4-band VRT via per-band lookup
+  `create_rgba_vrt` color-maps a raster into a 4-band VRT via per-band lookup
   tables.
 - `build_vrt_mosaic` takes a `bounds` keyword to fix the mosaic extent, and no
   longer requires tiles to live beside the output VRT.
