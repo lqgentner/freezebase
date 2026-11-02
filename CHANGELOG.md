@@ -17,10 +17,6 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   uploads it once complete. On S3 the upload goes through `upload_object`, so the object
   gets a content type and its size is checked.
 
-### Removed
-
-- **Breaking:** `freezebase.download.REMOTE_BLOCK_SIZE`, which nothing uses any more.
-
 ### Fixed
 
 - `HTTPDownloader` no longer leaves a truncated file in a remote directory when the
