@@ -27,6 +27,9 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+          # One cache entry per environment: jobs sharing an entry only restore it,
+          # so packages built from source for another Python would rebuild every run.
+          cache-suffix: py3.15
       - run: uv sync --all-extras
       - name: Ruff lint
         run: uv run ruff check .
@@ -40,6 +43,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+          cache-suffix: py3.15
       - run: uv sync --all-extras
       - name: pyrefly
         run: uv run pyrefly check
@@ -60,6 +64,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+          cache-suffix: py${{ matrix.python-version }}
       - name: Run tests with coverage
         run: >
           uv run --python ${{ matrix.python-version }} --all-extras
@@ -84,6 +89,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+          cache-suffix: lowest
       - name: Sync dependencies at their lower bounds
         run: uv sync --all-extras --resolution lowest-direct --python 3.12
       - name: Run tests
@@ -101,6 +107,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+          cache-suffix: py3.15
       - name: Start RustFS
         run: |
           docker run -d --name rustfs -p 9000:9000 \
@@ -127,6 +134,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+          cache-suffix: build
       - name: Build sdist and wheel
         env:
           BUILD_VERSION: ${{ inputs.build_version }}
