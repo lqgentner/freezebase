@@ -1,10 +1,11 @@
 """Tests for freezebase.mgrs - MGRS grid system."""
 
-from typing import Literal
+from typing import Literal, assert_type
 
 from affine import Affine
 import geopandas as gpd
 import numpy as np
+import odc.geo.crs
 from pyproj import CRS
 import pytest
 from shapely import (
@@ -595,8 +596,13 @@ class TestMGRSGeoBox:
     def test_from_mgrs(self) -> None:
         cell = MGRSGeoBox.from_mgrs("32TMT64")
         assert cell.mgrs_code == "32TMT64"
-        assert cell.crs is not None
         assert cell.crs.to_epsg() == 32632
+
+    def test_crs_is_never_none(self) -> None:
+        # Previously typed `CRS | None`, inherited from GeoBox.
+        cell = MGRSGeoBox.from_mgrs("32TMT64")
+        assert_type(cell.crs, odc.geo.crs.CRS)
+        assert isinstance(cell.crs, odc.geo.crs.CRS)
 
     @pytest.mark.parametrize(
         ("mgrs_code", "expected"),

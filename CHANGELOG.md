@@ -8,6 +8,11 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## Unreleased
 
+### Fixed
+
+- `MGRSGeoBox.crs` is typed as a `CRS` rather than `CRS | None`, so type checkers no
+  longer ask for a `None` check.
+
 ## [0.11.0] - 2026-11-02
 
 ### Added

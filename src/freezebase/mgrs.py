@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import copy
 import functools
 import re
-from typing import TYPE_CHECKING, Any, overload, override
+from typing import TYPE_CHECKING, Any, cast, overload, override
 
 from affine import Affine
 import geopandas as gpd
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from typing import Any, Literal, Self
 
     from numpy.typing import ArrayLike, NDArray
+    import odc.geo.crs
     from odc.geo.geobox import SomeShape
 
     type GeoArray = NDArray[np.object_]
@@ -424,6 +425,13 @@ class MGRSGeoBox(GeoBox):
             f"{zone:02d}{match.group('band')}{match.group('square')}{match.group('digits')}"
         )
         return cls(canonical.upper(), (n_pixels, n_pixels), affine, crs)
+
+    @property
+    @override
+    def crs(self) -> odc.geo.crs.CRS:
+        """The square's UTM CRS, which is never ``None``."""
+        # GeoBox allows a missing CRS, but the constructor requires one.
+        return cast("odc.geo.crs.CRS", super().crs)
 
     @override
     def __repr__(self) -> str:
