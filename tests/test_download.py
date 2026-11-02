@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import gc
 import io
-from typing import TYPE_CHECKING, Any, Self, override
+import tempfile
+from typing import TYPE_CHECKING, Any, override
 from unittest.mock import MagicMock
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -18,7 +19,6 @@ from upath import UPath
 
 from freezebase.download import (
     MAX_REDIRECTS,
-    REMOTE_BLOCK_SIZE,
     HTTPDownloader,
     _extract_filename_from_cd,
     _extract_filename_from_url,
@@ -293,32 +293,29 @@ class TestDownloadFilenameConfinement:
 # ---------------------------------------------------------------------------
 
 
-class _RecordingRemoteFile:
-    """Minimal stand-in for a remote file handle that records its open kwargs."""
+class _InterruptedStream(io.RawIOBase):
+    """Response body that fails after its first chunk."""
 
-    def __init__(self, name: str) -> None:
-        self.name = name
-        self.chunks: list[bytes] = []
-        self.open_kwargs: dict[str, object] = {}
-        self.exists_value = False
+    def __init__(self) -> None:
+        self._sent = False
 
-    # Not a `pathlib.Path`: that is what `_write_file` branches on.
-    def exists(self) -> bool:
-        return self.exists_value
+    @override
+    def readable(self) -> bool:
+        return True
 
-    def open(self, mode: str, **kwargs: object) -> Self:
-        assert mode == "wb"
-        self.open_kwargs = kwargs
-        return self
+    @override
+    def read(self, size: int = -1) -> bytes:
+        if self._sent:
+            raise requests.ConnectionError
+        self._sent = True
+        return b"truncated"
 
-    def write(self, chunk: bytes) -> None:
-        self.chunks.append(chunk)
 
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
-        pass
+def _interrupted_response() -> requests.Response:
+    """Return a response whose body stream fails partway."""
+    resp = make_response()
+    resp.raw = _InterruptedStream()
+    return resp
 
 
 @pytest.fixture
@@ -378,29 +375,47 @@ class TestRemoteDestination:
 
         assert out.read_bytes() == b"payload"
 
-    def test_remote_write_uses_the_large_block_size(self) -> None:
-        # Object stores pay per request, hence the larger block size.
-        resp = make_response()
-        target = _RecordingRemoteFile("real.zip")
+    def test_interrupted_stream_leaves_no_remote_file(self, memory_dir: UPath) -> None:
+        target = memory_dir / "real.zip"
 
-        # The double stands in for a UPath destination.
-        # pyrefly: ignore [bad-specialization]
-        _write_file(resp, target, show_progress=False)
+        with pytest.raises(requests.ConnectionError):
+            _write_file(_interrupted_response(), target, show_progress=False)
 
-        assert target.open_kwargs == {"block_size": REMOTE_BLOCK_SIZE}
-        assert b"".join(target.chunks) == b"payload"
+        assert not target.exists()
 
-    def test_remote_write_respects_overwrite_guard(self) -> None:
-        resp = make_response()
-        target = _RecordingRemoteFile("real.zip")
-        target.exists_value = True
+    def test_interrupted_stream_keeps_the_existing_remote_file(self, memory_dir: UPath) -> None:
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        target = memory_dir / "real.zip"
+        target.write_bytes(b"original")
 
-        with pytest.raises(FileExistsError, match="Target already exists"):
-            # The double stands in for a UPath destination.
-            # pyrefly: ignore [bad-specialization]
-            _write_file(resp, target, show_progress=False)
+        with pytest.raises(requests.ConnectionError):
+            _write_file(_interrupted_response(), target, show_progress=False, overwrite=True)
 
-        assert target.chunks == []
+        assert target.read_bytes() == b"original"
+
+    def test_local_staging_is_removed(
+        self, memory_dir: UPath, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+
+        _write_file(make_response(), memory_dir / "ok.zip", show_progress=False)
+        with pytest.raises(requests.ConnectionError):
+            _write_file(_interrupted_response(), memory_dir / "bad.zip", show_progress=False)
+
+        assert not list(tmp_path.iterdir())
+
+    def test_s3_target_goes_through_upload_object(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        uploaded: dict[UPath, bytes] = {}
+
+        def fake_upload(src: Path, dst: UPath) -> None:
+            uploaded[dst] = src.read_bytes()
+
+        monkeypatch.setattr("freezebase.s3.upload_object", fake_upload)
+        target = UPath("s3://bucket/real.zip", anon=True)
+
+        _write_file(make_response(), target, show_progress=False, overwrite=True)
+
+        assert uploaded == {target: b"payload"}
 
 
 # ---------------------------------------------------------------------------
