@@ -8,34 +8,34 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## Unreleased
 
+## [0.11.0] - 2026-11-02
+
 ### Added
 
-- `upload_object(..., content_type=...)` sets the content type stored on S3, for a
-  suffix `content_type_for` does not know.
+- `upload_object(..., content_type=...)` sets the file type that S3 reports to browsers,
+  for formats freezebase does not recognise.
 
 ### Changed
 
-- `retry_request` is annotated as preserving the decorated function's signature
-  (`Callable[[Callable[P, R]], Callable[P, R]]`), matching tenacity 9.2. The
-  module-level `WrappedFn` type variable it used is removed.
-- **Breaking:** `write_cog` raises `ValueError` for `COG` creation options that
-  reproject the output (`target_srs`, `tiling_scheme`, `res`, `extent`, `zoom_level`,
-  `zoom_level_strategy`, `aligned_levels`, `warp_resampling`, `add_alpha`). Before,
-  they were ignored. Reproject with `freezebase.vrt.warp` and pass the result to
+- **Breaking:** `write_cog` raises `ValueError` for `COG` options that would reproject the
+  output (`target_srs`, `tiling_scheme`, `res`, `extent`, `zoom_level`,
+  `zoom_level_strategy`, `aligned_levels`, `warp_resampling`, `add_alpha`) instead of
+  ignoring them. Reproject first with `freezebase.vrt.warp`, then pass the result to
   `write_cog`.
-- `HTTPDownloader` downloads to a remote directory through a local temporary file and
-  uploads it once complete. On S3 the upload goes through `upload_object`, so the object
-  gets a content type and its size is checked.
+- `retry_request` keeps the signature of the function it wraps for type checkers. The
+  `WrappedFn` type variable is removed.
 
 ### Fixed
 
-- `write_cog` passes the `bigtiff`, `geotiff_version`, `nbits`, `num_threads`,
-  `sparse_ok` and `statistics` creation options to the `COG` driver instead of
-  dropping them.
-- `content_type_for` knows `.webp`, `.gpkg` and `.fgb`, and falls back to Python's
-  built-in `mimetypes` table (not the system's) before `application/octet-stream`.
-- `HTTPDownloader` no longer leaves a truncated file in a remote directory when the
-  download fails partway; an existing file there is kept.
+- An interrupted `HTTPDownloader` download no longer leaves a partial file in an S3
+  bucket, and keeps any file already there. Downloads to S3 are first saved to a local
+  temporary file, so they need local disk space for the whole file.
+- `write_cog` applies the `num_threads`, `bigtiff`, `statistics`, `nbits`, `sparse_ok`
+  and `geotiff_version` options instead of ignoring them. For example,
+  `num_threads="ALL_CPUS"` compresses on all CPU cores.
+- Uploads to S3 declare the right file type for more formats: WebP, GeoPackage and
+  FlatGeobuf, and common ones such as ZIP and PDF. Files downloaded to S3 also get their
+  file type now.
 
 ## [0.10.0] - 2026-10-26
 
