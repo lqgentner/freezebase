@@ -36,6 +36,15 @@ favicon: assets/favicon.png
 hero:
   name: false
 
+# Custom CSS
+# ----------
+# Great Docs' 24 px navbar logo is too small to read; 44 px stays under its 45 px cap.
+include_in_header:
+  - text: |
+      <style>
+      .navbar-logo { height: 44px; }
+      </style>
+
 # SEO
 # ---
 # Quarto already writes correct <title>s ("freezebase" on the homepage,
