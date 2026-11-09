@@ -4,4 +4,4 @@
 swisstopo's CHGeo2004 geoid model, as published by [PROJ-data](https://cdn.proj.org).
 They convert LN02 (EPSG:5728) and LHN95 (EPSG:5729) heights to ETRS89 ellipsoidal heights.
 
-License: [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/legalcode), (c) swisstopo.
+License: [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/legalcode), © swisstopo.

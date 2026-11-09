@@ -9,7 +9,7 @@ questions belong on the
 ## Setting up
 
 The project uses [uv](https://docs.astral.sh/uv/). One command creates the
-venv and installs all (development) dependencies:
+virtual environment and installs all (development) dependencies:
 
 ```bash
 git clone https://github.com/lqgentner/freezebase.git
@@ -39,17 +39,17 @@ variables are set — see [S3 integration tests](#s3-integration-tests) below.
 **Lint.** `ruff` runs its expanded default rule set plus project-specific checks and
 numpydoc docstring conventions, all configured in `pyproject.toml`. It also formats Python
 code blocks in Markdown and Quarto files. Docstrings on public functions need `Parameters`,
-`Returns`, and `Raises` sections; the linter enforces it.
+`Returns`, and `Raises` sections, and the linter enforces this.
 
-**Types.** The package ships a `py.typed` marker, so its annotations are part of the public
+**Types.** The package includes a `py.typed` marker, so its annotations are part of the public
 contract. `pyrefly` runs under its `strict` preset and must pass on `src/freezebase` and
-`tests` before a change lands.
+`tests` before a change is merged.
 
 ::: {.callout-important}
 ## Run all three checks, not just tests
 
 A passing `pytest` run does not mean a change is done. `ruff format`, `ruff check`, and
-`pyrefly` catch things tests cannot — an unformatted diff or a wrong annotation fails CI even
+`pyrefly` catch things tests cannot — a diff that needs formatting or a wrong annotation fails CI even
 when every test is green. Run all three after every change, including a change made only
 to fix a previous check's failure.
 :::
@@ -70,14 +70,14 @@ FREEZEBASE_TEST_S3_SECRET=testsecret \
   uv run pytest -q -m integration
 ```
 
-Run these whenever you touch `freezebase.s3` or the S3 branches of `freezebase.raster`.
-The unit tests mock the object store, so they will not catch a broken credential or
+Run these whenever you change `freezebase.s3` or the S3 branches of `freezebase.raster`.
+The unit tests mock the object store, so they do not catch a broken credential or
 endpoint path.
 
 ## Dependency lower bounds
 
-Every dependency carries a lower bound chosen as the oldest release that actually installs
-and works on Python 3.12. CI has a dedicated job that resolves
+Each dependency has a lower bound: the oldest release that installs and works on
+Python 3.12. CI has a dedicated job that resolves
 with `--resolution lowest-direct` and runs the suite against those pins:
 
 ```bash
@@ -86,7 +86,7 @@ uv run --no-sync pytest -q
 ```
 
 If you use a newer API, raise the corresponding bound in `pyproject.toml` and note why in
-the comment above the dependency list. `--no-sync` matters here: without it, `uv run`
+the comment before the dependency list. `--no-sync` matters here: without it, `uv run`
 re-resolves the environment back to the latest versions before running.
 
 ## Building the docs
@@ -106,13 +106,13 @@ uv run great-docs preview    # serves great-docs/_site/ on port 3000
 ## `preview` does not rebuild
 
 `great-docs preview` is a static file server over `great-docs/_site/`. It only builds when
-that directory is missing, so it will happily serve a stale site after you edit a page or
+that directory is missing, so it serves a stale site after you edit a page or
 `great-docs.yml`. Use `great-docs build` to refresh, or `great-docs build --watch` in a
 second terminal to rebuild on change.
 :::
 
-`great-docs.yml` is committed; the `great-docs/` build directory is ephemeral and
-gitignored.
+`great-docs.yml` is committed. The `great-docs/` build directory is ephemeral and
+ignored by git.
 
 ### The freeze cache
 
@@ -121,7 +121,7 @@ basemap tiles. Those outputs are cached in the tracked `_freeze/` directory, so 
 only re-executed when its own `.qmd` changes. Editing the README or a docstring rebuilds
 without touching the network, which also keeps CI builds off the tile server.
 
-That caching is keyed on page source, not on library behaviour. If you change something
+That caching is keyed on page source, not on library behavior. If you change something
 that alters a page's *output* without changing the page itself, refresh it explicitly:
 
 ```bash
@@ -138,5 +138,5 @@ under `[Unreleased]` as you go, following
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 The project is pre-1.0, so minor releases may contain breaking changes — but they must be
-labelled. Mark anything that changes existing behaviour with **Breaking:** and show the
+labeled. Mark anything that changes existing behavior with **Breaking:** and show the
 before/after, so the entry is enough on its own to fix a downstream call site.

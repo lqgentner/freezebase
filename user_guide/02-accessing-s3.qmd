@@ -100,7 +100,7 @@ profile is selected. Credentials meant for one service are therefore not sent to
 
 ### Explicit keys
 
-Explicit keys suit credentials that come from an application's own secret store rather than
+Explicit keys suit credentials that come from an app's own secret store rather than
 an AWS configuration file:
 
 ```python
@@ -161,8 +161,8 @@ freezebase caches Rasterio sessions and configured endpoints, so a configuration
 during a process needs `clear_aws_session_cache()`. Resolving them means reading the AWS
 configuration files, so sessions are cached by their credential settings and endpoints by
 profile, and later reads and writes reuse them. Refreshable credentials, such as STS or SSO
-profiles, still rotate on their own. After changing static credentials, the AWS config files
-or the endpoint environment variables while a process runs, call `clear_aws_session_cache()`
+profiles, still rotate on their own. After changing static credentials, the AWS configuration
+files or the endpoint environment variables while a process runs, call `clear_aws_session_cache()`
 so the next access resolves them again.
 
 ## Retries and checksums
