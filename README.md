@@ -14,7 +14,7 @@ freezebase grew out of large-scale glacier mapping, where study areas are
 scattered across several UTM zones and large raster collections live in object
 storage.
 
-Its centrepiece is **`MGRSGrid`**, a 10 km grid covering the world between 80°S
+Its centerpiece is **`MGRSGrid`**, a 10 km grid covering the world between 80°S
 and 84°N. Each MGRS square is an
 [`odc.geo.GeoBox`](https://odc-geo.readthedocs.io/en/latest/intro-geobox.html)
 with a fixed CRS, transform and shape, so rasters resampled onto the same square
@@ -114,8 +114,8 @@ for COG writes and copies between buckets.
 A [GDAL VRT](https://gdal.org/en/stable/drivers/raster/vrt.html) describes a
 raster built from other rasters without copying their pixels. `freezebase.vrt`
 builds VRTs in Python with Rasterio alone, without the GDAL command-line tools.
-Mosaic one COG per square of the Zurich grid above and reproject the mosaic to
-the Swiss grid, EPSG:2056:
+Mosaic one COG per square of the preceding Zurich grid and reproject the mosaic
+to the Swiss grid, EPSG:2056:
 
 ```python
 from freezebase import vrt
@@ -128,8 +128,8 @@ write_cog(lv95, "zurich_lv95.tif")
 ```
 
 `vrt.mosaic` needs tiles in one CRS, so the squares must lie in the same UTM
-zone. No pixels are read until `write_cog` streams them into a Cloud Optimized
-GeoTIFF. `write_cog` also takes a raster file or a NumPy array, and the tiles and
+zone. The pixels are read only when `write_cog` streams them into a Cloud
+Optimized GeoTIFF. `write_cog` also takes a raster file or a NumPy array, and the tiles and
 the COG can be local or on S3. See
 [VRTs](https://lqgentner.github.io/freezebase/user-guide/vrts.html) for stacking
 bands, converting values and editing a VRT before writing it.

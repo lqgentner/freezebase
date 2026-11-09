@@ -12,16 +12,16 @@ warnings.filterwarnings("ignore")
 
 freezebase provides raster helpers that work the same on local files and on S3:
 `rasterio_open()` opens a raster for reading or writing, `write_cog()` writes an array, a VRT
-or an existing raster as a Cloud-Optimized GeoTIFF (COG), and `rewrite_tiff()` converts or
+or an existing raster as a Cloud Optimized GeoTIFF (COG), and `rewrite_tiff()` converts or
 copies an existing raster or VRT. Paths can be local or S3 `UPath`s, and on S3 the helpers use
-the credentials and endpoint stored on the path; `rasterio_open()` also reads public `http://`
+the credentials and endpoint stored on the path. `rasterio_open()` also reads public `http://`
 and `https://` URLs. [Accessing S3](02-accessing-s3.qmd) shows how to build an S3 path.
 
 ## Read a raster
 
 `rasterio_open()` reads a raster on S3 through the same path that s3fs uses for file
 operations. The [Copernicus DEM GLO-30](https://registry.opendata.aws/copernicus-dem/), a
-public collection of COGs, serves as an example:
+public collection of COGs, is the example:
 
 ```{python}
 from freezebase.raster import rasterio_open
@@ -77,7 +77,7 @@ write_cog(data, destination, profile, band_names=["elevation"])
 ```
 
 On S3, the write happens locally first: GDAL writes the COG to memory or a temporary file,
-and s3fs uploads it with the right content type. freezebase then reads
+and s3fs uploads it with the right `Content-Type`. freezebase then reads
 back the stored size, so a refused upload, or one that was accepted but not kept, does not
 pass silently.
 
@@ -180,5 +180,5 @@ ax.ticklabel_format(style="plain")
 ```
 
 To do the same without holding the result in memory, `vrt.warp` builds a VRT onto the square
-that `write_cog()` can write out; see [Reproject onto a grid](04-vrts.qmd#reproject-onto-a-grid).
+that `write_cog()` can write out (see [Reproject onto a grid](04-vrts.qmd#reproject-onto-a-grid)).
 For full signatures, see the [API reference](../reference/index.qmd).

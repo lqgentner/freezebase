@@ -21,7 +21,7 @@ specification, not a dataset: nothing has to be stored or shared to reproduce it
 
 ```{python}
 #| code-fold: true
-#| fig-cap: "The twelve 10 km squares selected by an AOI in the Bernese Alps, each labelled with its MGRS code. The map is drawn in UTM zone 32N, where the squares are axis-aligned; the AOI (dashed) is a longitude–latitude box."
+#| fig-cap: "The twelve 10 km squares selected by an AOI in the Bernese Alps, each labeled with its MGRS code. The map is drawn in UTM zone 32N, where the squares are axis-aligned. The AOI (dashed) is a longitude–latitude box."
 #| warning: false
 import contextily as cx
 import geopandas as gpd
@@ -46,9 +46,9 @@ ax.set_axis_off()
 
 ## Why a fixed grid
 
-Combining a Sentinel-1 scene, a Sentinel-2 composite, a DEM and a rasterised outline needs a
+Combining a Sentinel-1 scene, a Sentinel-2 composite, a DEM and a rasterized outline needs a
 common grid, because each usually arrives in its own projection, resolution and tiling scheme.
-`MGRSGrid` defines that grid independently of the inputs: for a given MGRS code and
+`MGRSGrid` defines that grid independently of the inputs: for an MGRS code and
 resolution, every pipeline derives the same CRS, transform and shape. Sources resampled onto a
 square are then pixel-aligned with each other.
 
@@ -57,7 +57,7 @@ square are then pixel-aligned with each other.
 MGRS is an established metric reference system that Sentinel-2 already uses, and 10 km squares
 are a practical size to process:
 
-1. **Metric and established.** Each square lies on the metre-based lattice of a UTM zone and
+1. **Metric and established.** Each square lies on the meter-based lattice of a UTM zone and
    is axis-aligned in that projection, so a 10 m pixel is 10 m on the grid rather than a
    varying fraction of a degree.
 2. **Shared with Sentinel-2.** A freezebase code such as `32TMS35` names a 10 km square inside
@@ -67,8 +67,8 @@ are a practical size to process:
    and a 10 km square is 1,000 × 1,000. The smaller squares make it practical to download,
    cache and process only those touched by scattered AOIs.
 4. **No overlap within a UTM zone.** Sentinel-2 product tiles are 109.8 km wide and overlap
-   their neighbours[^1]. freezebase squares step by exactly 10 km, so squares of the same UTM
-   zone never overlap. Squares of neighbouring zones can; see [Good to know](#good-to-know).
+   their neighbors[^1]. freezebase squares step by exactly 10 km, so squares of the same UTM
+   zone never overlap. Squares of neighboring zones can (see [Good to know](#good-to-know)).
 
 [^1]: Bauer-Marschallinger, B., & Falkner, K. (2023). Wasting petabytes: A
 survey of the Sentinel-2 UTM tiling grid and its spatial overhead. *ISPRS
@@ -77,7 +77,7 @@ Journal of Photogrammetry and Remote Sensing*, 202, 682–690.
 
 ## Select the squares for an AOI
 
-`MGRSGrid` takes an AOI in WGS84 and selects every square that intersects it. This AOI around
+`MGRSGrid` takes an AOI in WGS84 and selects the squares that intersect it. This AOI around
 Geneva crosses 6° E, the boundary between UTM zones 31 and 32:
 
 ```{python}
@@ -98,8 +98,8 @@ gdf = grid.to_geodataframe()
 gdf.head()
 ```
 
-Each row holds the square's MGRS code, its UTM zone and hemisphere, the native EPSG code and
-the south-west corner in UTM metres. The EPSG column shows that this AOI spans two zones:
+Each row contains the square's MGRS code, its UTM zone and hemisphere, the native EPSG code and
+the south-west corner in UTM meters. The EPSG column shows that this AOI spans two zones:
 
 ```{python}
 gdf.groupby(["zone", "epsg"]).size()
@@ -175,10 +175,10 @@ for resolution in (10.0, 20.0, 100.0):
 The grid covers 80° S to 84° N only. freezebase implements the UTM part of MGRS, not the polar
 UPS grids.
 
-Squares of neighbouring UTM zones can overlap. Each zone is projected on its own, and a square
-along a zone edge is kept whole, so it can extend into the neighbouring zone. An AOI that
+Squares of neighboring UTM zones can overlap. Each zone is projected on its own, and a square
+along a zone edge is kept whole, so it can extend into the neighboring zone. An AOI that
 crosses the edge can therefore select squares from both zones that cover some of the same
-ground. In exchange, every square stays square and axis-aligned in its own UTM CRS, and no
+ground. In exchange, each square remains square and axis-aligned in its own UTM CRS, and no
 part of the AOI is left uncovered. Drawing the Geneva example in one map projection shows
 the two grids:
 

@@ -58,3 +58,8 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
+# Vale: synced packages are downloaded by `vale sync`; the vocabulary is tracked.
+.vale/styles/*
+!.vale/styles/config/
+.vale/styles/config/*
+!.vale/styles/config/vocabularies/

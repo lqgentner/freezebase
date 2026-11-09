@@ -1,6 +1,6 @@
 # freezebase Development Setup
 
-freezebase is a lightweight geospatial helpers package: reproducible MGRS grids, rasterio/GDAL-backed COG and VRT I/O, S3 credential handling, and HTTP download tooling. It is the shared IO layer consumed by sibling packages (`s1bursts`, `deep-glacier-mapping`, `glace-catalog`), so changes to its public API are a cross-repository concern, not just a local one.
+freezebase is a lightweight geospatial helpers package: reproducible MGRS grids, Rasterio/GDAL-backed COG and VRT I/O, S3 credential handling, and HTTP download tooling. It is the shared IO layer consumed by sibling packages (`s1bursts`, `deep-glacier-mapping`, `glace-catalog`), so changes to its public API are a cross-repository concern, not just a local one.
 
 Treat signatures, return types, exceptions, import paths, and documented behavior as public
 API. Preserve compatibility unless a change is explicitly breaking.
@@ -9,7 +9,7 @@ API. Preserve compatibility unless a change is explicitly breaking.
 
 The project uses uv and supports Python 3.12–3.15. Dependencies are declared in
 `pyproject.toml`, and the virtual environment is located at `.venv/`. `.python-version` pins the
-interpreter of `.venv/`; CI jobs that test a specific version pass `--python`, which takes
+interpreter of `.venv/`. CI jobs that test a specific version pass `--python`, which takes
 precedence over it. `tests/test_supported_python_versions.py` fails if the CI matrix,
 `requires-python`, the lowest-bound job, Pyrefly's `python-version` or `.python-version` drift
 from the `Programming Language :: Python` classifiers, so change them together.
@@ -31,7 +31,7 @@ uv run pyrefly check
 ```
 
 After every code change, run tests, Ruff formatting and linting, and Pyrefly. Rerun affected
-checks after fixes. Add or update tests for behavior changes; bug fixes should include a
+checks after fixes. Add or update tests for behavior changes, and bug fixes should include a
 regression test.
 
 Unit tests are offline. Tests marked `integration` need a live S3-compatible service and are
@@ -59,6 +59,23 @@ a PR:
 uv run pytest -q --cov=freezebase --cov-branch --cov-report=term-missing
 ```
 
+### Prose
+
+[Vale](https://vale.sh) checks the Markdown and Quarto files against `.vale.ini`: the Google
+developer style, proselint and ai-tells, with the rules that conflict with these docs turned
+off and the reason beside each. Install Vale, then:
+
+```bash
+vale sync                             # downloads the packages into .vale/styles
+vale $(git ls-files '*.md' '*.qmd')
+```
+
+When the spelling check reports a correct term, add it to
+`.vale/styles/config/vocabularies/freezebase/accept.txt`. An inline comment cannot turn off a
+package rule, so reword a false positive or turn the rule off for that file in `.vale.ini`. A
+frozen user-guide page shows a text change only after it is refreshed (see the contributing
+page of the user guide).
+
 ### Dependency lower bounds
 
 Every dependency's lower bound is the oldest release that installs and works on Python 3.12.
@@ -69,12 +86,12 @@ uv sync --all-extras --resolution lowest-direct --python 3.12
 uv run --no-sync pytest -q
 ```
 
-Keep `--no-sync`; otherwise `uv run` re-resolves the environment at the latest versions.
+Keep `--no-sync`. Without it, `uv run` re-resolves the environment at the latest versions.
 
 ## Documentation
 
 Great Docs uses Quarto, which must be installed separately. See
-[`user_guide/04-contributing.qmd`](user_guide/04-contributing.qmd) for preview and freeze-cache
+[`user_guide/05-contributing.qmd`](user_guide/05-contributing.qmd) for preview and freeze-cache
 details.
 
 ```bash
@@ -90,10 +107,10 @@ changes in [`CHANGELOG.md`](CHANGELOG.md) under `## Unreleased` as you go, follo
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 The project is pre-1.0, so minor releases may contain breaking changes — but they must be
-labelled. Mark anything that changes existing behaviour with **Breaking:** and show the
+labeled. Mark anything that changes existing behavior with **Breaking:** and show the
 before/after, so the entry is enough on its own to fix a downstream call site.
 
-New backward-compatible functionality (a new keyword, a new function) is a **minor** bump; a
+A new backward-compatible feature (a new keyword, a new function) is a **minor** bump; a
 pure bug fix with no new public API is a **patch**.
 
 ## Code Style Guidelines
@@ -102,15 +119,15 @@ pure bug fix with no new public API is a **patch**.
 
 - NumPy-style docstrings for public functions, classes, and methods. Ruff's `D` rules enforce
   `Parameters`, `Returns`, and `Raises` sections.
-- Avoid `Examples` and `Notes` sections; keep descriptions concise and free of implementation
+- Avoid `Examples` and `Notes` sections. Keep descriptions concise and free of implementation
   detail the caller doesn't need.
 - Private helpers, fixtures, and test doubles need only a one-line summary.
 
 ### Comments
 
 - Keep comments brief and explain why, not what.
-- Describe current behavior; only regression-test comments may reference the former bug, e.g.
-  `# Previously raised IndexError for a scalar geometry query.`
+- Describe current behavior. Only regression-test comments may reference the former bug, for
+  example `# Previously raised IndexError for a scalar geometry query.`
 
 ### Type checking
 
@@ -124,4 +141,4 @@ pure bug fix with no new public API is a **patch**.
 ### Imports
 
 - Place imports at the top of the file in the standard import section.
-- Every module starts with `from __future__ import annotations`.
+- Each module starts with `from __future__ import annotations`.
