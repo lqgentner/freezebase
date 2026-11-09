@@ -36,6 +36,39 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check .
 
+  prose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VALE_VERSION: 3.19.0
+      VALE_SHA256: c8f9d6c8055442bc7e9c121b2498e6f0e3fb670f4665e6ee577f1897f7665cf6
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Vale
+        working-directory: ${{ runner.temp }}
+        run: |
+          archive="vale_${VALE_VERSION}_Linux_64-bit.tar.gz"
+          curl -fsSLO --retry 3 "https://github.com/vale-cli/vale/releases/download/v${VALE_VERSION}/${archive}"
+          echo "${VALE_SHA256}  ${archive}" | sha256sum -c -
+          tar -xzf "${archive}" vale
+          echo "$PWD" >> "$GITHUB_PATH"
+      # A download from GitHub releases fails with a 504 often enough to fail a
+      # correct pull request, so the sync is retried.
+      - name: Download the rule packages
+        run: |
+          for delay in 0 10 30; do
+            sleep "$delay"
+            vale sync && exit 0
+          done
+          exit 1
+      # Vale exits with an error only for error-level alerts, so the step fails
+      # on any output instead, which keeps the docs free of warnings as well.
+      - name: Vale
+        shell: bash
+        run: |
+          vale --output=line $(git ls-files '*.md' '*.qmd') | tee "$RUNNER_TEMP/vale.txt"
+          test ! -s "$RUNNER_TEMP/vale.txt"
+
   typecheck:
     runs-on: ubuntu-latest
     steps:
