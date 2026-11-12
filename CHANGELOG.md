@@ -10,6 +10,9 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ### Fixed
 
+- The error `warp` raises when PROJ cannot find a geoid grid suggests `PROJ_NETWORK=ON`
+  or `PROJ_DATA` instead of `python -m pyproj sync`, whose grids Rasterio's PROJ never
+  searches.
 - `MGRSGeoBox.crs` is typed as a `CRS` rather than `CRS | None`, so type checkers no
   longer ask for a `None` check.
 

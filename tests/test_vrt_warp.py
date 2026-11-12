@@ -432,7 +432,7 @@ class TestOptions:
 
     @pytest.mark.usefixtures("no_grids")
     def test_ballpark_is_refused(self, tmp_path: Path) -> None:
-        with pytest.raises(ValueError, match="pyproj sync") as info:
+        with pytest.raises(ValueError, match="PROJ_NETWORK=ON") as info:
             warp(
                 make_tiff(tmp_path / "utm.tif", fill=0.0),
                 src_crs="EPSG:32632+3855",
@@ -442,6 +442,8 @@ class TestOptions:
         assert str(info.value).startswith(
             "No exact transformation from WGS 84 / UTM zone 32N + EGM2008 height to EPSG:4979"
         )
+        assert "PROJ_DATA" in str(info.value)
+        assert "pyproj sync" not in str(info.value)
         assert "allow_ballpark=True" in str(info.value)
 
     def test_ballpark_option_joins_existing_transformer_options(self) -> None:
