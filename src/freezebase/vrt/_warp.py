@@ -405,7 +405,8 @@ def _check_transformation(vrt: VRT, source_crs: CRS, dst_crs: CRS) -> None:
             raise
         msg = (
             f"No exact transformation from {_crs_name(source_crs)} to {_crs_name(dst_crs)} "
-            "is available. Fetch the PROJ grids it needs (python -m pyproj sync) or pass "
-            "allow_ballpark=True."
+            "is available, most likely because PROJ cannot find a grid it needs. Set "
+            "PROJ_NETWORK=ON before the process starts, set PROJ_DATA to a folder holding "
+            "the grid and Rasterio's PROJ data, or pass allow_ballpark=True."
         )
         raise ValueError(msg) from err
