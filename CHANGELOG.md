@@ -12,6 +12,8 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 - `VRT.bounds`, `res`, `shape`, `count`, `dtypes` and `nodatavals` describe the grid and
   bands as rasterio reports them for the opened VRT, without opening it.
+- Printing a `VRT` shows a short summary of its grid, bands and the steps that build it,
+  and notebooks show it as collapsible HTML. Neither opens a source.
 
 ### Changed
 

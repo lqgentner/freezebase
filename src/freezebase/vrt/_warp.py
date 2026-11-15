@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import copy
-import re
 from typing import TYPE_CHECKING, Any, Literal
 from xml.etree import ElementTree as ET
 
@@ -32,6 +31,7 @@ from freezebase.vrt._grid import (
     raster_info,
 )
 from freezebase.vrt._model import VRT, _check_nodata_fits
+from freezebase.vrt._summary import crs_label
 from freezebase.vrt._xml import from_xml
 
 if TYPE_CHECKING:
@@ -244,15 +244,15 @@ def _vertical_shift(source_crs: CRS, dst_crs: CRS) -> bool:
     source_vertical, dst_vertical = _has_vertical(source_crs), _has_vertical(dst_crs)
     if source_vertical and not dst_vertical:
         msg = (
-            f"The source CRS {_crs_name(source_crs)} has a vertical datum but the target CRS "
-            f"{_crs_name(dst_crs)} has none; pass a 3D or compound crs, or a 2D src_crs to keep "
+            f"The source CRS {crs_label(source_crs)} has a vertical datum but the target CRS "
+            f"{crs_label(dst_crs)} has none; pass a 3D or compound crs, or a 2D src_crs to keep "
             "heights unconverted."
         )
         raise ValueError(msg)
     if dst_vertical and not source_vertical:
         msg = (
-            f"The target CRS {_crs_name(dst_crs)} has a vertical datum but the source CRS "
-            f"{_crs_name(source_crs)} has none; pass a 3D or compound src_crs, or a 2D crs."
+            f"The target CRS {crs_label(dst_crs)} has a vertical datum but the source CRS "
+            f"{crs_label(source_crs)} has none; pass a 3D or compound src_crs, or a 2D crs."
         )
         raise ValueError(msg)
     return source_vertical
@@ -391,14 +391,6 @@ def _set_transformer(
     return ET.tostring(options, encoding="unicode")
 
 
-def _crs_name(crs: CRS) -> str:
-    """Name a CRS by its authority code, else by the name in its WKT."""
-    if (authority := crs.to_authority()) is not None:
-        return ":".join(authority)
-    match = re.search(r'"([^"]*)"', crs.to_wkt())
-    return match.group(1) if match else crs.to_wkt()
-
-
 def _check_transformation(vrt: VRT, source_crs: CRS, dst_crs: CRS) -> None:
     """Open ``vrt`` as GDAL will, raising if PROJ has no transformation it may use."""
     try:
@@ -408,7 +400,7 @@ def _check_transformation(vrt: VRT, source_crs: CRS, dst_crs: CRS) -> None:
         if _NO_OPERATION not in str(err):
             raise
         msg = (
-            f"No exact transformation from {_crs_name(source_crs)} to {_crs_name(dst_crs)} "
+            f"No exact transformation from {crs_label(source_crs)} to {crs_label(dst_crs)} "
             "is available, most likely because PROJ cannot find a grid it needs. Set "
             "PROJ_NETWORK=ON before the process starts, set PROJ_DATA to a folder holding "
             "the grid and Rasterio's PROJ data, or pass allow_ballpark=True."
