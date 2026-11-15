@@ -130,8 +130,7 @@ uv run great-docs freeze user_guide/01-mgrs-grid.qmd  # re-execute one page
 git add _freeze/                                      # commit the new outputs
 ```
 
-Refreshing a page needs network access. The VRT page also downloads parts of the EGM2008
-geoid grid: it sets `PROJ_NETWORK=ON` itself, so no other setup is needed.
+Refreshing a page needs network access.
 
 ## Releasing
 
