@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 
 def write(vrt: VRT, path: AnyPath, *, relative: bool = True) -> UPath:
-    """Write ``vrt`` to ``path``; see ``VRT.write``."""
+    """Write ``vrt`` to ``path``; see ``VRT.to_vrt``."""
     dst = UPath(path)
     if dst.protocol == "file":
         dst = UPath(dst.path)

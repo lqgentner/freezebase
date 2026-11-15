@@ -51,7 +51,7 @@ def create_decibel_vrt(
     derived = derive(
         src_path, PixelFunction.db(10 if from_intensity else 20), description="dB", band=1
     )
-    derived.write(output_vrt)
+    derived.to_vrt(output_vrt)
 
 
 def _geotransform(transform: Affine) -> str:
@@ -126,7 +126,7 @@ def create_rgb_vrt(
         band.scale = band.offset = None
         for source in band.sources:
             source.nodata = None
-    vrt.write(output_vrt)
+    vrt.to_vrt(output_vrt)
 
 
 def build_vrt_mosaic(
@@ -160,7 +160,7 @@ def build_vrt_mosaic(
     if not files:
         msg = "files must not be empty"
         raise ValueError(msg)
-    mosaic(files, bounds=bounds).write(dst_vrt)
+    mosaic(files, bounds=bounds).to_vrt(dst_vrt)
 
 
 def create_warped_vrt(
@@ -226,7 +226,7 @@ def create_warped_vrt(
         snap=snap,
         dtype=dtype,
         nodata=nodata,
-    ).write(output_vrt, relative=False)
+    ).to_vrt(output_vrt, relative=False)
 
 
 def create_rgba_vrt(
@@ -297,4 +297,4 @@ def create_rgba_vrt(
             for color, table, band in zip(colors, tables, bands, strict=True)
         ],
     )
-    vrt.write(output_vrt)
+    vrt.to_vrt(output_vrt)

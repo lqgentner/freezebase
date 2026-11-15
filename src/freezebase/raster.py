@@ -7,6 +7,7 @@ import copy
 import logging
 from pathlib import Path
 from secrets import token_hex
+import shutil
 import tempfile
 from typing import TYPE_CHECKING, Any, Literal, overload
 
@@ -24,7 +25,7 @@ from freezebase.errors import RasterWriteError
 from freezebase.utils import file_sha256
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Mapping, Sequence
+    from collections.abc import Callable, Generator, Mapping, Sequence
 
     from rasterio.enums import ColorInterp
     from rasterio.io import DatasetReader, DatasetWriter
@@ -515,6 +516,17 @@ def group_tiffs_by_crs(src_tiffs: Sequence[AnyPath]) -> dict[str, list[UPath]]:
     return groups
 
 
+# Dataset properties, which a raster's creation options never hold.
+_DATASET_KEYS = ("driver", "dtype", "nodata", "crs", "transform", "count", "width", "height")
+_GTIFF_ONLY_KEYS = ("tiled", "blockxsize", "blockysize", "interleave")
+
+
+def _creation_options(profile: Mapping[str, Any], driver: str) -> dict[str, Any]:
+    """Return ``profile`` without dataset keys, nor GTiff-only ones for another driver."""
+    dropped = _DATASET_KEYS if driver == "GTiff" else _DATASET_KEYS + _GTIFF_ONLY_KEYS
+    return {key: value for key, value in profile.items() if key not in dropped}
+
+
 def rewrite_tiff(
     src_file: AnyPath | VRT,
     dst_file: AnyPath,
@@ -558,7 +570,8 @@ def rewrite_tiff(
         If ``move`` is set for a ``VRT`` source, a per-band sequence does not hold one
         entry per band, or the bands of a ``VRT`` differ in dtype or nodata.
     RasterWriteError
-        If the rewrite fails.
+        If the rewrite fails, also when the driver writes several files or GeoTIFF cannot
+        store the CRS.
     """
     from freezebase.vrt import VRT  # noqa: PLC0415  # freezebase.vrt imports raster
 
@@ -568,14 +581,8 @@ def rewrite_tiff(
     dst_file = UPath(dst_file)
 
     dst_profile = build_rasterio_profile(profile)
-    driver = dst_profile.pop("driver", "GTiff")
-    # Remove dataset metadata from the creation options.
-    for _k in ("dtype", "nodata", "crs", "transform", "count", "width", "height"):
-        dst_profile.pop(_k, None)
-    if driver != "GTiff":
-        # Remove GTiff-only defaults.
-        for _k in ("tiled", "blockxsize", "blockysize", "interleave"):
-            dst_profile.pop(_k, None)
+    driver = dst_profile.get("driver", "GTiff")
+    dst_profile = _creation_options(dst_profile, driver)
 
     if isinstance(src_file, VRT):
         _rewrite_vrt(
@@ -660,7 +667,7 @@ def _rewrite_vrt(
     try:
         # Entered in the main thread: credentials set in a worker don't reach GDAL's readers.
         with vrt.env():
-            _encode_cog(vrt.to_xml(), dst_file, {"driver": driver, **dst_profile}, checksum=False)
+            _encode(vrt.to_xml(), dst_file, {"driver": driver, **dst_profile}, checksum=False)
     except Exception as e:
         msg = f"Failed to rewrite GeoTIFF: {e}"
         raise RasterWriteError(msg) from e
@@ -678,7 +685,7 @@ def _rewrite_via_memory(
     band_tags: Sequence[Mapping[str, str]] | None,
     units: list[str] | None,
 ) -> None:
-    """Stage in memory, encode to a temporary file, then upload it in one put."""
+    """Stage in memory with the metadata, then encode and upload it in one put."""
     with MemoryFile() as memfile:
         with _env_for_path(src_file):
             rasterio.shutil.copy(_to_vsi_uri(src_file), memfile.name, driver="GTiff")
@@ -690,12 +697,7 @@ def _rewrite_via_memory(
             band_tags=band_tags,
             units=units,
         )
-        # Encoded to disk, not a second MemoryFile: a large product would
-        # otherwise sit in memory twice more (the encode and its bytes copy).
-        with tempfile.TemporaryDirectory(prefix="freezebase-") as tmp:
-            encoded = Path(tmp) / dst_file.name
-            rasterio.shutil.copy(memfile.name, str(encoded), driver=driver, **dst_profile)
-            _upload(encoded, dst_file)
+        _encode(memfile.name, dst_file, {"driver": driver, **dst_profile}, checksum=False)
 
 
 def _rewrite_via_tempfile(
@@ -710,47 +712,37 @@ def _rewrite_via_tempfile(
     band_tags: Sequence[Mapping[str, str]] | None,
     units: list[str] | None,
 ) -> None:
-    """Stage beside a local destination, then atomically replace it."""
-    work_dst = dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.tmp")
-    needs_gtiff_stage = driver != "GTiff" and any(
-        x is not None for x in (band_names, tags, band_tags, units)
-    )
-    work_stage = (
-        dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.stage.tif")
-        if needs_gtiff_stage
-        else None
-    )
-    inject_into = work_stage if work_stage is not None else work_dst
-    try:
-        with _env_for_path(src_file):
-            rasterio.shutil.copy(
-                _to_vsi_uri(src_file),
-                _to_vsi_uri(inject_into),
-                driver="GTiff" if work_stage is not None else driver,
-                **({} if work_stage is not None else dst_profile),
-            )
-        _inject_band_metadata(
-            inject_into,
-            band_names=band_names,
-            color_interp=color_interp,
-            tags=tags,
-            band_tags=band_tags,
-            units=units,
+    """Encode beside a local destination, then atomically replace it."""
+    metadata = {
+        "band_names": band_names,
+        "color_interp": color_interp,
+        "tags": tags,
+        "band_tags": band_tags,
+        "units": units,
+    }
+    options = {"driver": driver, **dst_profile}
+    if driver != "GTiff" and any(
+        v is not None for k, v in metadata.items() if k != "color_interp"
+    ):
+        # Other drivers cannot update in place, so the metadata goes into a GTiff stage.
+        stage = dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.stage.tif")
+        try:
+            with _env_for_path(src_file):
+                rasterio.shutil.copy(_to_vsi_uri(src_file), _to_vsi_uri(stage), driver="GTiff")
+            _inject_band_metadata(stage, **metadata)
+            _encode(_to_vsi_uri(stage), dst_file, options, checksum=False)
+        finally:
+            stage.unlink(missing_ok=True)
+            stage.with_name(f"{stage.name}.aux.xml").unlink(missing_ok=True)
+        return
+    with _env_for_path(src_file):
+        _encode(
+            _to_vsi_uri(src_file),
+            dst_file,
+            options,
+            checksum=False,
+            finish=lambda encoded: _inject_band_metadata(encoded, **metadata),
         )
-        if work_stage is not None:
-            rasterio.shutil.copy(
-                _to_vsi_uri(work_stage),
-                _to_vsi_uri(work_dst),
-                driver=driver,
-                **dst_profile,
-            )
-        work_dst.replace(dst_file)
-    except BaseException:
-        work_dst.unlink(missing_ok=True)
-        raise
-    finally:
-        if work_stage is not None:
-            work_stage.unlink(missing_ok=True)
 
 
 def _cog_creation_options(profile: Mapping[str, Any]) -> dict[str, Any]:
@@ -886,31 +878,109 @@ def _is_vrt_input(data: object) -> bool:
     return isinstance(data, VRT | str | UPath) or hasattr(data, "__fspath__")
 
 
-def _encode_cog(
-    src: str, dst_file: UPath, options: Mapping[str, Any], *, checksum: bool
+_GEOTIFF_DRIVERS = frozenset({"COG", "GTIFF"})
+
+
+def _encode(
+    src: str,
+    dst_file: UPath,
+    options: Mapping[str, Any],
+    *,
+    checksum: bool,
+    finish: Callable[[Path], None] | None = None,
 ) -> str | None:
-    """Encode ``src`` as a COG at ``dst_file``, locally or in one S3 upload; return the digest."""
+    """Encode ``src`` with ``options`` as the one file ``dst_file``; return its digest.
+
+    ``finish`` updates the encoded file before it lands.
+    """
     digest: str | None = None
     if dst_file.protocol == "s3":
         # Encoded to a temporary file and uploaded in one put, never through /vsis3/.
         with tempfile.TemporaryDirectory(prefix="freezebase-") as tmp:
             encoded = Path(tmp) / dst_file.name
-            rasterio.shutil.copy(src, str(encoded), **options)
+            _encode_file(src, encoded, options, finish)
             if checksum:
                 digest = _SHA256_MULTIHASH_PREFIX + file_sha256(encoded)
             _upload(encoded, dst_file)
         return digest
-    # A local write is an atomic rename of a hidden file beside the destination.
-    work_dst = dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.tmp")
+    if dst_file.protocol != "":
+        msg = f"Unsupported protocol '{dst_file.protocol}'."
+        raise ValueError(msg)
+    target = Path(dst_file.path)
+    if not target.parent.is_dir():
+        msg = f"The directory of {dst_file} does not exist."
+        raise FileNotFoundError(msg)
+    # A hidden directory beside the destination, so the raster lands by an atomic rename.
+    work_dir = target.with_name(f".{target.name}.{token_hex(8)}.tmp")
+    work_dir.mkdir()
     try:
-        rasterio.shutil.copy(src, _to_vsi_uri(work_dst), **options)
+        encoded = work_dir / target.name
+        _encode_file(src, encoded, options, finish)
         if checksum:
-            digest = _SHA256_MULTIHASH_PREFIX + file_sha256(work_dst)
-        work_dst.replace(dst_file)
-    except BaseException:
-        work_dst.unlink(missing_ok=True)
-        raise
+            digest = _SHA256_MULTIHASH_PREFIX + file_sha256(encoded)
+        encoded.replace(target)
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
     return digest
+
+
+def _encode_file(
+    src: str,
+    encoded: Path,
+    options: Mapping[str, Any],
+    finish: Callable[[Path], None] | None,
+) -> None:
+    """Encode ``src`` as ``encoded``, alone in its directory, without a sidecar file."""
+    driver = str(options.get("driver", "GTiff"))
+    # Opened before GDAL_PAM_ENABLED is off, so a source's own .aux.xml is still read.
+    with rasterio.open(src) as source:
+        crs = source.crs
+        # Without PAM, GDAL drops what the format cannot hold instead of writing a .aux.xml.
+        with rasterio.Env(GDAL_PAM_ENABLED="NO"):
+            rasterio.shutil.copy(source, str(encoded), **options)
+            if finish is not None:
+                finish(encoded)
+    extra = sorted(path.name for path in encoded.parent.iterdir() if path != encoded)
+    if extra:
+        msg = f"The {driver} driver writes several files ({', '.join(extra)}); write one file."
+        raise ValueError(msg)
+    if driver.upper() in _GEOTIFF_DRIVERS and crs is not None:
+        with rasterio.Env(GDAL_PAM_ENABLED="NO"), rasterio.open(encoded) as written:
+            if written.crs is None:
+                name = CRS.from_wkt(crs.to_wkt()).name
+                msg = (
+                    f"GeoTIFF cannot store the CRS {name!r}, such as a projected CRS with "
+                    "ellipsoidal heights; use its 2D CRS or a compound CRS with a vertical CRS."
+                )
+                raise ValueError(msg)
+
+
+def _prepare_vrt_for_file(
+    vrt: VRT,
+    profile: Mapping[str, Any],
+    *,
+    band_names: list[str] | None,
+    color_interp: list[ColorInterp] | None,
+    tags: Mapping[str, str] | None,
+    band_tags: Sequence[Mapping[str, str]] | None,
+    units: list[str] | None,
+) -> VRT:
+    """Return a copy of ``vrt`` with the metadata, ``profile`` dtype and nodata a file holds."""
+    vrt = copy.deepcopy(vrt)
+    _apply_vrt_metadata(
+        vrt,
+        band_names=band_names,
+        color_interp=color_interp,
+        tags=tags,
+        band_tags=band_tags,
+        units=units,
+    )
+    # Opens the VRT to nest it, so it can raise an OSError.
+    vrt = _wrap_for_nodata(vrt, profile.get("nodata"))
+    if profile.get("dtype") is not None or profile.get("nodata") is not None:
+        _cast_and_check(vrt, profile.get("dtype"))
+    _require_uniform_bands(vrt)
+    return vrt
 
 
 def _write_cog_from_vrt(
@@ -929,35 +999,90 @@ def _write_cog_from_vrt(
     from freezebase.vrt import VRT, from_raster  # noqa: PLC0415  # freezebase.vrt imports raster
 
     profile = profile or {}
-    vrt = copy.deepcopy(data) if isinstance(data, VRT) else from_raster(data)
-    _apply_vrt_metadata(
-        vrt,
-        band_names=band_names,
-        color_interp=color_interp,
-        tags=tags,
-        band_tags=band_tags,
-        units=units,
-    )
+    source = data if isinstance(data, VRT) else from_raster(data)
     try:
-        # Opens the VRT to nest it, so I/O errors belong to the write.
-        vrt = _wrap_for_nodata(vrt, profile.get("nodata"))
+        vrt = _prepare_vrt_for_file(
+            source,
+            profile,
+            band_names=band_names,
+            color_interp=color_interp,
+            tags=tags,
+            band_tags=band_tags,
+            units=units,
+        )
     except OSError as e:
         msg = f"Failed to write COG: {e}"
         raise RasterWriteError(msg) from e
-    if profile.get("dtype") is not None or profile.get("nodata") is not None:
-        _cast_and_check(vrt, profile.get("dtype"))
-    _require_uniform_bands(vrt)
     xml = vrt.to_xml()
     try:
         # Entered in the main thread: credentials set in a worker don't reach GDAL's readers.
         with vrt.env():
-            digest = _encode_cog(xml, dst_file, _cog_creation_options(profile), checksum=checksum)
+            digest = _encode(xml, dst_file, _cog_creation_options(profile), checksum=checksum)
     except Exception as e:
         msg = f"Failed to write COG: {e}"
         raise RasterWriteError(msg) from e
 
     logger.debug("Wrote COG to '%s'", dst_file.name)
     return digest
+
+
+def _raster_creation_options(profile: Mapping[str, Any], driver: str) -> dict[str, Any]:
+    """Return ``driver`` and the creation options of ``profile``, over the GTiff defaults."""
+    if driver == "GTiff":
+        return {
+            "driver": driver,
+            **_creation_options({**RASTERIO_PROFILE_DEFAULTS, **profile}, driver),
+        }
+    return {"driver": driver, **_creation_options(profile, driver)}
+
+
+def _write_raster_from_vrt(
+    vrt: VRT,
+    dst_file: AnyPath,
+    profile: dict[str, Any] | None,
+    *,
+    driver: str,
+    band_names: list[str] | None,
+    color_interp: list[ColorInterp] | None,
+    tags: Mapping[str, str] | None,
+    band_tags: Sequence[Mapping[str, str]] | None,
+    units: list[str] | None,
+) -> None:
+    """Stream a VRT into a raster file of any format GDAL can copy to; see ``VRT.to_raster``."""
+    if driver.upper() == "COG":
+        msg = "to_raster does not write COGs; use to_cog, which also refuses reprojection."
+        raise ValueError(msg)
+    profile = profile or {}
+    requested = profile.get("driver", driver)
+    if str(requested).upper() != driver.upper():
+        msg = f"profile sets driver {requested!r} but driver is {driver!r}; pass one of them."
+        raise ValueError(msg)
+    # GDAL matches driver names in any case; the GTiff defaults key on this spelling.
+    driver = "GTiff" if driver.upper() == "GTIFF" else driver
+    dst_file = UPath(dst_file)
+    try:
+        prepared = _prepare_vrt_for_file(
+            vrt,
+            profile,
+            band_names=band_names,
+            color_interp=color_interp,
+            tags=tags,
+            band_tags=band_tags,
+            units=units,
+        )
+    except OSError as e:
+        msg = f"Failed to write raster: {e}"
+        raise RasterWriteError(msg) from e
+    xml = prepared.to_xml()
+    try:
+        # Entered in the main thread: credentials set in a worker don't reach GDAL's readers.
+        with prepared.env():
+            _encode(xml, dst_file, _raster_creation_options(profile, driver), checksum=False)
+    except Exception as e:
+        msg = f"Failed to write raster: {e}"
+        raise RasterWriteError(msg) from e
+
+    logger.debug("Wrote a %s raster to '%s'", driver, dst_file.name)
 
 
 @overload
@@ -1059,7 +1184,8 @@ def write_cog(
         ``profile`` setting it, or ``profile`` holds a ``COG`` option that reprojects,
         such as ``target_srs`` or ``tiling_scheme``.
     RasterWriteError
-        If the write fails.
+        If the write fails, also when GeoTIFF cannot store the CRS, such as a projected
+        CRS with ellipsoidal heights.
     """
     _reject_reprojection_options(profile)
     dst_file = UPath(dst_file)
@@ -1108,7 +1234,7 @@ def write_cog(
                     band_tags=band_tags,
                     units=units,
                 )
-            digest = _encode_cog(
+            digest = _encode(
                 memfile.name, dst_file, _cog_creation_options(profile), checksum=checksum
             )
     except Exception as e:
