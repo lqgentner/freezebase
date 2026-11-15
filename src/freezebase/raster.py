@@ -7,6 +7,7 @@ import copy
 import logging
 from pathlib import Path
 from secrets import token_hex
+import shutil
 import tempfile
 from typing import TYPE_CHECKING, Any, Literal, overload
 
@@ -660,7 +661,7 @@ def _rewrite_vrt(
     try:
         # Entered in the main thread: credentials set in a worker don't reach GDAL's readers.
         with vrt.env():
-            _encode_cog(vrt.to_xml(), dst_file, {"driver": driver, **dst_profile}, checksum=False)
+            _encode(vrt.to_xml(), dst_file, {"driver": driver, **dst_profile}, checksum=False)
     except Exception as e:
         msg = f"Failed to rewrite GeoTIFF: {e}"
         raise RasterWriteError(msg) from e
@@ -886,31 +887,75 @@ def _is_vrt_input(data: object) -> bool:
     return isinstance(data, VRT | str | UPath) or hasattr(data, "__fspath__")
 
 
-def _encode_cog(
+def _encode(
     src: str, dst_file: UPath, options: Mapping[str, Any], *, checksum: bool
 ) -> str | None:
-    """Encode ``src`` as a COG at ``dst_file``, locally or in one S3 upload; return the digest."""
+    """Encode ``src`` with ``options`` at ``dst_file``, sidecars included; return the digest."""
     digest: str | None = None
     if dst_file.protocol == "s3":
-        # Encoded to a temporary file and uploaded in one put, never through /vsis3/.
+        # Encoded to a temporary file and uploaded in one put each, never through /vsis3/.
         with tempfile.TemporaryDirectory(prefix="freezebase-") as tmp:
             encoded = Path(tmp) / dst_file.name
             rasterio.shutil.copy(src, str(encoded), **options)
             if checksum:
                 digest = _SHA256_MULTIHASH_PREFIX + file_sha256(encoded)
+            # Sidecars first, so the raster lands last.
+            for sidecar in _sidecars(encoded):
+                _upload(sidecar, dst_file.with_name(sidecar.name))
             _upload(encoded, dst_file)
         return digest
-    # A local write is an atomic rename of a hidden file beside the destination.
-    work_dst = dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.tmp")
+    if dst_file.protocol != "":
+        msg = f"Unsupported protocol '{dst_file.protocol}'."
+        raise ValueError(msg)
+    target = Path(dst_file.path)
+    # A hidden directory beside the destination: sidecars such as a PNG's .aux.xml take
+    # the encoded file's name, and the raster lands by an atomic rename.
+    work_dir = target.with_name(f".{target.name}.{token_hex(8)}.tmp")
+    work_dir.mkdir()
     try:
-        rasterio.shutil.copy(src, _to_vsi_uri(work_dst), **options)
+        encoded = work_dir / target.name
+        rasterio.shutil.copy(src, str(encoded), **options)
         if checksum:
-            digest = _SHA256_MULTIHASH_PREFIX + file_sha256(work_dst)
-        work_dst.replace(dst_file)
-    except BaseException:
-        work_dst.unlink(missing_ok=True)
-        raise
+            digest = _SHA256_MULTIHASH_PREFIX + file_sha256(encoded)
+        for sidecar in _sidecars(encoded):
+            sidecar.replace(target.with_name(sidecar.name))
+        encoded.replace(target)
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
     return digest
+
+
+def _sidecars(encoded: Path) -> list[Path]:
+    """Return the files GDAL wrote beside ``encoded``."""
+    return sorted(path for path in encoded.parent.iterdir() if path != encoded)
+
+
+def _prepare_vrt_for_file(
+    vrt: VRT,
+    profile: Mapping[str, Any],
+    *,
+    band_names: list[str] | None,
+    color_interp: list[ColorInterp] | None,
+    tags: Mapping[str, str] | None,
+    band_tags: Sequence[Mapping[str, str]] | None,
+    units: list[str] | None,
+) -> VRT:
+    """Return a copy of ``vrt`` with the metadata, ``profile`` dtype and nodata a file holds."""
+    vrt = copy.deepcopy(vrt)
+    _apply_vrt_metadata(
+        vrt,
+        band_names=band_names,
+        color_interp=color_interp,
+        tags=tags,
+        band_tags=band_tags,
+        units=units,
+    )
+    # Opens the VRT to nest it, so it can raise an OSError.
+    vrt = _wrap_for_nodata(vrt, profile.get("nodata"))
+    if profile.get("dtype") is not None or profile.get("nodata") is not None:
+        _cast_and_check(vrt, profile.get("dtype"))
+    _require_uniform_bands(vrt)
+    return vrt
 
 
 def _write_cog_from_vrt(
@@ -929,35 +974,88 @@ def _write_cog_from_vrt(
     from freezebase.vrt import VRT, from_raster  # noqa: PLC0415  # freezebase.vrt imports raster
 
     profile = profile or {}
-    vrt = copy.deepcopy(data) if isinstance(data, VRT) else from_raster(data)
-    _apply_vrt_metadata(
-        vrt,
-        band_names=band_names,
-        color_interp=color_interp,
-        tags=tags,
-        band_tags=band_tags,
-        units=units,
-    )
+    source = data if isinstance(data, VRT) else from_raster(data)
     try:
-        # Opens the VRT to nest it, so I/O errors belong to the write.
-        vrt = _wrap_for_nodata(vrt, profile.get("nodata"))
+        vrt = _prepare_vrt_for_file(
+            source,
+            profile,
+            band_names=band_names,
+            color_interp=color_interp,
+            tags=tags,
+            band_tags=band_tags,
+            units=units,
+        )
     except OSError as e:
         msg = f"Failed to write COG: {e}"
         raise RasterWriteError(msg) from e
-    if profile.get("dtype") is not None or profile.get("nodata") is not None:
-        _cast_and_check(vrt, profile.get("dtype"))
-    _require_uniform_bands(vrt)
     xml = vrt.to_xml()
     try:
         # Entered in the main thread: credentials set in a worker don't reach GDAL's readers.
         with vrt.env():
-            digest = _encode_cog(xml, dst_file, _cog_creation_options(profile), checksum=checksum)
+            digest = _encode(xml, dst_file, _cog_creation_options(profile), checksum=checksum)
     except Exception as e:
         msg = f"Failed to write COG: {e}"
         raise RasterWriteError(msg) from e
 
     logger.debug("Wrote COG to '%s'", dst_file.name)
     return digest
+
+
+# Dataset properties, which a raster's creation options never hold.
+_DATASET_KEYS = ("driver", "dtype", "nodata", "crs", "transform", "count", "width", "height")
+
+
+def _raster_creation_options(profile: Mapping[str, Any], driver: str) -> dict[str, Any]:
+    """Return ``driver`` and the creation options of ``profile``, over the GTiff defaults."""
+    defaults = RASTERIO_PROFILE_DEFAULTS if driver.upper() == "GTIFF" else {}
+    options = {**defaults, **profile}
+    for key in _DATASET_KEYS:
+        options.pop(key, None)
+    return {"driver": driver, **options}
+
+
+def _write_raster_from_vrt(
+    vrt: VRT,
+    dst_file: AnyPath,
+    profile: dict[str, Any] | None,
+    *,
+    driver: str,
+    band_names: list[str] | None,
+    color_interp: list[ColorInterp] | None,
+    tags: Mapping[str, str] | None,
+    band_tags: Sequence[Mapping[str, str]] | None,
+    units: list[str] | None,
+) -> None:
+    """Stream a VRT into a raster file of any format GDAL can copy to; see ``VRT.to_raster``."""
+    profile = profile or {}
+    requested = profile.get("driver", driver)
+    if str(requested).upper() != driver.upper():
+        msg = f"profile sets driver {requested!r} but driver is {driver!r}; pass one of them."
+        raise ValueError(msg)
+    dst_file = UPath(dst_file)
+    try:
+        prepared = _prepare_vrt_for_file(
+            vrt,
+            profile,
+            band_names=band_names,
+            color_interp=color_interp,
+            tags=tags,
+            band_tags=band_tags,
+            units=units,
+        )
+    except OSError as e:
+        msg = f"Failed to write raster: {e}"
+        raise RasterWriteError(msg) from e
+    xml = prepared.to_xml()
+    try:
+        # Entered in the main thread: credentials set in a worker don't reach GDAL's readers.
+        with prepared.env():
+            _encode(xml, dst_file, _raster_creation_options(profile, driver), checksum=False)
+    except Exception as e:
+        msg = f"Failed to write raster: {e}"
+        raise RasterWriteError(msg) from e
+
+    logger.debug("Wrote a %s raster to '%s'", driver, dst_file.name)
 
 
 @overload
@@ -1108,7 +1206,7 @@ def write_cog(
                     band_tags=band_tags,
                     units=units,
                 )
-            digest = _encode_cog(
+            digest = _encode(
                 memfile.name, dst_file, _cog_creation_options(profile), checksum=checksum
             )
     except Exception as e:

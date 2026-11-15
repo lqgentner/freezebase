@@ -15,6 +15,7 @@ Configure with:
 
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 from pathlib import Path
@@ -274,7 +275,7 @@ class TestVrtOnS3:
     def test_vrt_with_dotdot_sources_reopens(self, prefix: UPath) -> None:
         tiles = self._upload_tiles(prefix)
 
-        written = mosaic(tiles).write(prefix / "vrts" / "m.vrt")
+        written = mosaic(tiles).to_vrt(prefix / "vrts" / "m.vrt")
 
         assert "../tiles/t0.tif" in written.read_text()
         parsed = read(written)
@@ -303,10 +304,49 @@ class TestVrtOnS3:
             assert ds.width == 2 * WIDTH
             assert set(np.unique(ds.read(1)).tolist()) == {1.0, 2.0}
 
+    def test_to_cog_of_a_chain_returns_the_uploaded_digest(self, prefix: UPath) -> None:
+        tiles = self._upload_tiles(prefix)
+        out = prefix / "out.tif"
+
+        digest = (
+            mosaic(tiles).reproject(crs="EPSG:3857", resolution=20.0).to_cog(out, checksum=True)
+        )
+
+        assert digest == "1220" + hashlib.sha256(out.read_bytes()).hexdigest()
+        with rasterio_open(out) as ds:
+            data = ds.read(1)
+        assert {1.0, 2.0} <= set(np.unique(data[np.isfinite(data)]).tolist())
+
+    def test_to_raster_casts_on_s3(self, prefix: UPath) -> None:
+        tiles = self._upload_tiles(prefix)
+        out = prefix / "out.tif"
+
+        mosaic(tiles).to_raster(out, {"dtype": "uint8", "nodata": 255})
+
+        with rasterio_open(out) as ds:
+            assert (ds.dtypes, ds.nodata) == (("uint8",), 255)
+            assert set(np.unique(ds.read(1)).tolist()) == {1, 2}
+
+    def test_to_raster_uploads_a_png_with_its_sidecar(self, prefix: UPath, tmp_path: Path) -> None:
+        tiles = self._upload_tiles(prefix)
+        out = prefix / "q.png"
+
+        mosaic(tiles).to_raster(out, {"dtype": "uint8", "nodata": 0}, driver="PNG")
+
+        out.fs.invalidate_cache()
+        assert out.fs.info(out.path)["ContentType"] == CONTENT_TYPES[".png"]
+        # Read back locally: GDAL's S3 environment does not look for sidecars.
+        for name in ("q.png", "q.png.aux.xml"):
+            (tmp_path / name).write_bytes((prefix / name).read_bytes())
+        with rasterio.open(tmp_path / "q.png") as ds:
+            assert ds.driver == "PNG"
+            assert ds.crs == "EPSG:32632"
+            assert set(np.unique(ds.read(1)).tolist()) == {1, 2}
+
     def test_source_files_follow_a_local_vrt_to_s3(self, prefix: UPath, tmp_path: Path) -> None:
         tiles = self._upload_tiles(prefix)
-        remote = mosaic(tiles).write(prefix / "m.vrt")
-        local = reproject(remote, crs="EPSG:3857", resolution=20.0).write(tmp_path / "warped.vrt")
+        remote = mosaic(tiles).to_vrt(prefix / "m.vrt")
+        local = reproject(remote, crs="EPSG:3857", resolution=20.0).to_vrt(tmp_path / "warped.vrt")
 
         files = read(local).source_files(storage_options=prefix.storage_options)
 
@@ -316,12 +356,12 @@ class TestVrtOnS3:
     def test_open_through_two_local_vrts_to_s3(self, prefix: UPath, tmp_path: Path) -> None:
         tiles = self._upload_tiles(prefix)
         warped = [
-            reproject(tile, crs="EPSG:3857", resolution=20.0).write(tmp_path / f"w{i}.vrt")
+            reproject(tile, crs="EPSG:3857", resolution=20.0).to_vrt(tmp_path / f"w{i}.vrt")
             for i, tile in enumerate(tiles)
         ]
         # Building reads the local VRTs' headers, which reach S3 too.
         with s3_env(prefix):
-            final = read(mosaic(warped).write(tmp_path / "final.vrt"))
+            final = read(mosaic(warped).to_vrt(tmp_path / "final.vrt"))
 
         # Previously env() followed the local VRTs without options: bare s3:// tiles.
         with final.open(storage_options=prefix.storage_options) as ds:

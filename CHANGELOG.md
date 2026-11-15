@@ -16,6 +16,11 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   and notebooks show it as collapsible HTML. Neither opens a source.
 - `Source` and `Warp` reprs show a nested VRT on one line, and `Warp` shows only the length
   of `options_xml`.
+- `VRT.reproject` and `VRT.derive` take the VRT as the source, so steps chain:
+  `vrt.mosaic(tiles).reproject(crs=...).derive(...)`.
+- `VRT.to_cog` writes a COG like `write_cog`, including `checksum=True`, and
+  `VRT.to_raster` writes any format GDAL can create, such as GTiff or PNG, applying the
+  profile's `dtype` and `nodata` as `to_cog` does.
 
 ### Changed
 
@@ -31,6 +36,9 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 - `freezebase.vrt.warp` is renamed `freezebase.vrt.reproject`, the name rasterio and
   rioxarray use. `warp` still works but emits a `DeprecationWarning`; replace
   `vrt.warp(src, crs=...)` with `vrt.reproject(src, crs=...)`.
+- `VRT.write` is renamed `VRT.to_vrt`, next to `to_cog` and `to_raster`. `write` still
+  works but emits a `DeprecationWarning`; replace `v.write("a.vrt")` with
+  `v.to_vrt("a.vrt")`.
 
 ### Fixed
 
