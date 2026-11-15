@@ -11,6 +11,8 @@ import numpy as np
 from rasterio.coords import BoundingBox
 from rasterio.enums import ColorInterp
 
+from freezebase.vrt import _summary
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from contextlib import AbstractContextManager
@@ -83,6 +85,11 @@ def _fields_equal(a: Source | Band, b: Source | Band) -> bool:
         else getattr(a, item.name) == getattr(b, item.name)
         for item in fields(a)
     )
+
+
+def _ref_repr(ref: SourceRef) -> str:
+    """Represent a source path, or a nested VRT on one line."""
+    return _summary.safe_short(ref) if isinstance(ref, VRT) else repr(ref)
 
 
 @dataclass
@@ -262,6 +269,23 @@ class Source:
             return NotImplemented
         return _fields_equal(self, other)
 
+    def __repr__(self) -> str:
+        """Show the path, the band and the fields that are set, a nested VRT on one line.
+
+        Returns
+        -------
+        str
+            ``Source(path=..., band=..., ...)``.
+        """
+        parts = [f"path={_ref_repr(self.path)}", f"band={self.band}"]
+        parts += [
+            f"{item.name}={value!r}"
+            for item in fields(self)
+            if item.name not in {"path", "band"}
+            and (value := getattr(self, item.name)) is not None
+        ]
+        return f"Source({', '.join(parts)})"
+
     # Mutable, so unhashable, as a plain dataclass is.
     __hash__: ClassVar[None] = None
 
@@ -342,6 +366,19 @@ class Warp:
     options_xml: str
     block_size: tuple[int, int]
 
+    def __repr__(self) -> str:
+        """Show a nested VRT on one line and only the length of the options.
+
+        Returns
+        -------
+        str
+            ``Warp(source=..., options_xml=<N chars>, block_size=...)``.
+        """
+        return (
+            f"Warp(source={_ref_repr(self.source)}, "
+            f"options_xml=<{len(self.options_xml)} chars>, block_size={self.block_size!r})"
+        )
+
     @property
     def vertical_shift(self) -> bool:
         """Whether the warp applies a vertical shift.
@@ -389,6 +426,20 @@ class VRT:
     metadata: dict[str, str] = field(default_factory=dict)
     warp: Warp | None = None
     metadata_domains: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    def __repr__(self) -> str:
+        """Summarize the grid, the bands and the steps that build the VRT, without I/O.
+
+        Returns
+        -------
+        str
+            A header line, one line per band, and a tree of the steps and their sources.
+        """
+        return _summary.text_repr(self)
+
+    def _repr_html_(self) -> str:
+        """Render the summary as HTML for notebooks."""
+        return _summary.html_repr(self)
 
     @property
     def bounds(self) -> BoundingBox:
