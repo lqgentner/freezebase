@@ -22,10 +22,10 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   `VRT.to_raster` writes a single file in any format GDAL can create, such as GTiff or
   PNG, applying the profile's `dtype` and `nodata` as `to_cog` does.
 - New `VRT` steps, each returning a new VRT: `select(bands)` picks and reorders bands,
-  `set(...)` changes band names, color interpretation, units and tags,
+  `set(...)` changes band names, color interpretation and units and adds tags,
   `clip_box(minx, miny, maxx, maxy)` cuts out whole pixels, and
   `colorize(colors, vmin=..., vmax=...)` renders one band as RGBA through color stops or a
-  matplotlib colormap, with nodata transparent.
+  matplotlib colormap, with nodata and NaN transparent.
 
 ### Changed
 
@@ -51,12 +51,30 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   - `create_warped_vrt(src, out, crs=c, resolution=r, ...)` becomes
     `vrt.reproject(src, crs=c, resolution=r, ...).to_vrt(out, relative=False)`.
   - `create_decibel_vrt(src, out)` becomes
-    `vrt.derive(src, vrt.PixelFunction.db(), band=1).to_vrt(out)`; use
+    `vrt.derive(src, vrt.PixelFunction.db(), description="dB", band=1).to_vrt(out)`; use
     `PixelFunction.db(20)` for `from_intensity=False`.
-  - `create_rgb_vrt(vv, vh, out)` becomes
-    `vrt.stack([vv, vh, vrt.derive([vv, vh], vrt.PixelFunction.div())], bands=[[1], [1], None]).to_vrt(out)`;
-    use `PixelFunction.diff()` for `decibel_scale=True`. The bands keep the inputs' data
-    type and nodata instead of becoming `float32` with NaN.
+  - `create_rgb_vrt(vv, vh, out)` becomes the following, with `PixelFunction.diff()`
+    and the names `VV_dB`, `VH_dB` and `VV_dB-VH_dB` for `decibel_scale=True`:
+
+    ```python
+    from rasterio.enums import ColorInterp
+    from freezebase.vrt import PixelFunction
+
+    rgb = vrt.stack(
+        [
+            vrt.derive(vv, PixelFunction.scale(), band=1),
+            vrt.derive(vh, PixelFunction.scale(), band=1),
+            vrt.derive([vv, vh], PixelFunction.div()),
+        ]
+    ).set(
+        band_names=["VV", "VH", "VV/VH"],
+        color_interp=[ColorInterp.red, ColorInterp.green, ColorInterp.blue],
+    )
+    rgb.to_vrt(out)
+    ```
+
+    The bands are `float32` with NaN as nodata, as before, but an input's nodata pixels
+    now read as NaN instead of their stored value.
   - `create_rgba_vrt(src, out, luts=luts)` becomes
     `vrt.from_raster(src).colorize([(value, (r, g, b)), ...]).to_vrt(out)`, with one stop
     per value that the three tables share. For other tables, such as

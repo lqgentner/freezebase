@@ -28,8 +28,9 @@ _RGB_BANDS = 3
 
 
 @deprecated(
-    "freezebase.vrt.create_decibel_vrt",
-    "freezebase.vrt.derive(src_path, PixelFunction.db(), band=1).to_vrt(output_vrt)",
+    "freezebase.vrt.create_decibel_vrt is deprecated and will be removed in a future "
+    "release; use freezebase.vrt.derive(src_path, PixelFunction.db(), description='dB', "
+    "band=1).to_vrt(output_vrt), with PixelFunction.db(20) for amplitude."
 )
 def create_decibel_vrt(
     src_path: AnyPath,
@@ -39,7 +40,8 @@ def create_decibel_vrt(
 ) -> None:
     """Create a VRT applying a decibel conversion.
 
-    Deprecated: use ``derive(src_path, PixelFunction.db(), band=1).to_vrt(output_vrt)``,
+    Deprecated: use
+    ``derive(src_path, PixelFunction.db(), description="dB", band=1).to_vrt(output_vrt)``,
     with ``PixelFunction.db(20)`` for amplitude.
 
     Parameters
@@ -67,7 +69,12 @@ def _geotransform(transform: Affine) -> str:
     return ", ".join(str(v) for v in transform.to_gdal())
 
 
-@deprecated("freezebase.vrt.create_rgb_vrt", "freezebase.vrt.stack with freezebase.vrt.derive")
+@deprecated(
+    "freezebase.vrt.create_rgb_vrt is deprecated and will be removed in a future release;"
+    " use freezebase.vrt.stack([derive(vv_path, PixelFunction.scale(), band=1), "
+    "derive(vh_path, PixelFunction.scale(), band=1), derive([vv_path, vh_path], "
+    "PixelFunction.div())]).set(band_names=[...], color_interp=[...]).to_vrt(output_vrt)."
+)
 def create_rgb_vrt(
     vv_path: AnyPath,
     vh_path: AnyPath,
@@ -77,7 +84,8 @@ def create_rgb_vrt(
 ) -> None:
     """Create a 3-band RGB VRT from VV and VH rasters.
 
-    Deprecated: use ``stack`` with a ``derive`` band, then ``VRT.to_vrt``.
+    Deprecated: ``stack`` bands derived with ``PixelFunction.scale()`` and
+    ``PixelFunction.div()``, label them with ``VRT.set``, then call ``VRT.to_vrt``.
 
     Blue is VV/VH for linear inputs and VV-VH for decibel inputs.
 
@@ -141,8 +149,8 @@ def create_rgb_vrt(
 
 
 @deprecated(
-    "freezebase.vrt.build_vrt_mosaic",
-    "freezebase.vrt.mosaic(files, bounds=bounds).to_vrt(dst_vrt)",
+    "freezebase.vrt.build_vrt_mosaic is deprecated and will be removed in a future "
+    "release; use freezebase.vrt.mosaic(files, bounds=bounds).to_vrt(dst_vrt)."
 )
 def build_vrt_mosaic(
     files: Sequence[AnyPath],
@@ -181,8 +189,9 @@ def build_vrt_mosaic(
 
 
 @deprecated(
-    "freezebase.vrt.create_warped_vrt",
-    "freezebase.vrt.reproject(src_path, crs=crs, ...).to_vrt(output_vrt, relative=False)",
+    "freezebase.vrt.create_warped_vrt is deprecated and will be removed in a future "
+    "release; use freezebase.vrt.reproject(src_path, crs=crs, ...).to_vrt(output_vrt, "
+    "relative=False)."
 )
 def create_warped_vrt(
     src_path: AnyPath,
@@ -253,8 +262,8 @@ def create_warped_vrt(
 
 
 @deprecated(
-    "freezebase.vrt.create_rgba_vrt",
-    "freezebase.vrt.from_raster(src_path).colorize(...).to_vrt(output_vrt)",
+    "freezebase.vrt.create_rgba_vrt is deprecated and will be removed in a future "
+    "release; use freezebase.vrt.from_raster(src_path).colorize(...).to_vrt(output_vrt)."
 )
 def create_rgba_vrt(
     src_path: AnyPath,

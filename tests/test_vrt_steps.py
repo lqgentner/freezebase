@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import itertools
 import sys
 from typing import TYPE_CHECKING
 
@@ -13,7 +14,7 @@ import rasterio
 from rasterio.enums import ColorInterp
 import rasterio.windows
 
-from freezebase.vrt import VRT, from_raster, mosaic, stack
+from freezebase.vrt import VRT, PixelFunction, derive, from_raster, mosaic, stack
 from tests.rasters import make_tiff
 
 if TYPE_CHECKING:
@@ -52,12 +53,39 @@ class TestSelect:
         assert picked.metadata == source.metadata
         np.testing.assert_array_equal(_read(picked), _read(source)[[2, 0, 2]])
 
-    def test_bands_equal_those_of_stack(self, tmp_path: Path) -> None:
+    def test_reads_like_stack(self, tmp_path: Path) -> None:
         source = _three_bands(tmp_path)
-        assert source.select([2]).bands == stack([source], bands=[[2]]).bands
+        expected = _read(stack([source], bands=[[2, 1]]))
+        np.testing.assert_array_equal(_read(source.select(np.array([2, 1]))), expected)
+
+    def test_bands_of_a_warped_vrt(self, tmp_path: Path) -> None:
+        warped = _three_bands(tmp_path).reproject(crs="EPSG:3857", resolution=20.0)
+        picked = warped.select([3, 2])
+        assert [band.description for band in picked.bands] == ["b", "g"]
+        np.testing.assert_array_equal(_read(picked), _read(warped)[[2, 1]], strict=True)
+
+    def test_copies_the_bands(self, tmp_path: Path) -> None:
+        source = _three_bands(tmp_path)
+        picked = source.select([1, 1])
+        picked.bands[0].description = "changed"
+        assert source.bands[0].description == picked.bands[1].description == "r"
+
+    def test_xml_grows_linearly_along_a_chain(self, tmp_path: Path) -> None:
+        # Previously each step nested the whole input once per band: 3**depth copies.
+        sizes = []
+        chained = _three_bands(tmp_path)
+        for _ in range(6):
+            chained = chained.select([1, 2, 3]).clip_box(*chained.bounds)
+            # Without the indentation, which deepens with each level.
+            sizes.append(len("".join(chained.to_xml().split())))
+        growth = [later - earlier for earlier, later in itertools.pairwise(sizes)]
+        assert max(growth) <= 1.2 * min(growth)
+        with chained.open() as ds:
+            np.testing.assert_array_equal(ds.read(), _read(_three_bands(tmp_path)))
 
     @pytest.mark.parametrize(
-        ("bands", "match"), [([], "must not be empty"), ([1, 4], "no band 4")]
+        ("bands", "match"),
+        [([], "must not be empty"), ([1, 4], "no band 4"), ([1.0], "must hold integers")],
     )
     def test_rejects_bad_bands(self, tmp_path: Path, bands: list[int], match: str) -> None:
         with pytest.raises(ValueError, match=match):
@@ -130,6 +158,25 @@ class TestClipBox:
         assert clipped.metadata["SENSOR"] == "S2"
         assert clipped.bounds == (500010.0, 5199970.0, 500030.0, 5199990.0)
 
+    def test_crops_a_mosaic_of_several_tiles(self, tmp_path: Path) -> None:
+        left = make_tiff(tmp_path / "l.tif", fill=1.0)
+        right = make_tiff(tmp_path / "r.tif", fill=2.0, origin=(ORIGIN[0] + 60, ORIGIN[1]))
+        tiles = mosaic([left, right])
+        clipped = tiles.clip_box(ORIGIN[0] + 40, ORIGIN[1] - 30, ORIGIN[0] + 90, ORIGIN[1] - 10)
+        np.testing.assert_array_equal(_read(clipped), _read(tiles)[:, 1:3, 4:9])
+        assert _read(clipped)[0, 0].tolist() == [1, 1, 2, 2, 2]
+
+    def test_crops_a_derived_band(self, tmp_path: Path) -> None:
+        decibels = derive(make_tiff(tmp_path / "a.tif"), PixelFunction.db())
+        clipped = decibels.clip_box(ORIGIN[0] + 10, ORIGIN[1] - 30, ORIGIN[0] + 30, ORIGIN[1] - 10)
+        np.testing.assert_array_equal(_read(clipped), _read(decibels)[:, 1:3, 1:3])
+
+    def test_crops_a_warped_vrt(self, tmp_path: Path) -> None:
+        warped = _three_bands(tmp_path).reproject(crs="EPSG:3857", resolution=20.0)
+        left, _, _, top = warped.bounds
+        clipped = warped.clip_box(left + 20, top - 60, left + 60, top - 20)
+        np.testing.assert_array_equal(_read(clipped), _read(warped)[:, 1:3, 1:3])
+
     def test_tolerates_rounding_on_the_grid(self, tmp_path: Path) -> None:
         clipped = _uint16(tmp_path).clip_box(500010.0000001, 5199970.0, 500030.0, 5199990.0)
         assert clipped.transform.c == 500010.0
@@ -144,6 +191,8 @@ class TestClipBox:
             ((500010.0, 5199950.0, 500030.0, 5199990.0), "extends beyond"),
             ((500030.0, 5199970.0, 500010.0, 5199990.0), "is empty"),
             ((500010.0, 5199970.0, 500030.0, 5199970.0), "is empty"),
+            ((500010.0, 5199970.0, float("inf"), 5199990.0), "not finite"),
+            ((float("nan"), 5199970.0, 500030.0, 5199990.0), "not finite"),
         ],
     )
     def test_rejects_a_bad_box(
@@ -193,6 +242,44 @@ class TestColorize:
         np.testing.assert_array_equal(data[:, 0, 0], [0, 0, 0, 0])
         assert (data[3].ravel()[1:] == 255).all()
 
+    @pytest.mark.parametrize("nodata", [None, -9999.0, float("nan")])
+    def test_nan_pixels_are_transparent(self, tmp_path: Path, nodata: float | None) -> None:
+        path = make_tiff(tmp_path / "a.tif", nodata=nodata)
+        with rasterio.open(path, "r+") as ds:
+            data = ds.read()
+            data[0, 0, 1] = np.nan
+            if nodata is not None and not np.isnan(nodata):
+                data[0, 0, 2] = nodata
+            ds.write(data)
+        rgba = _read(from_raster(path).colorize(BLACK_TO_ORANGE))
+        np.testing.assert_array_equal(rgba[:, 0, 1], [0, 0, 0, 0])
+        if nodata is not None and not np.isnan(nodata):
+            np.testing.assert_array_equal(rgba[:, 0, 2], [0, 0, 0, 0])
+        # Value 0 at the first pixel is valid.
+        np.testing.assert_array_equal(rgba[:, 0, 0], [0, 0, 0, 255])
+
+    def test_stops_compare_with_stored_values(self, tmp_path: Path) -> None:
+        source = _uint16(tmp_path)
+        source.bands[0].scale, source.bands[0].offset = 0.5, 100.0
+        # Stored value 10 is halfway, whatever the scale and offset make of it.
+        np.testing.assert_array_equal(
+            _read(source.colorize(BLACK_TO_ORANGE))[:, 1, 4], [100, 50, 0, 255]
+        )
+
+    def test_nests_only_the_rendered_band(self, tmp_path: Path) -> None:
+        rgba = _three_bands(tmp_path).colorize(BLACK_TO_ORANGE, band=2)
+        nested = rgba.bands[0].sources[0].path
+        assert isinstance(nested, VRT)
+        assert [band.description for band in nested.bands] == ["g"]
+        assert all(band.sources[0].path is nested for band in rgba.bands)
+
+    def test_renders_a_band_of_a_warped_vrt(self, tmp_path: Path) -> None:
+        warped = _three_bands(tmp_path).reproject(crs="EPSG:3857", resolution=20.0)
+        ramp = [(0.0, (0, 0, 0)), (255.0, (255, 0, 0))]
+        red = _read(warped.colorize(ramp, band=3))[0].astype(float)
+        expected = np.rint(_read(warped)[2])
+        np.testing.assert_array_equal(red[~np.isnan(expected)], expected[~np.isnan(expected)])
+
     def test_stop_alpha_is_interpolated(self, tmp_path: Path) -> None:
         stops = [(0.0, (0, 0, 0, 255)), (20.0, (0, 0, 0, 55))]
         alpha = _read(_uint16(tmp_path).colorize(stops))[3]
@@ -211,6 +298,29 @@ class TestColorize:
         data = _read(_uint16(tmp_path).colorize(ramp, vmin=0, vmax=20))
         np.testing.assert_array_equal(data[:, 1, 4], [128, 128, 0, 255])
         np.testing.assert_array_equal(data[:, 3, 5], [255, 0, 0, 255])
+
+    def test_a_short_colormap_gives_flat_steps(self, tmp_path: Path) -> None:
+        palette = np.array([[1.0, 0, 0, 1], [0, 1.0, 0, 1], [0, 0, 1.0, 1], [1.0, 1.0, 1.0, 1]])
+
+        class Listed:
+            N = 4
+
+            def __call__(self, x: np.ndarray) -> np.ndarray:
+                return palette[np.minimum((np.asarray(x) * self.N).astype(int), self.N - 1)]
+
+        red = _read(_uint16(tmp_path).colorize(Listed(), vmin=0, vmax=20))[0].ravel()
+        # Values 0 to 4 are the first class, 5 to 9 the second, 15 and above the last.
+        assert red[1:5].tolist() == [255] * 4
+        assert red[5:15].tolist() == [0] * 10
+        assert red[15:].tolist() == [255] * 9
+
+    def test_matplotlib_listed_colormap(self, tmp_path: Path) -> None:
+        mpl = pytest.importorskip("matplotlib")
+        tab10 = mpl.colormaps["tab10"]
+        data = _read(_uint16(tmp_path).colorize("tab10", vmin=0, vmax=20))
+        values = np.arange(1, 24)
+        expected = tab10(np.clip(values / 20, 0, 1), bytes=True)
+        np.testing.assert_array_equal(data.reshape(4, -1)[:, 1:].T, expected)
 
     def test_matplotlib_colormap_name(self, tmp_path: Path) -> None:
         mpl = pytest.importorskip("matplotlib")
@@ -253,10 +363,11 @@ class TestColorize:
             ([(5.0, (0, 0, 0)), (1.0, (9, 9, 9))], "strictly ascending"),
             ([(1.0, (0, 0, 0)), (1.0, (9, 9, 9))], "strictly ascending"),
             ([(0.0, (0, 0, 0)), (float("nan"), (9, 9, 9))], "finite"),
-            ([(0.0, (0, 0)), (1.0, (9, 9, 9))], "3 or 4 values"),
+            ([(0.0, (0, 0)), (1.0, (9, 9, 9))], "3 or 4 integers"),
             ([(0.0, (0, 0, 256)), (1.0, (9, 9, 9))], "from 0 to 255"),
+            ([(0.0, (0.5, 0.5, 0.5)), (1.0, (9, 9, 9))], "integers"),
         ],
-        ids=["one-stop", "descending", "repeated", "nan", "two-channels", "over-255"],
+        ids=["one-stop", "descending", "repeated", "nan", "two-channels", "over-255", "floats"],
     )
     def test_rejects_bad_stops(
         self, tmp_path: Path, stops: list[tuple[float, tuple[int, ...]]], match: str

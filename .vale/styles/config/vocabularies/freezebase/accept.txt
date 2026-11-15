@@ -25,6 +25,7 @@ datums
 freezebase
 fsspec
 geospatial
+matplotlib
 nodata
 numpydoc
 proselint

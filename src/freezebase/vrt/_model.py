@@ -630,25 +630,23 @@ class VRT:
             self, function, dtype=dtype, nodata=nodata, description=description, band=band
         )
 
-    def select(self, bands: Sequence[int]) -> VRT:
+    def select(self, bands: Sequence[int] | np.ndarray) -> VRT:
         """Select bands of this VRT, in any order.
 
         Parameters
         ----------
-        bands : Sequence[int]
+        bands : Sequence[int] | numpy.ndarray
             1-based bands to keep, in output order; a band may repeat.
 
         Returns
         -------
         VRT
-            A VRT reading the selected bands from a copy of this one, with its band and
-            dataset metadata.
+            The selected bands, copied, with this VRT's dataset metadata.
 
         Raises
         ------
         ValueError
-            If ``bands`` is empty or names a band this VRT lacks, or as
-            ``freezebase.vrt.stack``.
+            If ``bands`` is empty, holds a non-integer or names a band this VRT lacks.
         """
         from freezebase.vrt._steps import select  # noqa: PLC0415  # _steps imports this module
 
@@ -704,6 +702,8 @@ class VRT:
 
         The box edges must lie on this VRT's pixel grid, so the result keeps whole pixels;
         its transform and size are those of the ``rasterio.windows`` window over the box.
+        Unlike rioxarray's ``clip_box``, the box must lie inside the raster and is not
+        snapped to the pixels it touches.
 
         Parameters
         ----------
@@ -713,14 +713,14 @@ class VRT:
         Returns
         -------
         VRT
-            A VRT reading the box from a copy of this one, with its band and dataset
-            metadata.
+            A VRT reading the box from a copy of each band, with this VRT's band and
+            dataset metadata.
 
         Raises
         ------
         ValueError
-            If the grid is rotated or not north-up, the box is empty, off the pixel grid
-            or extends beyond this VRT, or as ``freezebase.vrt.stack``.
+            If the grid is rotated or not north-up, or the box is empty, not finite, off
+            the pixel grid or extends beyond this VRT.
         """
         from freezebase.vrt._steps import clip_box  # noqa: PLC0415  # _steps imports this module
 
@@ -738,15 +738,18 @@ class VRT:
 
         Colors are interpolated linearly between stops; values below the first stop or
         above the last take its color. Stop values compare with the stored pixel values,
-        before any scale and offset. Nodata pixels are transparent (all four bands 0),
-        other pixels take the stop's alpha, 255 for an RGB stop.
+        before any scale and offset. Pixels equal to the band's nodata and NaN pixels are
+        transparent (all four bands 0); other pixels take the stop's alpha, 255 for an RGB
+        stop. Pixels no source covers, such as gaps in a mosaic, read as 0 unless the band
+        has a nodata value, and are colored as 0.
 
         Parameters
         ----------
         colors : Sequence[tuple[float, tuple[int, ...]]] | str | Colormap
             ``(value, (r, g, b))`` or ``(value, (r, g, b, a))`` stops with 0-255 channels,
             in strictly ascending value order; or a matplotlib colormap or its name, which
-            needs matplotlib.
+            needs matplotlib. A colormap of fewer than 256 colors, such as ``"tab10"``,
+            gives each color an equal, unblended share of ``vmin`` to ``vmax``.
         vmin, vmax : float | None, optional
             Values the ends of a colormap map to; required for a colormap, not allowed
             with stops.
@@ -756,13 +759,13 @@ class VRT:
         Returns
         -------
         VRT
-            A four-band ``uint8`` RGBA VRT reading a copy of this one.
+            A four-band ``uint8`` RGBA VRT reading a copy of the band.
 
         Raises
         ------
         ValueError
             If ``band`` is out of range, there are fewer than two stops, the stops are not
-            ascending or a color is not 3 or 4 values from 0 to 255, ``vmin`` and ``vmax``
+            ascending or a color is not 3 or 4 integers from 0 to 255, ``vmin`` and ``vmax``
             are missing, not finite or not ascending for a colormap, or given with stops,
             or matplotlib has no colormap of that name.
         ImportError
