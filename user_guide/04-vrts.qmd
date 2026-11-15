@@ -59,7 +59,7 @@ memory. The others take GDAL's command-line tools, such as `gdalbuildvrt` and
 - Steps chain in memory, so you can combine the preceding workflows, for example mosaicking and
   then reprojecting, without writing files in between.
 - Sources can be on S3, with the same credentials as the rest of freezebase.
-- `write_cog` turns any VRT into a COG in one call.
+- `VRT.to_cog` turns any VRT into a COG in one call.
 
 ## A first example
 
@@ -67,19 +67,18 @@ Mosaic two tiles and save the result as a COG:
 
 ```python
 from freezebase import vrt
-from freezebase.raster import write_cog
 
 mosaic = vrt.mosaic(["a.tif", "b.tif"])
-write_cog(mosaic, "mosaic.tif")
+mosaic.to_cog("mosaic.tif")
 ```
 
-`vrt.mosaic` reads only the headers of the two files. `write_cog` then reads the pixels
+`vrt.mosaic` reads only the headers of the two files. `to_cog` then reads the pixels
 through GDAL and writes the COG without loading the whole raster into memory.
 
 ## Common tasks
 
 Each function below takes file paths or VRTs and returns a new VRT. Files are written only when
-you call `write` or `write_cog`.
+you call `to_vrt`, `to_cog` or `to_raster`.
 
 ### Mosaic tiles
 
@@ -140,11 +139,12 @@ pixel in the output.
 
 ### Chain steps
 
-Each function accepts a VRT wherever it accepts a file, so steps chain without writing files:
+Each function accepts a VRT wherever it accepts a file, so steps chain without writing files.
+`reproject` and `derive` are also methods of a VRT, which take it as the source:
 
 ```python
-web = vrt.reproject(vrt.mosaic(["a.tif", "b.tif"]), crs="EPSG:3857", resolution=20.0)
-db = vrt.derive(web, vrt.PixelFunction.db())
+web = vrt.mosaic(["a.tif", "b.tif"]).reproject(crs="EPSG:3857", resolution=20.0)
+db = web.derive(vrt.PixelFunction.db())
 
 with db.open() as ds:  # nothing is written to disk
     data = ds.read(1)
@@ -155,8 +155,8 @@ change `db`. Reading it needs GDAL 3.11 or newer. To keep a step as its own file
 and pass the returned path on:
 
 ```python
-zone = vrt.mosaic(["a.tif", "b.tif"]).write("zone.vrt")
-web = vrt.reproject(zone, crs="EPSG:3857", resolution=20.0).write("web.vrt")
+zone = vrt.mosaic(["a.tif", "b.tif"]).to_vrt("zone.vrt")
+web = vrt.reproject(zone, crs="EPSG:3857", resolution=20.0).to_vrt("web.vrt")
 ```
 
 Write the steps to files when other programs need to open them, or when the chain is long.
@@ -170,7 +170,7 @@ wraps one raster file. Change what you need, then write it:
 v = vrt.from_raster("scene.tif")
 v.bands[0].description = "VH"
 v.bands[0].nodata = 0.0
-v.write("scene.vrt")
+v.to_vrt("scene.vrt")
 ```
 
 A `VRT` has a CRS, a transform, a size and a list of bands. Each `Band` lists the sources it
@@ -181,29 +181,33 @@ they run. A notebook shows the same summary as HTML, with a map of where the VRT
 ## Saving the result
 
 You can save a VRT as a `.vrt` file, which is small and keeps reading from the sources,
-or as a raster file that contains the pixels. `VRT.write` writes the `.vrt` file and returns its
-path. `write_cog` writes a Cloud Optimized GeoTIFF, with an optional profile:
+or as a raster file that contains the pixels. `VRT.to_vrt` writes the `.vrt` file and returns
+its path. `VRT.to_cog` writes a Cloud Optimized GeoTIFF, with an optional profile:
 
 ```python
-write_cog(mosaic, "mosaic.tif", {"compress": "zstd"})
+mosaic.to_cog("mosaic.tif", {"compress": "zstd"})
 ```
 
-`rewrite_tiff` also takes a VRT, for a format other than COG. It ignores `dtype` and
-`nodata` in the profile. Use `write_cog` to change them.
+`VRT.to_raster` writes any other format GDAL can create, such as a plain GeoTIFF or a PNG
+preview:
+
+```python
+mosaic.to_raster("preview.png", {"dtype": "uint8", "nodata": 0}, driver="PNG")
+```
 
 A raster file has one data type and one nodata value for all its bands. If the VRT's bands
-differ, pass `dtype` or `nodata` in the profile, or `write_cog` raises `ValueError`.
+differ, pass `dtype` or `nodata` in the profile.
 
 - `nodata` replaces each band's nodata value, and pixels that held the old value get the
   new one. `nodata: None` keeps the VRT's values.
 - `dtype` converts every band. Fractions are rounded and values outside the new type's range
   are clipped, so a valid value can end up equal to the nodata value: 300 written as `uint8`
-  with nodata 255 becomes 255 and reads as nodata. `write_cog` raises `ValueError` if a
-  band's nodata value does not fit the new type.
+  with nodata 255 becomes 255 and reads as nodata. Each band's nodata value must fit the
+  new type.
 
 ```python
 dem = vrt.mosaic(["a.tif", "b.tif"])  # float32, nodata NaN
-write_cog(dem, "dem.tif", {"dtype": "int16", "nodata": -9999})
+dem.to_cog("dem.tif", {"dtype": "int16", "nodata": -9999})
 ```
 
 ## VRTs on S3
@@ -213,7 +217,7 @@ endpoint. [Accessing S3](02-accessing-s3.qmd) describes the options.
 
 ### How source paths are saved
 
-In Python, every source path is absolute. When `VRT.write` saves a VRT, it stores a source
+In Python, every source path is absolute. When `VRT.to_vrt` saves a VRT, it stores a source
 path relative to the VRT if both are local or both are in the same S3 bucket. Other sources
 are stored as absolute GDAL paths such as `/vsis3/bucket/tile.tif` or `/vsicurl/https://...`.
 `relative=False` stores every path as absolute.
@@ -251,7 +255,7 @@ To open a written `.vrt` file with Rasterio yourself, wrap it in `VRT.env()`:
 ```python
 import rasterio
 
-path = mosaic.write("mosaic.vrt")
+path = mosaic.to_vrt("mosaic.vrt")
 with mosaic.env(), rasterio.open(path) as ds:
     data = ds.read(1)
 ```
