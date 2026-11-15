@@ -15,7 +15,7 @@ from freezebase._deprecation import deprecated_alias
 from freezebase.vrt import _summary
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from contextlib import AbstractContextManager
     from pathlib import Path
     from typing import Any
@@ -629,6 +629,148 @@ class VRT:
         return derive(
             self, function, dtype=dtype, nodata=nodata, description=description, band=band
         )
+
+    def select(self, bands: Sequence[int]) -> VRT:
+        """Select bands of this VRT, in any order.
+
+        Parameters
+        ----------
+        bands : Sequence[int]
+            1-based bands to keep, in output order; a band may repeat.
+
+        Returns
+        -------
+        VRT
+            A VRT reading the selected bands from a copy of this one, with its band and
+            dataset metadata.
+
+        Raises
+        ------
+        ValueError
+            If ``bands`` is empty or names a band this VRT lacks, or as
+            ``freezebase.vrt.stack``.
+        """
+        from freezebase.vrt._steps import select  # noqa: PLC0415  # _steps imports this module
+
+        return select(self, bands)
+
+    def set(
+        self,
+        *,
+        band_names: list[str] | None = None,
+        color_interp: list[ColorInterp] | None = None,
+        units: list[str] | None = None,
+        tags: Mapping[str, str] | None = None,
+        band_tags: Sequence[Mapping[str, str]] | None = None,
+    ) -> VRT:
+        """Return a copy of this VRT with new metadata; the pixels are unchanged.
+
+        Parameters
+        ----------
+        band_names : list[str] | None, optional
+            Band descriptions, one per band.
+        color_interp : list[ColorInterp] | None, optional
+            Per-band color interpretation.
+        units : list[str] | None, optional
+            Band unit strings, one per band.
+        tags : Mapping[str, str] | None, optional
+            Dataset-level tags, added to the existing ones.
+        band_tags : Sequence[Mapping[str, str]] | None, optional
+            Per-band tags, one mapping per band, added to the existing ones.
+
+        Returns
+        -------
+        VRT
+            The copy; ``None`` arguments leave that metadata as it is.
+
+        Raises
+        ------
+        ValueError
+            If a per-band sequence does not hold one entry per band.
+        """
+        from freezebase.vrt._steps import set_metadata  # noqa: PLC0415  # _steps imports this module
+
+        return set_metadata(
+            self,
+            band_names=band_names,
+            color_interp=color_interp,
+            units=units,
+            tags=tags,
+            band_tags=band_tags,
+        )
+
+    def clip_box(self, minx: float, miny: float, maxx: float, maxy: float) -> VRT:
+        """Cut out the pixels inside a box, without resampling.
+
+        The box edges must lie on this VRT's pixel grid, so the result keeps whole pixels;
+        its transform and size are those of the ``rasterio.windows`` window over the box.
+
+        Parameters
+        ----------
+        minx, miny, maxx, maxy : float
+            Box edges in units of the CRS.
+
+        Returns
+        -------
+        VRT
+            A VRT reading the box from a copy of this one, with its band and dataset
+            metadata.
+
+        Raises
+        ------
+        ValueError
+            If the grid is rotated or not north-up, the box is empty, off the pixel grid
+            or extends beyond this VRT, or as ``freezebase.vrt.stack``.
+        """
+        from freezebase.vrt._steps import clip_box  # noqa: PLC0415  # _steps imports this module
+
+        return clip_box(self, minx, miny, maxx, maxy)
+
+    def colorize(
+        self,
+        colors: Sequence[tuple[float, tuple[int, ...]]] | str | Callable[[np.ndarray], Any],
+        *,
+        vmin: float | None = None,
+        vmax: float | None = None,
+        band: int = 1,
+    ) -> VRT:
+        """Render one band as an RGBA image through a color ramp.
+
+        Colors are interpolated linearly between stops; values below the first stop or
+        above the last take its color. Stop values compare with the stored pixel values,
+        before any scale and offset. Nodata pixels are transparent (all four bands 0),
+        other pixels take the stop's alpha, 255 for an RGB stop.
+
+        Parameters
+        ----------
+        colors : Sequence[tuple[float, tuple[int, ...]]] | str | Colormap
+            ``(value, (r, g, b))`` or ``(value, (r, g, b, a))`` stops with 0-255 channels,
+            in strictly ascending value order; or a matplotlib colormap or its name, which
+            needs matplotlib.
+        vmin, vmax : float | None, optional
+            Values the ends of a colormap map to; required for a colormap, not allowed
+            with stops.
+        band : int, optional
+            1-based band to render.
+
+        Returns
+        -------
+        VRT
+            A four-band ``uint8`` RGBA VRT reading a copy of this one.
+
+        Raises
+        ------
+        ValueError
+            If ``band`` is out of range, there are fewer than two stops, the stops are not
+            ascending or a color is not 3 or 4 values from 0 to 255, ``vmin`` and ``vmax``
+            are missing, not finite or not ascending for a colormap, or given with stops,
+            or matplotlib has no colormap of that name.
+        ImportError
+            If ``colors`` names a colormap and matplotlib is not installed.
+        """
+        from freezebase.vrt._steps import colorize  # noqa: PLC0415  # _steps imports this module
+
+        return colorize(self, colors, vmin=vmin, vmax=vmax, band=band)
 
     def to_xml(self, *, relative_to: UPath | None = None) -> str:
         """Serialize to VRT XML.

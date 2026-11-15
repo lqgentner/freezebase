@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 from xml.etree import ElementTree as ET
 
 import numpy as np
@@ -14,15 +15,29 @@ from rasterio.transform import Affine, from_origin
 from rasterio.vrt import WarpedVRT
 
 from freezebase.vrt import (
+    PixelFunction,
     build_vrt_mosaic,
     create_decibel_vrt,
     create_rgb_vrt,
     create_rgba_vrt,
     create_warped_vrt,
+    derive,
+    from_raster,
+    mosaic,
+    reproject,
+    stack,
 )
 from freezebase.vrt._model import _nodata_equal
 
+if TYPE_CHECKING:
+    from upath import UPath
+
 WIDTH, HEIGHT = 6, 4
+
+# These tests keep the deprecated builders working; TestDeprecations checks the warnings.
+pytestmark = pytest.mark.filterwarnings(
+    r"ignore:freezebase\.vrt\.\w+ is deprecated:DeprecationWarning"
+)
 
 
 def find(element: ET.Element, path: str) -> ET.Element:
@@ -914,3 +929,54 @@ class TestRgbaVrt:
 
         with pytest.raises(ValueError, match="entries"):
             create_rgba_vrt(src, tmp_path / "rgba.vrt", luts=[[(0.0, 0), (1.0, 255)]])
+
+
+def _pixels(path: Path | UPath) -> np.ndarray:
+    with rasterio.open(path) as ds:
+        return ds.read()
+
+
+class TestDeprecations:
+    def test_build_vrt_mosaic(self, tmp_path: Path) -> None:
+        make_tiff(tmp_path / "a.tif", fill=1.0)
+        make_tiff(tmp_path / "b.tif", fill=2.0, origin=(500000 + WIDTH * 10, 5200000))
+        files = [tmp_path / "a.tif", tmp_path / "b.tif"]
+        with pytest.warns(DeprecationWarning, match=r"use freezebase\.vrt\.mosaic\(") as record:
+            build_vrt_mosaic(files, tmp_path / "old.vrt")
+        assert record[0].filename == __file__
+        new = mosaic(files).to_vrt(tmp_path / "new.vrt")
+        assert (tmp_path / "old.vrt").read_text() == new.read_text()
+
+    def test_create_warped_vrt(self, vv_tiff: Path, tmp_path: Path) -> None:
+        with pytest.warns(DeprecationWarning, match=r"use freezebase\.vrt\.reproject\(") as record:
+            create_warped_vrt(vv_tiff, tmp_path / "old.vrt", crs="EPSG:3857", resolution=20.0)
+        assert record[0].filename == __file__
+        warped = reproject(vv_tiff, crs="EPSG:3857", resolution=20.0)
+        new = warped.to_vrt(tmp_path / "new.vrt", relative=False)
+        assert (tmp_path / "old.vrt").read_text() == new.read_text()
+
+    def test_create_decibel_vrt(self, vv_tiff: Path, tmp_path: Path) -> None:
+        with pytest.warns(DeprecationWarning, match=r"use freezebase\.vrt\.derive\(") as record:
+            create_decibel_vrt(vv_tiff, tmp_path / "old.vrt")
+        assert record[0].filename == __file__
+        new = derive(vv_tiff, PixelFunction.db(), band=1).to_vrt(tmp_path / "new.vrt")
+        np.testing.assert_array_equal(_pixels(tmp_path / "old.vrt"), _pixels(new))
+
+    def test_create_rgb_vrt(self, vv_tiff: Path, vh_tiff: Path, tmp_path: Path) -> None:
+        with pytest.warns(DeprecationWarning, match=r"use freezebase\.vrt\.stack") as record:
+            create_rgb_vrt(vv_tiff, vh_tiff, tmp_path / "old.vrt")
+        assert record[0].filename == __file__
+        ratio = derive([vv_tiff, vh_tiff], PixelFunction.div())
+        new = stack([vv_tiff, vh_tiff, ratio], bands=[[1], [1], None]).to_vrt(tmp_path / "new.vrt")
+        np.testing.assert_array_equal(_pixels(tmp_path / "old.vrt"), _pixels(new))
+
+    def test_create_rgba_vrt(self, tmp_path: Path) -> None:
+        src = tmp_path / "src.tif"
+        make_uint16_tiff(src)
+        luts = [[(0.0, 0), (24.0, 255)], [(0.0, 255), (24.0, 0)], [(0.0, 9), (24.0, 9)]]
+        with pytest.warns(DeprecationWarning, match=r"colorize") as record:
+            create_rgba_vrt(src, tmp_path / "old.vrt", luts=luts)
+        assert record[0].filename == __file__
+        stops = [(v, (r, g, b)) for (v, r), (_, g), (_, b) in zip(*luts, strict=True)]
+        new = from_raster(src).colorize(stops).to_vrt(tmp_path / "new.vrt")
+        np.testing.assert_array_equal(_pixels(tmp_path / "old.vrt"), _pixels(new))

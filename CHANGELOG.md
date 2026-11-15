@@ -21,6 +21,11 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 - `VRT.to_cog` writes a COG like `write_cog`, including `checksum=True`, and
   `VRT.to_raster` writes a single file in any format GDAL can create, such as GTiff or
   PNG, applying the profile's `dtype` and `nodata` as `to_cog` does.
+- New `VRT` steps, each returning a new VRT: `select(bands)` picks and reorders bands,
+  `set(...)` changes band names, color interpretation, units and tags,
+  `clip_box(minx, miny, maxx, maxy)` cuts out whole pixels, and
+  `colorize(colors, vmin=..., vmax=...)` renders one band as RGBA through color stops or a
+  matplotlib colormap, with nodata transparent.
 
 ### Changed
 
@@ -39,6 +44,23 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 - `VRT.write` is renamed `VRT.to_vrt`, next to `to_cog` and `to_raster`. `write` still
   works but emits a `DeprecationWarning`; replace `v.write("a.vrt")` with
   `v.to_vrt("a.vrt")`.
+- The functions that write a VRT file in one call emit a `DeprecationWarning`. Build the
+  VRT, then write it with `to_vrt`:
+  - `build_vrt_mosaic(files, out, bounds=b)` becomes
+    `vrt.mosaic(files, bounds=b).to_vrt(out)`.
+  - `create_warped_vrt(src, out, crs=c, resolution=r, ...)` becomes
+    `vrt.reproject(src, crs=c, resolution=r, ...).to_vrt(out, relative=False)`.
+  - `create_decibel_vrt(src, out)` becomes
+    `vrt.derive(src, vrt.PixelFunction.db(), band=1).to_vrt(out)`; use
+    `PixelFunction.db(20)` for `from_intensity=False`.
+  - `create_rgb_vrt(vv, vh, out)` becomes
+    `vrt.stack([vv, vh, vrt.derive([vv, vh], vrt.PixelFunction.div())], bands=[[1], [1], None]).to_vrt(out)`;
+    use `PixelFunction.diff()` for `decibel_scale=True`. The bands keep the inputs' data
+    type and nodata instead of becoming `float32` with NaN.
+  - `create_rgba_vrt(src, out, luts=luts)` becomes
+    `vrt.from_raster(src).colorize([(value, (r, g, b)), ...]).to_vrt(out)`, with one stop
+    per value that the three tables share. For other tables, such as
+    `src_bands=(1, 2, 3)`, build bands with `Source(lut=...)` directly.
 
 ### Fixed
 
