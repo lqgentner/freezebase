@@ -20,8 +20,8 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 - `VRT.reproject` and `VRT.derive` take the VRT as the source, so steps chain:
   `vrt.mosaic(tiles).reproject(crs=...).derive(...)`.
 - `VRT.to_cog` writes a COG like `write_cog`, including `checksum=True`, and
-  `VRT.to_raster` writes any format GDAL can create, such as GTiff or PNG, applying the
-  profile's `dtype` and `nodata` as `to_cog` does.
+  `VRT.to_raster` writes a single file in any format GDAL can create, such as GTiff or
+  PNG, applying the profile's `dtype` and `nodata` as `to_cog` does.
 
 ### Changed
 
@@ -43,13 +43,12 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ### Fixed
 
-- `write_cog` keeps a CRS that GeoTIFF cannot encode, such as UTM with ellipsoidal heights.
-  GDAL stores it in a `.aux.xml` sidecar, which now lands next to the COG (and is uploaded
-  to S3) instead of being left behind as a hidden temporary file, leaving the COG without
-  a CRS.
-- `rewrite_tiff` of a `VRT` to a format that keeps metadata in a sidecar file, such as
-  PNG, writes the `.aux.xml` beside the destination instead of leaving it behind as a
-  hidden temporary file.
+- `write_cog` and `rewrite_tiff` raise `RasterWriteError` for a CRS that GeoTIFF cannot
+  store, such as UTM with ellipsoidal heights, instead of writing a file without a CRS. A
+  compound CRS such as `EPSG:32632+3855` (UTM with EGM2008 heights) is stored as before.
+- `write_cog` and `rewrite_tiff` no longer leave GDAL's `.aux.xml` sidecar behind as a
+  hidden temporary file. Writers write no sidecar files, so what a format cannot hold,
+  such as a PNG's CRS, is dropped.
 - The error `reproject` raises when PROJ cannot find a geoid grid suggests `PROJ_NETWORK=ON`
   or `PROJ_DATA` instead of `python -m pyproj sync`, whose grids Rasterio's PROJ never
   searches.
