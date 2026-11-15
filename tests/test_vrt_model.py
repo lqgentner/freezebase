@@ -1149,7 +1149,8 @@ class TestDiscovery:
         foreign.write_text(FOREIGN_VRT)
         with reproject(foreign, crs="EPSG:3857", resolution=20.0).open() as ds:
             assert ds.count == 1
-        create_warped_vrt(foreign, tmp_path / "w.vrt", crs="EPSG:3857", resolution=20.0)
+        with pytest.warns(DeprecationWarning, match="is deprecated"):
+            create_warped_vrt(foreign, tmp_path / "w.vrt", crs="EPSG:3857", resolution=20.0)
 
     def test_unmapped_vsi_sources_are_skipped(self, tmp_path: Path) -> None:
         tile = UPath(make_tiff(tmp_path / "a.tif"))

@@ -7,6 +7,7 @@ PROJ('s)?
 Rasterio('s)?
 VRT(s|'s)?
 [Bb]ackscatter
+[Cc]olormaps?
 [Dd]ocstrings?
 [Mm]osaicking
 [Pp]athlib

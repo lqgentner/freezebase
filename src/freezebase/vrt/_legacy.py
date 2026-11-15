@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from rasterio.enums import ColorInterp, Resampling
 from upath import UPath
 
+from freezebase._deprecation import deprecated
 from freezebase.vrt._builders import derive, mosaic, stack
 from freezebase.vrt._grid import raster_info
 from freezebase.vrt._model import VRT, Band, PixelFunction, Source
@@ -26,6 +27,10 @@ type AnyPath = str | Path | UPath
 _RGB_BANDS = 3
 
 
+@deprecated(
+    "freezebase.vrt.create_decibel_vrt",
+    "freezebase.vrt.derive(src_path, PixelFunction.db(), band=1).to_vrt(output_vrt)",
+)
 def create_decibel_vrt(
     src_path: AnyPath,
     output_vrt: AnyPath,
@@ -33,6 +38,9 @@ def create_decibel_vrt(
     from_intensity: bool = True,
 ) -> None:
     """Create a VRT applying a decibel conversion.
+
+    Deprecated: use ``derive(src_path, PixelFunction.db(), band=1).to_vrt(output_vrt)``,
+    with ``PixelFunction.db(20)`` for amplitude.
 
     Parameters
     ----------
@@ -59,6 +67,7 @@ def _geotransform(transform: Affine) -> str:
     return ", ".join(str(v) for v in transform.to_gdal())
 
 
+@deprecated("freezebase.vrt.create_rgb_vrt", "freezebase.vrt.stack with freezebase.vrt.derive")
 def create_rgb_vrt(
     vv_path: AnyPath,
     vh_path: AnyPath,
@@ -67,6 +76,8 @@ def create_rgb_vrt(
     decibel_scale: bool = False,
 ) -> None:
     """Create a 3-band RGB VRT from VV and VH rasters.
+
+    Deprecated: use ``stack`` with a ``derive`` band, then ``VRT.to_vrt``.
 
     Blue is VV/VH for linear inputs and VV-VH for decibel inputs.
 
@@ -129,6 +140,10 @@ def create_rgb_vrt(
     vrt.to_vrt(output_vrt)
 
 
+@deprecated(
+    "freezebase.vrt.build_vrt_mosaic",
+    "freezebase.vrt.mosaic(files, bounds=bounds).to_vrt(dst_vrt)",
+)
 def build_vrt_mosaic(
     files: Sequence[AnyPath],
     dst_vrt: AnyPath,
@@ -136,6 +151,8 @@ def build_vrt_mosaic(
     bounds: BoundingBox | tuple[float, float, float, float] | None = None,
 ) -> None:
     """Mosaic aligned tiles into a VRT.
+
+    Deprecated: use ``mosaic(files, bounds=bounds).to_vrt(dst_vrt)``.
 
     Sources on the VRT's store are referenced relative to it, which keeps the pair
     relocatable.
@@ -163,6 +180,10 @@ def build_vrt_mosaic(
     mosaic(files, bounds=bounds).to_vrt(dst_vrt)
 
 
+@deprecated(
+    "freezebase.vrt.create_warped_vrt",
+    "freezebase.vrt.reproject(src_path, crs=crs, ...).to_vrt(output_vrt, relative=False)",
+)
 def create_warped_vrt(
     src_path: AnyPath,
     output_vrt: AnyPath,
@@ -176,6 +197,8 @@ def create_warped_vrt(
     nodata: float | None = None,
 ) -> None:
     """Create a warped VRT reprojecting a raster onto a fixed target grid.
+
+    Deprecated: use ``reproject(src_path, crs=crs, ...).to_vrt(output_vrt, relative=False)``.
 
     With ``snap``, the grid origin grows outward to a multiple of
     ``resolution``, so warps of several sources land on one common grid. Heights are
@@ -229,6 +252,10 @@ def create_warped_vrt(
     ).to_vrt(output_vrt, relative=False)
 
 
+@deprecated(
+    "freezebase.vrt.create_rgba_vrt",
+    "freezebase.vrt.from_raster(src_path).colorize(...).to_vrt(output_vrt)",
+)
 def create_rgba_vrt(
     src_path: AnyPath,
     output_vrt: AnyPath,
@@ -237,6 +264,9 @@ def create_rgba_vrt(
     src_bands: Sequence[int] = (1, 1, 1),
 ) -> None:
     """Create a 4-band uint8 RGBA VRT colour-mapping a raster through lookup tables.
+
+    Deprecated: use ``from_raster(src_path).colorize(...).to_vrt(output_vrt)``; for a
+    table per source band, build ``Source(lut=...)`` bands directly.
 
     Each colour band reads one source band through its own piecewise-linear
     ``LUT``. Alpha is 255 except at NODATA, which is skipped and so stays at

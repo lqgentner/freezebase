@@ -124,11 +124,6 @@ reference:
         - vrt.derive
         - vrt.from_raster
         - vrt.read
-        - vrt.create_decibel_vrt
-        - vrt.create_rgb_vrt
-        - vrt.create_rgba_vrt
-        - vrt.create_warped_vrt
-        - vrt.build_vrt_mosaic
 
     - title: Downloads
       desc: HTTP downloads with UPath destinations
@@ -192,6 +187,16 @@ reference:
         - pandas_utils.clean_names
         - progress.create_progress
         - progress.track_progress
+
+    - title: Deprecated
+      desc: >-
+        Superseded functions, kept for now; each warns and names its replacement
+      contents:
+        - vrt.build_vrt_mosaic
+        - vrt.create_warped_vrt
+        - vrt.create_decibel_vrt
+        - vrt.create_rgb_vrt
+        - vrt.create_rgba_vrt
 
 # Jupyter Kernel
 # --------------
