@@ -95,14 +95,14 @@ class TestStack:
     def test_rejects_different_grids(self, tmp_path: Path) -> None:
         a = make_tiff(tmp_path / "a.tif")
         b = make_tiff(tmp_path / "b.tif", origin=(500010.0, 5200000.0))
-        with pytest.raises(ValueError, match="use warp"):
+        with pytest.raises(ValueError, match="use reproject"):
             stack([a, b])
 
     def test_rejects_different_crs_and_size(self, tmp_path: Path) -> None:
         a = make_tiff(tmp_path / "a.tif")
-        with pytest.raises(ValueError, match="use warp"):
+        with pytest.raises(ValueError, match="use reproject"):
             stack([a, make_tiff(tmp_path / "b.tif", crs="EPSG:32633")])
-        with pytest.raises(ValueError, match="use warp"):
+        with pytest.raises(ValueError, match="use reproject"):
             stack([a, make_tiff(tmp_path / "c.tif", size=(7, 4))])
 
     def test_nests_vrt_inputs(self, tmp_path: Path) -> None:
@@ -267,7 +267,7 @@ class TestMosaicAligned:
         a = from_raster(make_tiff(tmp_path / "a.tif", count=2))
         b = make_tiff(tmp_path / "b.tif", count=2, origin=(500060.0, 5200000.0))
         vrt = mosaic([a, b])
-        assert vrt.bands[1].sources[0].path is a
+        assert vrt.bands[1].sources[0].path == a
         assert vrt.bands[1].sources[0].band == 2
         # As in from_raster: a nested VRT gets no file header.
         assert vrt.bands[1].sources[0].properties is None
@@ -805,3 +805,35 @@ class TestComplex:
         ):
             with pytest.raises(ValueError, match=r"complex data types are not supported.*c\.tif"):
                 build()
+
+
+class TestSnapshot:
+    """A VRT input is copied, so editing it afterwards leaves the result unchanged."""
+
+    @pytest.mark.parametrize("build", ["mosaic", "stack", "derive"])
+    def test_later_edit_does_not_reach_the_result(self, tmp_path: Path, build: str) -> None:
+        a = from_raster(make_tiff(tmp_path / "a.tif"))
+        if build == "mosaic":
+            vrt = mosaic([a])
+        elif build == "stack":
+            vrt = stack([a])
+        else:
+            vrt = derive(a, PixelFunction.db())
+        before = vrt.to_xml()
+        a.bands[0].nodata = 9.0
+        a.bands[0].sources[0].band = 2
+        # Previously nested by reference, so the edit changed the result's XML.
+        assert vrt.to_xml() == before
+
+    def test_one_copy_per_input(self, tmp_path: Path) -> None:
+        a = from_raster(make_tiff(tmp_path / "a.tif"))
+        vrt = stack([a, a])
+        first, second = (band.sources[0].path for band in vrt.bands)
+        assert first is second
+        assert first is not a
+        assert vrt.sources == [first]
+
+    def test_bands_of_one_input_share_its_copy(self, tmp_path: Path) -> None:
+        a = from_raster(make_tiff(tmp_path / "a.tif", count=2))
+        vrt = mosaic([a])
+        assert vrt.bands[0].sources[0].path is vrt.bands[1].sources[0].path

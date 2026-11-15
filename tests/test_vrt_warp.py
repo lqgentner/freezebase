@@ -15,10 +15,11 @@ from rasterio.crs import CRS
 from rasterio.enums import Resampling
 from rasterio.env import PROJDataFinder
 from rasterio.transform import Affine
-from rasterio.warp import calculate_default_transform, reproject
+import rasterio.warp
+from rasterio.warp import calculate_default_transform
 from upath import UPath
 
-from freezebase.vrt import VRT, _warp, from_raster, mosaic, read, warp
+from freezebase.vrt import VRT, _warp, from_raster, mosaic, read, reproject
 from freezebase.vrt._warp import _has_vertical, _set_transformer
 from tests.rasters import make_tiff
 
@@ -111,7 +112,7 @@ def no_grids(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 class TestGrid:
     def test_reprojects_onto_the_requested_grid(self, tmp_path: Path) -> None:
         src = make_tiff(tmp_path / "utm.tif", fill=1.0)
-        w = warp(src, crs="EPSG:3857", resolution=20.0)
+        w = reproject(src, crs="EPSG:3857", resolution=20.0)
         assert w.warp is not None
         assert w.warp.source == UPath(src)
         with w.open() as ds:
@@ -124,7 +125,7 @@ class TestGrid:
 
     def test_anisotropic_resolution(self, tmp_path: Path) -> None:
         src = make_tiff(tmp_path / "utm.tif")
-        w = warp(src, crs="EPSG:3857", resolution=(10, 20))
+        w = reproject(src, crs="EPSG:3857", resolution=(10, 20))
         assert (w.transform.a, w.transform.e) == (10, -20)
         assert w.transform.c % 10 == pytest.approx(0.0)
         assert w.transform.f % 20 == pytest.approx(0.0)
@@ -135,7 +136,7 @@ class TestGrid:
             transform, width, height = calculate_default_transform(
                 ds.crs, "EPSG:4326", ds.width, ds.height, *ds.bounds
             )
-        w = warp(src, crs="EPSG:4326")
+        w = reproject(src, crs="EPSG:4326")
         assert w.transform == transform
         assert (w.width, w.height) == (width, height)
 
@@ -147,19 +148,19 @@ class TestGrid:
         with rasterio.open(like) as ds:
             grid = (ds.crs, ds.transform, ds.width, ds.height)
         for ref in (like, from_raster(like)):
-            w = warp(src, like=ref)
+            w = reproject(src, like=ref)
             assert (w.crs, w.transform, w.width, w.height) == grid
 
     def test_bounds_fix_the_extent_per_axis(self, tmp_path: Path) -> None:
         src = make_tiff(tmp_path / "utm.tif")
         bounds = (800000.0, 5800000.0, 800000.0 + 40 * 20.0, 5800000.0 + 30 * 10.0)
-        w = warp(src, crs="EPSG:3857", resolution=(20.0, 10.0), bounds=bounds)
+        w = reproject(src, crs="EPSG:3857", resolution=(20.0, 10.0), bounds=bounds)
         assert (w.width, w.height) == (40, 30)
         assert w.transform == Affine(20.0, 0.0, bounds[0], 0.0, -10.0, bounds[3])
 
     def test_snap_false_keeps_the_reprojected_extent(self, tmp_path: Path) -> None:
         src = make_tiff(tmp_path / "utm.tif")
-        w = warp(src, crs="EPSG:3857", resolution=20.0, snap=False)
+        w = reproject(src, crs="EPSG:3857", resolution=20.0, snap=False)
         assert w.transform.c % 20.0 != pytest.approx(0.0)
 
     @pytest.mark.parametrize("resolution", [0.0, (10.0, -1.0)])
@@ -168,33 +169,33 @@ class TestGrid:
     ) -> None:
         src = make_tiff(tmp_path / "utm.tif")
         with pytest.raises(ValueError, match="resolution must be positive"):
-            warp(src, crs="EPSG:3857", resolution=resolution)
+            reproject(src, crs="EPSG:3857", resolution=resolution)
 
     def test_rejects_bounds_off_the_resolution_grid(self, tmp_path: Path) -> None:
         src = make_tiff(tmp_path / "utm.tif")
         # 20.5 units wide at a 20-unit resolution: not a whole pixel count.
         bounds = (800000.0, 5800000.0, 800000.0 + 20.5, 5800000.0 + 40.0)
         with pytest.raises(ValueError, match="whole number"):
-            warp(src, crs="EPSG:3857", resolution=20.0, bounds=bounds)
+            reproject(src, crs="EPSG:3857", resolution=20.0, bounds=bounds)
 
     def test_bounds_need_a_resolution(self, tmp_path: Path) -> None:
         src = make_tiff(tmp_path / "utm.tif")
         with pytest.raises(ValueError, match="bounds needs a resolution"):
-            warp(src, crs="EPSG:3857", bounds=(0.0, 0.0, 20.0, 20.0))
+            reproject(src, crs="EPSG:3857", bounds=(0.0, 0.0, 20.0, 20.0))
 
     def test_needs_crs_or_like(self, tmp_path: Path) -> None:
         src = make_tiff(tmp_path / "utm.tif")
         with pytest.raises(ValueError, match="crs"):
-            warp(src)
+            reproject(src)
 
     def test_like_excludes_other_grid_arguments(self, tmp_path: Path) -> None:
         src = make_tiff(tmp_path / "utm.tif")
         with pytest.raises(ValueError, match="like"):
-            warp(src, like=src, crs="EPSG:3857")
+            reproject(src, like=src, crs="EPSG:3857")
         with pytest.raises(ValueError, match="like"):
-            warp(src, like=src, resolution=20.0)
+            reproject(src, like=src, resolution=20.0)
         with pytest.raises(ValueError, match="like"):
-            warp(src, like=src, bounds=(0.0, 0.0, 1.0, 1.0))
+            reproject(src, like=src, bounds=(0.0, 0.0, 1.0, 1.0))
 
     def test_source_without_crs_is_named(self, tmp_path: Path) -> None:
         src = tmp_path / "nocrs.tif"
@@ -210,17 +211,17 @@ class TestGrid:
         ) as ds:
             ds.write(np.zeros((1, 2, 2), dtype="uint8"))
         with pytest.raises(ValueError, match=r"nocrs\.tif.*src_crs"):
-            warp(src, crs="EPSG:3857", resolution=20.0)
+            reproject(src, crs="EPSG:3857", resolution=20.0)
         with pytest.raises(ValueError, match=r"VRT input #1.*src_crs"):
-            warp(from_raster(src), crs="EPSG:3857", resolution=20.0)
+            reproject(from_raster(src), crs="EPSG:3857", resolution=20.0)
         with pytest.raises(ValueError, match=r"like \(nocrs\.tif\) has no CRS"):
-            warp(make_tiff(tmp_path / "utm.tif"), like=src)
+            reproject(make_tiff(tmp_path / "utm.tif"), like=src)
 
     def test_src_crs_overrides_the_source_crs(self, tmp_path: Path) -> None:
         mislabelled = make_tiff(tmp_path / "a.tif", crs="EPSG:32632")
         labelled = make_tiff(tmp_path / "b.tif", crs="EPSG:32633")
-        w = warp(mislabelled, src_crs="EPSG:32633", crs="EPSG:4326")
-        expected = warp(labelled, crs="EPSG:4326")
+        w = reproject(mislabelled, src_crs="EPSG:32633", crs="EPSG:4326")
+        expected = reproject(labelled, crs="EPSG:4326")
         assert w.transform == expected.transform
         assert w.warp is not None
         source_srs = ET.fromstring(w.warp.options_xml).find(".//SourceSRS")  # noqa: S314
@@ -233,10 +234,10 @@ class TestGrid:
 class TestPixels:
     def test_matches_rasterio_reproject(self, tmp_path: Path) -> None:
         src = make_tiff(tmp_path / "utm.tif", size=(12, 9))
-        w = warp(src, crs="EPSG:3857", resolution=7.0, resampling=Resampling.nearest)
+        w = reproject(src, crs="EPSG:3857", resolution=7.0, resampling=Resampling.nearest)
         expected = np.full((w.height, w.width), np.nan, dtype="float32")
         with rasterio.open(src) as ds:
-            reproject(
+            rasterio.warp.reproject(
                 ds.read(1),
                 expected,
                 src_transform=ds.transform,
@@ -264,14 +265,14 @@ class TestPixels:
             transform=Affine(10.0, 0.0, 500000.0, 0.0, -10.0, 5200000.0),
         ) as ds:
             ds.write(np.array([[[1, 2], [1, 2]]], dtype="uint16"))
-        w = warp(src, crs="EPSG:32632", resolution=20.0)
+        w = reproject(src, crs="EPSG:32632", resolution=20.0)
         assert w.bands[0].dtype == "uint16"
         with w.open() as ds:
             assert ds.read(1).tolist() == [[2]]
 
     def test_dtype_and_nodata_override(self, tmp_path: Path) -> None:
         src = make_tiff(tmp_path / "counts.tif", dtype="uint16", nodata=0)
-        w = warp(src, crs="EPSG:32632", resolution=20.0, dtype="float32", nodata=math.nan)
+        w = reproject(src, crs="EPSG:32632", resolution=20.0, dtype="float32", nodata=math.nan)
         assert w.bands[0].dtype == "float32"
         assert w.bands[0].nodata is not None
         assert math.isnan(w.bands[0].nodata)
@@ -288,28 +289,28 @@ class TestNodataFits:
         src = make_tiff(tmp_path / "f.tif")
         # Previously NaN pixels became valid zeros under no nodata at all.
         with pytest.raises(ValueError, match=r"nodata nan .*uint8"):
-            warp(src, crs="EPSG:32632", resolution=10.0, dtype="uint8")
-        w = warp(src, crs="EPSG:32632", resolution=10.0, dtype="uint8", nodata=255)
+            reproject(src, crs="EPSG:32632", resolution=10.0, dtype="uint8")
+        w = reproject(src, crs="EPSG:32632", resolution=10.0, dtype="uint8", nodata=255)
         assert (w.bands[0].dtype, w.bands[0].nodata) == ("uint8", 255)
 
     def test_nan_nodata_for_integer_source_raises(self, tmp_path: Path) -> None:
         src = make_tiff(tmp_path / "u.tif", dtype="uint16", nodata=0)
         # Previously rasterio promoted the warp to float64 without a word.
         with pytest.raises(ValueError, match=r"nodata nan .*uint16"):
-            warp(src, crs="EPSG:32632", resolution=10.0, nodata=math.nan)
+            reproject(src, crs="EPSG:32632", resolution=10.0, nodata=math.nan)
         with pytest.raises(ValueError, match=r"nodata nan .*int16"):
-            warp(src, crs="EPSG:32632", resolution=10.0, dtype="int16", nodata=math.nan)
+            reproject(src, crs="EPSG:32632", resolution=10.0, dtype="int16", nodata=math.nan)
 
     def test_out_of_range_nodata_raises(self, tmp_path: Path) -> None:
         src = make_tiff(tmp_path / "i.tif", dtype="int16", nodata=-1)
         with pytest.raises(ValueError, match=r"nodata -1.* uint8"):
-            warp(src, crs="EPSG:32632", resolution=10.0, dtype="uint8")
+            reproject(src, crs="EPSG:32632", resolution=10.0, dtype="uint8")
         with pytest.raises(ValueError, match=r"nodata 0.5 .*int16"):
-            warp(src, crs="EPSG:32632", resolution=10.0, nodata=0.5)
+            reproject(src, crs="EPSG:32632", resolution=10.0, nodata=0.5)
 
     def test_integer_source_keeps_its_dtype_with_integer_nodata(self, tmp_path: Path) -> None:
         src = make_tiff(tmp_path / "u.tif", dtype="uint16", nodata=0)
-        w = warp(src, crs="EPSG:32632", resolution=10.0, nodata=65535)
+        w = reproject(src, crs="EPSG:32632", resolution=10.0, nodata=65535)
         assert (w.bands[0].dtype, w.bands[0].nodata) == ("uint16", 65535)
 
 
@@ -317,7 +318,7 @@ class TestSources:
     def test_warp_of_an_in_memory_mosaic_round_trips(self, tmp_path: Path) -> None:
         a = make_tiff(tmp_path / "a.tif", fill=1.0)
         b = make_tiff(tmp_path / "b.tif", fill=2.0, origin=(500060.0, 5200000.0))
-        w = warp(mosaic([a, b]), crs="EPSG:4326", resolution=1e-4)
+        w = reproject(mosaic([a, b]), crs="EPSG:4326", resolution=1e-4)
         assert w.warp is not None
         assert isinstance(w.warp.source, VRT)
         assert w.warp.source == mosaic([a, b])
@@ -329,7 +330,7 @@ class TestSources:
 
     def test_multi_band_source_keeps_every_band(self, tmp_path: Path) -> None:
         src = make_tiff(tmp_path / "rgb.tif", count=3)
-        w = warp(src, crs="EPSG:4326", resolution=1e-4)
+        w = reproject(src, crs="EPSG:4326", resolution=1e-4)
         assert len(w.bands) == 3
         # GDAL marks a pixel-interleaved source so all bands warp in one pass.
         assert w.metadata_domains == {"IMAGE_STRUCTURE": {"INTERLEAVE": "PIXEL"}}
@@ -343,7 +344,7 @@ class TestSources:
         with rasterio.open(src, "r+") as ds:
             ds.scales, ds.offsets = (0.01,), (5.0,)
         # Previously raised "warp cannot keep the source's scale/offset".
-        w = warp(src, crs="EPSG:4326", resolution=1e-4)
+        w = reproject(src, crs="EPSG:4326", resolution=1e-4)
         assert (w.bands[0].scale, w.bands[0].offset) == (0.01, 5.0)
         assert read(w.write(tmp_path / "w.vrt")) == w
         with w.open() as ds:
@@ -354,7 +355,7 @@ class TestSources:
         with rasterio.open(src, "r+") as ds:
             ds.write_colormap(1, {0: (255, 0, 0, 255), 1: (0, 255, 0, 255)})
         with pytest.raises(ValueError, match=r"pal\.tif.*colour table"):
-            warp(src, crs="EPSG:4326", resolution=1e-4)
+            reproject(src, crs="EPSG:4326", resolution=1e-4)
 
     def test_other_open_errors_are_not_relabelled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -368,18 +369,29 @@ class TestSources:
 
         monkeypatch.setattr(VRT, "open", fail)
         with pytest.raises(rasterio.errors.RasterioIOError, match="disk on fire"):
-            warp(src, crs="EPSG:4326", resolution=1e-4)
+            reproject(src, crs="EPSG:4326", resolution=1e-4)
 
-    def test_vrt_source_is_the_callers(self, tmp_path: Path) -> None:
+    def test_vrt_source_is_a_snapshot(self, tmp_path: Path) -> None:
         source = mosaic([make_tiff(tmp_path / "a.tif")])
-        w = warp(source, crs="EPSG:4326", resolution=1e-4)
+        w = reproject(source, crs="EPSG:4326", resolution=1e-4)
+        source.bands[0].nodata = 9.0
         assert w.warp is not None
-        assert w.warp.source is source
+        assert isinstance(w.warp.source, VRT)
+        # Previously the caller's own object, so the edit reached the warped VRT.
+        assert w.warp.source is not source
+        assert w.warp.source.bands[0].nodata != 9.0
+
+    def test_warp_is_a_deprecated_alias(self, tmp_path: Path) -> None:
+        src = make_tiff(tmp_path / "a.tif")
+        with pytest.warns(DeprecationWarning, match=r"freezebase\.vrt\.reproject"):
+            got = _warp.warp(src, crs="EPSG:4326", resolution=1e-4)
+        assert got == reproject(src, crs="EPSG:4326", resolution=1e-4)
+        assert _warp.warp.__name__ == "warp"
 
 
 class TestOptions:
     def test_written_warp_keeps_its_options(self, tmp_path: Path) -> None:
-        w = warp(make_tiff(tmp_path / "utm.tif"), crs="EPSG:4326", resolution=1e-4)
+        w = reproject(make_tiff(tmp_path / "utm.tif"), crs="EPSG:4326", resolution=1e-4)
         text = w.write(tmp_path / "w.vrt").read_text()
         # A transformer option: GDAL rejects it as a warp option.
         assert '<Option key="ALLOW_BALLPARK">NO</Option>' in text
@@ -387,7 +399,7 @@ class TestOptions:
         assert "<MaxError>0.125</MaxError>" in text
 
     def test_allow_ballpark_writes_no_option(self, tmp_path: Path) -> None:
-        w = warp(
+        w = reproject(
             make_tiff(tmp_path / "utm.tif"),
             crs="EPSG:4326",
             resolution=1e-4,
@@ -398,7 +410,7 @@ class TestOptions:
 
     def test_tolerance_number_overrides_auto(self, tmp_path: Path) -> None:
         src = make_tiff(tmp_path / "utm.tif", size=(12, 9))
-        exact = warp(
+        exact = reproject(
             src, crs="EPSG:3857", resolution=7.0, resampling=Resampling.nearest, tolerance=0
         )
         assert exact.warp is not None
@@ -407,7 +419,7 @@ class TestOptions:
         assert read(exact.write(tmp_path / "w.vrt")) == exact
         expected = np.full((exact.height, exact.width), np.nan, dtype="float32")
         with rasterio.open(src) as ds:
-            reproject(
+            rasterio.warp.reproject(
                 ds.read(1),
                 expected,
                 src_transform=ds.transform,
@@ -421,19 +433,19 @@ class TestOptions:
             )
         with exact.open() as ds:
             assert np.array_equal(ds.read(1), expected, equal_nan=True)
-        approx = warp(src, crs="EPSG:3857", resolution=7.0, tolerance=0.5)
+        approx = reproject(src, crs="EPSG:3857", resolution=7.0, tolerance=0.5)
         assert approx.warp is not None
         assert "<MaxError>0.5</MaxError>" in approx.warp.options_xml
 
     @pytest.mark.parametrize("tolerance", [-1.0, math.nan])
     def test_rejects_negative_or_nan_tolerance(self, tmp_path: Path, tolerance: float) -> None:
         with pytest.raises(ValueError, match=r"tolerance must be .* a non-negative number"):
-            warp(make_tiff(tmp_path / "utm.tif"), crs="EPSG:4326", tolerance=tolerance)
+            reproject(make_tiff(tmp_path / "utm.tif"), crs="EPSG:4326", tolerance=tolerance)
 
     @pytest.mark.usefixtures("no_grids")
     def test_ballpark_is_refused(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="PROJ_NETWORK=ON") as info:
-            warp(
+            reproject(
                 make_tiff(tmp_path / "utm.tif", fill=0.0),
                 src_crs="EPSG:32632+3855",
                 crs="EPSG:4979",
@@ -491,7 +503,7 @@ class TestOptions:
 
     @pytest.mark.usefixtures("no_grids")
     def test_allow_ballpark_opts_out(self, tmp_path: Path) -> None:
-        w = warp(
+        w = reproject(
             make_tiff(tmp_path / "utm.tif", fill=0.0),
             src_crs="EPSG:32632+3855",
             crs="EPSG:4979",
@@ -509,7 +521,7 @@ class TestOptions:
 class TestVerticalShift:
     def test_compound_to_3d_gives_ellipsoidal_heights(self, proj_grids: Path, dem: Path) -> None:
         with _grid_env(proj_grids):
-            w = warp(dem, crs="EPSG:4979", resampling=Resampling.nearest)
+            w = reproject(dem, crs="EPSG:4979", resampling=Resampling.nearest)
             got = _shift_matches_pyproj(w, dem, "EPSG:2056+5728", "EPSG:4979")
         assert w.warp is not None
         assert w.warp.vertical_shift
@@ -517,7 +529,7 @@ class TestVerticalShift:
 
     def test_compound_to_compound(self, proj_grids: Path, dem: Path) -> None:
         with _grid_env(proj_grids):
-            w = warp(dem, crs="EPSG:2056+5729", resampling=Resampling.nearest)
+            w = reproject(dem, crs="EPSG:2056+5729", resampling=Resampling.nearest)
             got = _shift_matches_pyproj(w, dem, "EPSG:2056+5728", "EPSG:2056+5729")
         assert 0.05 < got.min() < got.max() < 1.0
 
@@ -531,7 +543,7 @@ class TestVerticalShift:
             crs="EPSG:4979",
         )
         with _grid_env(proj_grids):
-            w = warp(src, crs="EPSG:2056+5728", resampling=Resampling.nearest)
+            w = reproject(src, crs="EPSG:2056+5728", resampling=Resampling.nearest)
             got = _shift_matches_pyproj(w, src, "EPSG:4979", "EPSG:2056+5728")
         assert -54.0 < got.min() < got.max() < -51.0
 
@@ -544,7 +556,7 @@ class TestVerticalShift:
 
         monkeypatch.setattr(_warp, "calculate_default_transform", no_grid)
         with pytest.raises(ValueError, match="vertical") as info:
-            warp(dem, crs="EPSG:4326")
+            reproject(dem, crs="EPSG:4326")
         assert "pass a 3D or compound crs, or a 2D src_crs" in str(info.value)
 
     def test_multi_band_shift_raises(
@@ -560,15 +572,15 @@ class TestVerticalShift:
         target = make_tiff(tmp_path / "target.tif", origin=(7.7, 46.6), crs="EPSG:4979")
         # Previously the height shift was added to every band.
         with pytest.raises(ValueError, match="single-band") as info:
-            warp(two, like=target)
+            reproject(two, like=target)
         assert "2D src_crs" in str(info.value)
         monkeypatch.setattr(_warp, "calculate_default_transform", no_grid)
         with pytest.raises(ValueError, match="single-band"):
-            warp(two, crs="EPSG:4979")
+            reproject(two, crs="EPSG:4979")
 
     def test_2d_source_into_vertical_target_raises(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="vertical") as info:
-            warp(make_tiff(tmp_path / "utm.tif"), crs="EPSG:4979")
+            reproject(make_tiff(tmp_path / "utm.tif"), crs="EPSG:4979")
         assert "pass a 3D or compound src_crs, or a 2D crs" in str(info.value)
 
     @staticmethod
@@ -600,7 +612,7 @@ class TestVerticalShift:
     ) -> None:
         src = self._scaled_dem(tmp_path / "s.tif", 0.1, 2.0)
         # Previously GDAL's warped VRT of a compound-CRS source dropped them.
-        w = warp(src, src_crs=src_crs, crs=crs, resolution=20.0 if src_crs is None else None)
+        w = reproject(src, src_crs=src_crs, crs=crs, resolution=20.0 if src_crs is None else None)
         assert (w.bands[0].scale, w.bands[0].offset) == (0.1, 2.0)
         assert read(w.write(tmp_path / "w.vrt")) == w
         with w.open() as ds:
@@ -618,10 +630,10 @@ class TestVerticalShift:
         src = self._scaled_dem(tmp_path / "s.tif", scale, offset)
         # Previously the shift was added to the raw stored values.
         with pytest.raises(ValueError, match="scale or offset"):
-            warp(src, crs="EPSG:4979")
+            reproject(src, crs="EPSG:4979")
 
     def test_2d_src_crs_keeps_heights(self, dem: Path) -> None:
-        w = warp(dem, src_crs="EPSG:2056", crs="EPSG:4326")
+        w = reproject(dem, src_crs="EPSG:2056", crs="EPSG:4326")
         assert w.warp is not None
         assert not w.warp.vertical_shift
         with w.open() as ds:
@@ -631,20 +643,20 @@ class TestVerticalShift:
 
     def test_auto_tolerance_is_exact_with_a_shift(self, proj_grids: Path, dem: Path) -> None:
         with _grid_env(proj_grids):
-            w = warp(dem, crs="EPSG:4979")
-            approx = warp(dem, crs="EPSG:4979", tolerance=0.5)
+            w = reproject(dem, crs="EPSG:4979")
+            approx = reproject(dem, crs="EPSG:4979", tolerance=0.5)
         assert w.warp is not None
         assert w.warp.vertical_shift
         assert "ApproxTransformer" not in w.to_xml()
         assert "<MaxError>0.5</MaxError>" in approx.to_xml()
-        plain = warp(dem, src_crs="EPSG:2056", crs="EPSG:4326")
+        plain = reproject(dem, src_crs="EPSG:2056", crs="EPSG:4326")
         assert "<MaxError>0.125</MaxError>" in plain.to_xml()
 
     def test_written_shift_reopens_with_the_shift(
         self, proj_grids: Path, dem: Path, tmp_path: Path
     ) -> None:
         with _grid_env(proj_grids):
-            w = warp(dem, crs="EPSG:4979", resampling=Resampling.nearest)
+            w = reproject(dem, crs="EPSG:4979", resampling=Resampling.nearest)
             text = w.write(tmp_path / "w.vrt").read_text()
             reread = read(tmp_path / "w.vrt")
             with w.open() as ds, reread.open() as written:
@@ -691,7 +703,7 @@ class TestVerticalShift:
         assert _has_vertical(CRS.from_user_input(crs)) is expected
 
     def test_same_crs_applies_no_shift(self, dem: Path) -> None:
-        w = warp(dem, crs="EPSG:2056+5728", resolution=200.0)
+        w = reproject(dem, crs="EPSG:2056+5728", resolution=200.0)
         assert w.warp is not None
         assert not w.warp.vertical_shift
         assert "<MaxError>0.125</MaxError>" in w.warp.options_xml
@@ -705,14 +717,14 @@ class TestVerticalShift:
             crs="EPSG:2056+5729",
         )
         with _grid_env(proj_grids):
-            w = warp(dem, like=like, resampling=Resampling.nearest)
+            w = reproject(dem, like=like, resampling=Resampling.nearest)
             got = _shift_matches_pyproj(w, dem, "EPSG:2056+5728", "EPSG:2056+5729")
         assert w.warp is not None
         assert w.warp.vertical_shift
         assert 0.05 < got.min() < got.max() < 1.0
         flat = make_tiff(tmp_path / "flat.tif", crs="EPSG:2056")
         with pytest.raises(ValueError, match="2D src_crs"):
-            warp(dem, like=flat)
+            reproject(dem, like=flat)
 
 
 class TestVerticalUnits:
@@ -726,7 +738,7 @@ class TestVerticalUnits:
             crs="EPSG:2263+6360",
         )
         # Ballpark makes the geoid shift zero, so only the unit conversion remains.
-        w = warp(src, crs="EPSG:4979", allow_ballpark=True)
+        w = reproject(src, crs="EPSG:4979", allow_ballpark=True)
         reread = read(w.write(tmp_path / "w.vrt"))
         assert reread == w
         for vrt in (w, reread):
@@ -753,7 +765,7 @@ class TestVerticalUnits:
             fill=100 * FTUS,
             crs="EPSG:4979",
         )
-        w = warp(src, crs="EPSG:2263+6360", allow_ballpark=True)
+        w = reproject(src, crs="EPSG:2263+6360", allow_ballpark=True)
         with w.open() as ds:
             data = ds.read(1)
         assert np.isfinite(data).any()
@@ -770,7 +782,7 @@ class TestVerticalUnits:
         )
         with rasterio.open(src, "r+") as ds:
             ds.units = ("metre",)
-        w = warp(src, crs="EPSG:4979", allow_ballpark=True)
+        w = reproject(src, crs="EPSG:4979", allow_ballpark=True)
         with w.open() as ds:
             data = ds.read(1)
         np.testing.assert_allclose(data[np.isfinite(data)], 100.0, rtol=1e-6)
@@ -785,7 +797,7 @@ class TestVerticalUnits:
             crs="EPSG:2056",
         )
         with _grid_env(proj_grids):
-            w = warp(src, src_crs=LN02_FTUS, crs="EPSG:4979", resampling=Resampling.nearest)
+            w = reproject(src, src_crs=LN02_FTUS, crs="EPSG:4979", resampling=Resampling.nearest)
             got = _shift_matches_pyproj(w, src, LN02_FTUS, "EPSG:4979", z=100.0)
         # 100 ftUS plus the 51-54 m geoid undulation.
         assert 81.0 < got.min() < got.max() < 85.0

@@ -179,6 +179,6 @@ ax.set(title=f"MGRS {square.mgrs_code}", xlabel="easting (m)", ylabel="northing 
 ax.ticklabel_format(style="plain")
 ```
 
-To do the same without holding the result in memory, `vrt.warp` builds a VRT onto the square
+To do the same without holding the result in memory, `vrt.reproject` builds a VRT onto the square
 that `write_cog()` can write out (see [Reproject onto a grid](04-vrts.qmd#reproject-onto-a-grid)).
 For full signatures, see the [API reference](../reference/index.qmd).

@@ -219,6 +219,8 @@ filterwarnings = [
     "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning",
     # affine 3 deprecates `*` for matrix products, which rasterio still uses internally.
     "ignore:Use `@` matmul instead of `\\*` mul operator:PendingDeprecationWarning:rasterio\\..*",
+    # freezebase must not call its own deprecated names; tests check them with pytest.warns.
+    "error::DeprecationWarning:freezebase",
 ]
 
 [tool.coverage.run]

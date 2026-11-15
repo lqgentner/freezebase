@@ -50,7 +50,7 @@ from freezebase.s3 import (
     resolve_endpoint_url,
     s3_env,
 )
-from freezebase.vrt import VRT, create_warped_vrt, mosaic, read, warp
+from freezebase.vrt import VRT, create_warped_vrt, mosaic, read, reproject
 
 _ENDPOINT = os.getenv("FREEZEBASE_TEST_S3_ENDPOINT")
 _KEY = os.getenv("FREEZEBASE_TEST_S3_KEY")
@@ -222,7 +222,7 @@ class TestWarpS3:
     def test_path_source_keeps_its_storage_options(self, s3_key: UPath) -> None:
         write_cog(np.full((HEIGHT, WIDTH), 1.0, dtype=np.float32), s3_key, _RASTER_PROFILE)
 
-        w = warp(s3_key, crs="EPSG:3857", resolution=20.0)
+        w = reproject(s3_key, crs="EPSG:3857", resolution=20.0)
 
         assert w.warp is not None
         source = w.warp.source
@@ -239,7 +239,7 @@ class TestWarpS3:
         }
         write_cog(np.full((HEIGHT, WIDTH), 2.0, dtype=np.float32), s3_key2, shifted)
 
-        w = warp(mosaic([s3_key, s3_key2]), crs="EPSG:3857", resolution=20.0)
+        w = reproject(mosaic([s3_key, s3_key2]), crs="EPSG:3857", resolution=20.0)
 
         assert w.warp is not None
         assert isinstance(w.warp.source, VRT)
@@ -306,7 +306,7 @@ class TestVrtOnS3:
     def test_source_files_follow_a_local_vrt_to_s3(self, prefix: UPath, tmp_path: Path) -> None:
         tiles = self._upload_tiles(prefix)
         remote = mosaic(tiles).write(prefix / "m.vrt")
-        local = warp(remote, crs="EPSG:3857", resolution=20.0).write(tmp_path / "warped.vrt")
+        local = reproject(remote, crs="EPSG:3857", resolution=20.0).write(tmp_path / "warped.vrt")
 
         files = read(local).source_files(storage_options=prefix.storage_options)
 
@@ -316,7 +316,7 @@ class TestVrtOnS3:
     def test_open_through_two_local_vrts_to_s3(self, prefix: UPath, tmp_path: Path) -> None:
         tiles = self._upload_tiles(prefix)
         warped = [
-            warp(tile, crs="EPSG:3857", resolution=20.0).write(tmp_path / f"w{i}.vrt")
+            reproject(tile, crs="EPSG:3857", resolution=20.0).write(tmp_path / f"w{i}.vrt")
             for i, tile in enumerate(tiles)
         ]
         # Building reads the local VRTs' headers, which reach S3 too.

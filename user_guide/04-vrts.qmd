@@ -95,20 +95,20 @@ pixel sizes need `resolution`: `"finest"` takes the smallest pixel size, and a t
 
 ### Reproject onto a grid
 
-`vrt.warp` reprojects a raster. Give it a target CRS and pixel size, and optionally an
+`vrt.reproject` reprojects a raster. Give it a target CRS and pixel size, and optionally an
 extent. This puts a scene onto an MGRS square:
 
 ```python
 from freezebase.mgrs import MGRSGrid
 
 square = MGRSGrid(aoi)[0]
-on_square = vrt.warp("scene.tif", crs=square.crs, resolution=10.0, bounds=square.boundingbox)
+on_square = vrt.reproject("scene.tif", crs=square.crs, resolution=10.0, bounds=square.boundingbox)
 ```
 
-Without `resolution`, `warp` picks a pixel size close to the source's. `like="other.tif"`
+Without `resolution`, `reproject` picks a pixel size close to the source's. `like="other.tif"`
 copies the CRS, extent and pixel size of another raster instead.
 
-`warp` keeps the source's data type, so averaging `uint16` values rounds the result. Pass
+`reproject` keeps the source's data type, so averaging `uint16` values rounds the result. Pass
 `dtype="float32"` to keep the fractions.
 
 ### Stack bands from several files
@@ -120,7 +120,7 @@ rgb = vrt.stack(["red.tif", "green.tif", "blue.tif"], band_names=["red", "green"
 ```
 
 `bands` picks which bands to take from each file, for example `bands=[[1], [2, 3]]`. Files
-on different grids need `warp` first.
+on different grids need `reproject` first.
 
 ### Convert values
 
@@ -143,19 +143,20 @@ pixel in the output.
 Each function accepts a VRT wherever it accepts a file, so steps chain without writing files:
 
 ```python
-web = vrt.warp(vrt.mosaic(["a.tif", "b.tif"]), crs="EPSG:3857", resolution=20.0)
+web = vrt.reproject(vrt.mosaic(["a.tif", "b.tif"]), crs="EPSG:3857", resolution=20.0)
 db = vrt.derive(web, vrt.PixelFunction.db())
 
 with db.open() as ds:  # nothing is written to disk
     data = ds.read(1)
 ```
 
-The final VRT contains the earlier steps, and reading it needs GDAL 3.11 or newer. To keep a
-step as its own file, write it and pass the returned path on:
+The final VRT contains a copy of each earlier step, so editing `web` afterwards does not
+change `db`. Reading it needs GDAL 3.11 or newer. To keep a step as its own file, write it
+and pass the returned path on:
 
 ```python
 zone = vrt.mosaic(["a.tif", "b.tif"]).write("zone.vrt")
-web = vrt.warp(zone, crs="EPSG:3857", resolution=20.0).write("web.vrt")
+web = vrt.reproject(zone, crs="EPSG:3857", resolution=20.0).write("web.vrt")
 ```
 
 Write the steps to files when other programs need to open them, or when the chain is long.
@@ -263,12 +264,12 @@ A height is measured from a reference surface, its vertical datum. Many DEMs giv
 relative to a geoid. The Copernicus DEM, for example, uses EGM2008. GNSS receivers give
 heights relative to the ellipsoid. Geoid and ellipsoid heights differ by tens of meters.
 
-`warp` converts heights when both the source CRS and the target `crs` have a vertical datum
+`reproject` converts heights when both the source CRS and the target `crs` have a vertical datum
 (a compound CRS such as `EPSG:4326+3855`) or are 3D (such as `EPSG:4979`). There is no
 extra option:
 
 ```python
-ellipsoidal = vrt.warp("copdem.tif", crs="EPSG:4979", src_crs="EPSG:4326+3855")
+ellipsoidal = vrt.reproject("copdem.tif", crs="EPSG:4979", src_crs="EPSG:4326+3855")
 ```
 
 `src_crs` adds the vertical datum when the file does not record it.
@@ -297,7 +298,7 @@ Then point Rasterio at the folder:
 import rasterio
 
 with rasterio.Env(PROJ_DATA="proj_data"):
-    ellipsoidal = vrt.warp("copdem.tif", crs="EPSG:4979", src_crs="EPSG:4326+3855")
+    ellipsoidal = vrt.reproject("copdem.tif", crs="EPSG:4979", src_crs="EPSG:4326+3855")
 ```
 
 PROJ remembers for the rest of the process whether it found a grid. Set `PROJ_DATA` or
@@ -305,7 +306,7 @@ PROJ remembers for the rest of the process whether it found a grid. Set `PROJ_DA
 
 ### When the conversion fails
 
-- If PROJ cannot find the grid, `warp` raises `ValueError` instead of ignoring the geoid.
+- If PROJ cannot find the grid, `reproject` raises `ValueError` instead of ignoring the geoid.
   `allow_ballpark=True` accepts PROJ's fallback, which leaves the heights unchanged.
 - Either both CRSs need a vertical datum or a third axis, or neither does. A mix raises
   `ValueError`. To keep the heights as they are, pass a 2D `src_crs` or a 2D `crs`.

@@ -217,4 +217,4 @@ ax.set_axis_off()
 ## Next steps
 
 [Reading and writing rasters](03-rasters.qmd) reprojects a public DEM onto square `32TMS35`.
-[VRTs](04-vrts.qmd) does the same without writing an intermediate file, using `vrt.warp`.
+[VRTs](04-vrts.qmd) does the same without writing an intermediate file, using `vrt.reproject`.
