@@ -14,6 +14,7 @@ from typing import ClassVar, NoReturn
 
 from affine import Affine
 import fsspec
+import pyproj
 import pytest
 import rasterio
 from rasterio.crs import CRS
@@ -448,6 +449,10 @@ class TestWarpLabels:
 
 
 class TestLabels:
+    def test_3d_crs_without_authority_names_its_height(self) -> None:
+        wkt = pyproj.CRS("EPSG:32632").to_3d().to_wkt()
+        assert _crs.crs_label(CRS.from_wkt(wkt)) == "WGS 84 / UTM zone 32N + ellipsoidal height"
+
     def test_custom_crs_is_named_and_identified_once(self) -> None:
         _crs._wkt_label.cache_clear()
         custom = VRT(CUSTOM_TM, GRID, 6, 4, [Band("float32", [Source(UPath("/d/a.tif"))])])
