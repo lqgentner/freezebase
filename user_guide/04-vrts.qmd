@@ -2,117 +2,203 @@
 title: "VRTs"
 ---
 
-## What a VRT is
+```{python}
+#| echo: false
+#| warning: false
+import warnings
+
+warnings.filterwarnings("ignore")
+```
+
+`freezebase.vrt` builds GDAL virtual rasters in Python and chains them into one lazy recipe.
+These lines mosaic two Copernicus DEM tiles, put them onto MGRS square `32TMS25` around the
+Eiger, Mönch and Jungfrau, and write a COG:
+
+```{python}
+from rasterio.enums import Resampling
+
+from freezebase import vrt
+from freezebase.mgrs import MGRSGeoBox
+
+square = MGRSGeoBox.from_mgrs("32TMS25", resolution=20.0)
+names = [f"Copernicus_DSM_COG_10_N46_00_E{lon:03d}_00_DEM" for lon in (7, 8)]
+tiles = [f"https://copernicus-dem-30m.s3.amazonaws.com/{n}/{n}.tif" for n in names]
+
+dem = (
+    vrt.mosaic(tiles)
+    .reproject(
+        src_crs="EPSG:4326+3855",  # WGS 84 with heights above the EGM2008 geoid
+        crs=f"EPSG:{square.crs.epsg}+3855",  # UTM zone 32N, same heights
+        resolution=20.0,
+        bounds=square.boundingbox,
+        resampling=Resampling.bilinear,
+    )
+    .set(band_names=["height"], units=["m"])
+)
+dem.to_cog("32TMS25.tif")
+dem
+```
+
+Each tile is a 42 MB file, and neither was downloaded in full. GDAL read the blocks under
+the square, about 4 MB. The tiles don't record their vertical datum, so `src_crs` adds it,
+and the COG's CRS records EGM2008 as the vertical datum of its heights.
+
+```{python}
+#| code-fold: true
+#| fig-cap: "The COG: Copernicus DEM GLO-30 on MGRS square 32TMS25 as heights above the EGM2008 geoid, shaded from the northwest."
+#| warning: false
+import matplotlib.patheffects as pe
+import matplotlib.pyplot as plt
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import LightSource, Normalize
+from pyproj import Transformer
+import rasterio
+
+with rasterio.open("32TMS25.tif") as src:
+    height = src.read(1)
+
+left, bottom, right, top = square.boundingbox
+norm = Normalize(vmin=height.min(), vmax=height.max())
+shaded = LightSource(azdeg=315, altdeg=45).shade(
+    height, cmap=plt.get_cmap("cividis"), norm=norm, blend_mode="soft", dx=20.0, dy=20.0
+)
+
+fig, ax = plt.subplots(figsize=(6.5, 5.5))
+ax.imshow(shaded, extent=(left, right, bottom, top))
+fig.colorbar(
+    ScalarMappable(norm=norm, cmap="cividis"), ax=ax, label="height above EGM2008 (m)", shrink=0.85
+)
+to_utm = Transformer.from_crs("EPSG:4326", square.crs.epsg, always_xy=True)
+peaks = {"Eiger": (8.0053, 46.5775), "Mönch": (7.9967, 46.5586), "Jungfrau": (7.9631, 46.5367)}
+for peak, (lon, lat) in peaks.items():
+    x, y = to_utm.transform(lon, lat)
+    ax.plot(x, y, marker="^", color="white", markeredgecolor="black", markersize=7)
+    ax.annotate(
+        peak,
+        (x, y),
+        xytext=(6, 4),
+        textcoords="offset points",
+        color="white",
+        path_effects=[pe.withStroke(linewidth=2.5, foreground="black")],
+    )
+ax.set(title=f"MGRS {square.mgrs_code}", xlabel="easting (m)", ylabel="northing (m)")
+ax.ticklabel_format(style="plain")
+```
+
+[VRT recipes](05-vrt-recipes.qmd#convert-heights-between-vertical-datums) shows how
+`reproject` converts the heights to another vertical datum, such as the WGS 84 ellipsoid.
+
+## How it works
+
+### Nothing is read until you write
+
+`vrt.mosaic` read the headers of the two tiles. `reproject` worked out the target grid and
+the transformation from the headers and the CRSs. Neither read a pixel. `to_cog` then ran
+the whole recipe through GDAL, which read the source blocks each output block needs and
+wrote the COG without loading the whole raster into memory.
+
+### What a VRT is
 
 A [GDAL virtual raster](https://gdal.org/en/stable/drivers/raster/vrt.html) (VRT) is a small
-XML file that describes a raster built from other rasters. It contains no pixels of its own.
-Instead, it lists the source files and says how to combine them: how to mosaic them, which
-bands to use and how to reproject them. GDAL and Rasterio open a VRT like any other raster
-and read from the sources only when you ask for pixels.
-
-This VRT mosaics two tiles side by side (shortened):
+XML document that describes a raster built from other rasters. It contains no pixels of its
+own, only the source files and how to combine them. GDAL and Rasterio open a VRT like any
+other raster and read the sources only when asked for pixels. This is the XML of `dem`,
+shortened and unescaped:
 
 ```xml
-<VRTDataset rasterXSize="2000" rasterYSize="1000">
-  <SRS>PROJCS["WGS 84 / UTM zone 32N", ...]</SRS>
-  <GeoTransform>600000.0, 10.0, 0.0, 5200000.0, 0.0, -10.0</GeoTransform>
-  <VRTRasterBand dataType="Float32" band="1">
-    <ComplexSource>
-      <SourceFilename relativeToVRT="1">a.tif</SourceFilename>
-      <SourceBand>1</SourceBand>
-      <DstRect xOff="0" yOff="0" xSize="1000" ySize="1000" />
-    </ComplexSource>
-    <ComplexSource>
-      <SourceFilename relativeToVRT="1">b.tif</SourceFilename>
-      <SourceBand>1</SourceBand>
-      <DstRect xOff="1000" yOff="0" xSize="1000" ySize="1000" />
-    </ComplexSource>
-  </VRTRasterBand>
+<VRTDataset rasterXSize="500" rasterYSize="500" subClass="VRTWarpedDataset">
+  <SRS>COMPD_CS["WGS 84 / UTM zone 32N + EGM2008 height", ...]</SRS>
+  <GeoTransform>420000.0, 20.0, 0.0, 5160000.0, 0.0, -20.0</GeoTransform>
+  <GDALWarpOptions>
+    <ResampleAlg>Bilinear</ResampleAlg>
+    <SourceDataset relativeToVRT="0">
+      <VRTDataset rasterXSize="7200" rasterYSize="3600">
+        <VRTRasterBand dataType="Float32" band="1">
+          <SimpleSource>
+            <SourceFilename>/vsicurl/https://.../Copernicus_DSM_COG_10_N46_00_E007_00_DEM.tif</SourceFilename>
+            <DstRect xOff="0" yOff="0" xSize="3600" ySize="3600" />
+          </SimpleSource>
+          <SimpleSource>
+            <SourceFilename>/vsicurl/https://.../Copernicus_DSM_COG_10_N46_00_E008_00_DEM.tif</SourceFilename>
+            <DstRect xOff="3600" yOff="0" xSize="3600" ySize="3600" />
+          </SimpleSource>
+        </VRTRasterBand>
+      </VRTDataset>
+    </SourceDataset>
+    <Transformer>...</Transformer>
+  </GDALWarpOptions>
 </VRTDataset>
 ```
 
-`DstRect` places each tile in the output, in pixels: `a.tif` fills the left half and
-`b.tif` the right half.
+The outer VRT is the reprojection, and its grid is the MGRS square. The mosaic is nested
+inside it, where `DstRect` places the two 3600 × 3600 pixel tiles side by side. `dem.to_xml()` returns the full document.
 
-## When a VRT helps
+### When to write a COG
 
-A VRT is useful when you need a combined or reprojected raster but don't want to write a
-copy of it:
+Every read of a VRT goes back to the sources and computes the result again. A VRT suits a
+result you read once, or a recipe you want to inspect and edit. Write a COG when you
+read the same pixels often, when the sources are remote or the chain is long, or when other
+people need a plain raster.
 
-- Mosaicking tiles into one raster.
-- Reprojecting a raster onto a target grid, such as an [MGRS square](01-mgrs-grid.qmd).
-- Stacking bands from separate files, for example an RGB raster from three single-band files.
-- Converting values, such as backscatter from linear power to decibels.
+## Compared with GDAL tools
 
-Every read goes back to the sources and recalculates the output. If you read the same pixels
-often, or chain many steps, write the result to a COG once and read that.
+GDAL's command-line tools and Rasterio also build VRTs, and GDAL 3.11's
+`gdal raster pipeline` chains steps in one command. freezebase writes the same format, so
+any GDAL program can open its `.vrt` files. It adds a Python object you can inspect and
+edit between steps, without the GDAL Python bindings, and S3 credentials that come with
+the paths.
 
-## What freezebase adds
+| | Builds | Result | Chaining | S3 credentials | Vertical datums |
+|---|---|---|---|---|---|
+| `gdalbuildvrt` | mosaics, band stacks | `.vrt` file | through files | GDAL settings or environment variables | — |
+| `gdalwarp -of VRT` | reprojections | `.vrt` file | through files | GDAL settings or environment variables | converts heights |
+| `gdal_translate -of VRT` | band selections, subsets, rescaling | `.vrt` file | through files | GDAL settings or environment variables | — |
+| Rasterio `WarpedVRT` | reprojections | open dataset, in memory | wraps another open dataset | `rasterio.Env` | through GDAL warp options you set |
+| `freezebase.vrt` | mosaics, stacks, reprojections, pixel functions, band selection, clips, color ramps | Python object, written as `.vrt`, COG or other raster | in memory | taken from the sources' paths | converts heights |
 
-Rasterio opens VRTs but builds only one kind, the `WarpedVRT`, which exists only in
-memory. The others take GDAL's command-line tools, such as `gdalbuildvrt` and
-`gdalwarp -of VRT`, or the GDAL Python bindings. freezebase builds them in Python:
+## Building blocks
 
-- It needs only Rasterio, not the GDAL Python bindings.
-- A VRT is a Python object, so you can inspect and edit its bands, nodata values and
-  sources before writing it.
-- Steps chain in memory, so you can combine the preceding workflows, for example mosaicking and
-  then reprojecting, without writing files in between.
-- Sources can be on S3, with the same credentials as the rest of freezebase.
-- `VRT.to_cog` turns any VRT into a COG in one call.
-
-## A first example
-
-Mosaic two tiles and save the result as a COG:
-
-```python
-from freezebase import vrt
-
-mosaic = vrt.mosaic(["a.tif", "b.tif"])
-mosaic.to_cog("mosaic.tif")
-```
-
-`vrt.mosaic` reads only the headers of the two files. `to_cog` then reads the pixels
-through GDAL and writes the COG without loading the whole raster into memory.
-
-## Common tasks
-
-Each function below takes file paths or VRTs and returns a new VRT. Files are written only when
-you call `to_vrt`, `to_cog` or `to_raster`.
+`mosaic`, `stack`, `reproject` and `derive` are functions that take file paths or VRTs.
+`reproject`, `derive` and the other steps below are also methods of a VRT, with the VRT as
+the source. The steps return a new VRT, and a VRT passed in is copied, so editing it later
+does not change the result. The deprecated `create_*_vrt` and `build_vrt_mosaic` functions
+each have a replacement listed in the
+[changelog](https://github.com/lqgentner/freezebase/blob/main/CHANGELOG.md).
 
 ### Mosaic tiles
 
-`vrt.mosaic` places tiles on one grid. Where tiles overlap, the pixels of the later tile in the list are used.
+Use `vrt.mosaic` for tiles of one dataset that share a CRS, such as the Copernicus DEM
+tiles. Where tiles overlap, the pixels of the later tile in the list are used.
 
 ```python
 mosaic = vrt.mosaic(["a.tif", "b.tif"], band_names=["VV"])
 ```
 
-The tiles need the same CRS, band count, data types and nodata values. Tiles with different
+The tiles need the same band count, data types and nodata values. Tiles with different
 pixel sizes need `resolution`: `"finest"` takes the smallest pixel size, and a tuple
-`(x, y)` sets it. `bounds` fixes the extent, which otherwise is the union of the tile extents.
+`(x, y)` sets it. `bounds` fixes the extent, which otherwise is the union of the tiles.
 
 ### Reproject onto a grid
 
-`vrt.reproject` reprojects a raster. Give it a target CRS and pixel size, and optionally an
-extent. This puts a scene onto an MGRS square:
+Use `reproject` to put a raster onto another CRS or grid, such as an
+[MGRS square](01-mgrs-grid.qmd):
 
 ```python
-from freezebase.mgrs import MGRSGrid
-
-square = MGRSGrid(aoi)[0]
 on_square = vrt.reproject("scene.tif", crs=square.crs, resolution=10.0, bounds=square.boundingbox)
 ```
 
-Without `resolution`, `reproject` picks a pixel size close to the source's. `like="other.tif"`
-copies the CRS, extent and pixel size of another raster instead.
+Without `resolution`, `reproject` picks a pixel size close to the source's.
+`like="other.tif"` copies the CRS, extent and pixel size of another raster. The default
+resampling is `average`, which suits a coarser target. For a finer target, as at the top
+of this page, pass `Resampling.bilinear` or `Resampling.cubic`. `reproject` keeps the
+source's data type, so averaging `uint16` values rounds the result: pass `dtype="float32"` to keep the
+fractions. When the source and target CRS both carry heights, `reproject` also converts
+them; see [VRT recipes](05-vrt-recipes.qmd#convert-heights-between-vertical-datums).
 
-`reproject` keeps the source's data type, so averaging `uint16` values rounds the result. Pass
-`dtype="float32"` to keep the fractions.
+### Stack bands
 
-### Stack bands from several files
-
-`vrt.stack` puts the bands of several rasters on the same grid into one raster, in order:
+Use `vrt.stack` to combine bands from files on one grid, such as an RGB raster from three
+single-band files:
 
 ```python
 rgb = vrt.stack(["red.tif", "green.tif", "blue.tif"], band_names=["red", "green", "blue"])
@@ -121,10 +207,10 @@ rgb = vrt.stack(["red.tif", "green.tif", "blue.tif"], band_names=["red", "green"
 `bands` picks which bands to take from each file, for example `bands=[[1], [2, 3]]`. Files
 on different grids need `reproject` first.
 
-### Convert values
+### Derive values
 
-`vrt.derive` converts values with one of GDAL's built-in pixel functions. It can also
-combine several inputs, for example into a ratio:
+Use `derive` to compute values with one of GDAL's built-in pixel functions, such as
+decibels from linear backscatter or a ratio of two rasters:
 
 ```python
 db = vrt.derive("sigma0.tif", vrt.PixelFunction.db())
@@ -132,57 +218,96 @@ ratio = vrt.derive(["vv.tif", "vh.tif"], vrt.PixelFunction.div())
 ```
 
 `PixelFunction` covers decibels, ratios, differences, the mean, the minimum and the
-maximum, among others. With one input file, `derive` converts each of its bands. With
-several, it computes one band from band 1 of each. The result is `float32` with NaN as
-nodata unless you pass `dtype` and `nodata`, and a nodata pixel in any input gives a nodata
-pixel in the output.
+maximum, among others. With one input, `derive` converts each of its bands. With several,
+it computes one band from band 1 of each. The result is `float32` with NaN as nodata unless
+you pass `dtype` and `nodata`, and a nodata pixel in any input gives a nodata pixel in the
+output.
 
-### Chain steps
+### Select and label bands
 
-Each function accepts a VRT wherever it accepts a file, so steps chain without writing files.
-`reproject` and `derive` are also methods of a VRT, which take it as the source:
+Use `select` to keep some bands, in any order, and `set` to change band names, color
+interpretation or units, or to add tags, without touching the pixels:
 
 ```python
-web = vrt.mosaic(["a.tif", "b.tif"]).reproject(crs="EPSG:3857", resolution=20.0)
-db = web.derive(vrt.PixelFunction.db())
+scene = vrt.from_raster("scene.tif")
+false_color = scene.select([4, 3, 2]).set(band_names=["nir", "red", "green"])
+```
 
-with db.open() as ds:  # nothing is written to disk
+### Clip a box
+
+Use `clip_box` to cut out part of a VRT without resampling. The box edges must lie on the
+pixel grid:
+
+```python
+part = dem.clip_box(422000, 5152000, 426000, 5156000)
+```
+
+### Colorize
+
+Use `colorize` to turn one band into a red, green, blue and alpha image through a color
+ramp, for a preview or a map tile. It takes color stops or a matplotlib colormap, and
+nodata and NaN pixels become transparent:
+
+```python
+preview = dem.colorize([(1000, (0, 0, 255)), (4000, (255, 255, 255))])
+preview = dem.colorize("viridis", vmin=1000, vmax=4000)
+```
+
+## Chaining and saving
+
+Every step accepts a VRT, so steps chain into one recipe that nothing reads until you write
+it:
+
+```{mermaid}
+flowchart LR
+  tiles[(tiles)] --> mosaic --> reproject --> derive --> cog[(COG)]
+```
+
+```python
+db = (
+    vrt.mosaic(["a.tif", "b.tif"])
+    .reproject(crs=square.crs, resolution=10.0, bounds=square.boundingbox)
+    .derive(vrt.PixelFunction.db())
+)
+db.to_cog("db.tif")
+
+with db.open() as ds:  # or read it without writing a file
     data = ds.read(1)
 ```
 
-The final VRT contains a copy of each earlier step, so editing `web` afterwards does not
-change `db`. Reading it needs GDAL 3.11 or newer. To keep a step as its own file, write it
-and pass the returned path on:
+The final VRT contains a copy of each earlier step, so editing an earlier VRT afterwards
+does not change `db`. A chain needs GDAL 3.11 or newer.
+
+### Write a VRT or a raster
+
+A VRT can be saved in three ways:
+
+- `to_vrt("x.vrt")` writes the `.vrt` file, which is small and keeps reading from the
+  sources. It returns the path, which later steps accept, so a long chain can be split into
+  files that other programs open.
+- `to_cog("x.tif")` writes a Cloud Optimized GeoTIFF, with an optional profile such as
+  `{"compress": "zstd"}`.
+- `to_raster("x.png", driver="PNG")` writes any other format GDAL can create, such as a
+  plain GeoTIFF or a PNG preview.
+
+`to_cog` and `to_raster` also take band names, color interpretation, units and tags.
+
+### Data type and nodata
+
+A raster file has one data type and one nodata value for all its bands. If the VRT's bands
+differ, pass `dtype` or `nodata` in the profile:
 
 ```python
-zone = vrt.mosaic(["a.tif", "b.tif"]).to_vrt("zone.vrt")
-web = vrt.reproject(zone, crs="EPSG:3857", resolution=20.0).to_vrt("web.vrt")
+dem.to_cog("dem.tif", {"dtype": "int16", "nodata": -9999})
 ```
 
-Write the steps to files when other programs need to open them, or when the chain is long.
+- `nodata` replaces each band's nodata value, and pixels that held the old value get the
+  new one.
+- `dtype` converts every band. Fractions are rounded and values outside the new type's range
+  are clipped, so a valid value can end up equal to the nodata value: 300 written as `uint8`
+  with nodata 255 becomes 255 and reads as nodata.
 
-### Select, label, clip and color
-
-These steps are methods of a VRT. Each returns a new VRT and leaves the original unchanged:
-
-- `select([3, 2, 1])` keeps the listed bands, in that order.
-- `set(band_names=["VV"])` changes band names, color interpretation or units, or adds tags,
-  but not the pixels.
-- `clip_box(minx, miny, maxx, maxy)` cuts out a box whose edges lie on the pixel grid,
-  without resampling.
-- `colorize` turns one band into a red, green, blue and alpha image through a color ramp.
-  Pixels holding the nodata value, and NaN pixels, become transparent.
-
-```python
-dem = vrt.mosaic(["a.tif", "b.tif"])
-part = dem.clip_box(500000, 5190000, 510000, 5200000)
-preview = part.colorize([(0, (0, 0, 255)), (3000, (255, 255, 255))])
-preview.to_raster("preview.png", driver="PNG")
-```
-
-`colorize` also takes a matplotlib colormap, such as `colorize("viridis", vmin=0, vmax=3000)`.
-
-### Inspect and edit a VRT
+## Inspect and edit
 
 `vrt.read` loads a VRT file, including one written by `gdalbuildvrt`, and `vrt.from_raster`
 wraps one raster file. Change what you need, then write it:
@@ -194,42 +319,11 @@ v.bands[0].nodata = 0.0
 v.to_vrt("scene.vrt")
 ```
 
-A `VRT` has a CRS, a transform, a size and a list of bands. Each `Band` lists the sources it
+A `VRT` has a CRS, a transform, a size and a list of bands, and `bounds`, `res`, `shape`,
+`dtypes` and `nodatavals` describe it as Rasterio would. Each `Band` lists the sources it
 reads from, and `VRT.sources` lists them for the whole VRT. Printing a VRT summarizes its
-grid, its bands and the steps that build it, such as a mosaic or a reprojection. A notebook
-shows the same summary as HTML.
-
-## Saving the result
-
-You can save a VRT as a `.vrt` file, which is small and keeps reading from the sources,
-or as a raster file that contains the pixels. `VRT.to_vrt` writes the `.vrt` file and returns
-its path. `VRT.to_cog` writes a Cloud Optimized GeoTIFF, with an optional profile:
-
-```python
-mosaic.to_cog("mosaic.tif", {"compress": "zstd"})
-```
-
-`VRT.to_raster` writes any other format GDAL can create, such as a plain GeoTIFF or a PNG
-preview:
-
-```python
-mosaic.to_raster("preview.png", {"dtype": "uint8", "nodata": 0}, driver="PNG")
-```
-
-A raster file has one data type and one nodata value for all its bands. If the VRT's bands
-differ, pass `dtype` or `nodata` in the profile.
-
-- `nodata` replaces each band's nodata value, and pixels that held the old value get the
-  new one. `nodata: None` keeps the VRT's values.
-- `dtype` converts every band. Fractions are rounded and values outside the new type's range
-  are clipped, so a valid value can end up equal to the nodata value: 300 written as `uint8`
-  with nodata 255 becomes 255 and reads as nodata. Each band's nodata value must fit the
-  new type.
-
-```python
-dem = vrt.mosaic(["a.tif", "b.tif"])  # float32, nodata NaN
-dem.to_cog("dem.tif", {"dtype": "int16", "nodata": -9999})
-```
+grid, its bands and the steps that build it, and a notebook shows the same summary as HTML,
+as at the top of this page. Neither opens a source.
 
 ## VRTs on S3
 
@@ -264,14 +358,8 @@ installs.
 ### Credentials
 
 `VRT.open()` opens a VRT with the credentials its sources need, whether they are local, on
-S3 or public over HTTP(S):
-
-```python
-with mosaic.open() as ds:
-    data = ds.read(1)
-```
-
-To open a written `.vrt` file with Rasterio yourself, wrap it in `VRT.env()`:
+S3 or public over HTTP(S). `to_cog` and `to_raster` use the same credentials. To open a
+written `.vrt` file with Rasterio yourself, wrap it in `VRT.env()`:
 
 ```python
 import rasterio
@@ -281,63 +369,6 @@ with mosaic.env(), rasterio.open(path) as ds:
     data = ds.read(1)
 ```
 
-Both raise `ValueError` if the sources need different credentials. If the VRT points to
-other `.vrt` files with sources on S3, pass those sources' `storage_options` to `open()` or
-`env()`.
-
-## Converting heights between vertical datums
-
-A height is measured from a reference surface, its vertical datum. Many DEMs give heights
-relative to a geoid. The Copernicus DEM, for example, uses EGM2008. GNSS receivers give
-heights relative to the ellipsoid. Geoid and ellipsoid heights differ by tens of meters.
-
-`reproject` converts heights when both the source CRS and the target `crs` have a vertical datum
-(a compound CRS such as `EPSG:4326+3855`) or are 3D (such as `EPSG:4979`). There is no
-extra option:
-
-```python
-ellipsoidal = vrt.reproject("copdem.tif", crs="EPSG:4979", src_crs="EPSG:4326+3855")
-```
-
-`src_crs` adds the vertical datum when the file does not record it.
-
-### Getting the geoid grid
-
-PROJ needs each geoid model as a grid file, and neither Rasterio nor pyproj includes any.
-Either set `PROJ_NETWORK=ON` before the process starts, so PROJ downloads the parts it
-needs, or download the grid once into a folder that also contains Rasterio's PROJ data:
-
-```python
-import shutil
-
-from rasterio.env import PROJDataFinder
-
-shutil.copytree(PROJDataFinder().search(), "proj_data", dirs_exist_ok=True)
-```
-
-```bash
-python -m pyproj sync --file us_nga_egm08_25 --target-directory proj_data  # 80 MB
-```
-
-Then point Rasterio at the folder:
-
-```python
-import rasterio
-
-with rasterio.Env(PROJ_DATA="proj_data"):
-    ellipsoidal = vrt.reproject("copdem.tif", crs="EPSG:4979", src_crs="EPSG:4326+3855")
-```
-
-PROJ remembers for the rest of the process whether it found a grid. Set `PROJ_DATA` or
-`PROJ_NETWORK` before the first reprojection. Setting it after a failed lookup has no effect.
-
-### When the conversion fails
-
-- If PROJ cannot find the grid, `reproject` raises `ValueError` instead of ignoring the geoid.
-  `allow_ballpark=True` accepts PROJ's fallback, which leaves the heights unchanged.
-- Either both CRSs need a vertical datum or a third axis, or neither does. A mix raises
-  `ValueError`. To keep the heights as they are, pass a 2D `src_crs` or a 2D `crs`.
-- Heights in other units, such as feet, are converted as `gdalwarp` converts them.
-- Only single-band rasters without a scale or offset are converted. Warp the height band
-  on its own, convert the stored values to heights first, or pass a 2D `src_crs` to skip
-  the conversion.
+The S3 sources of one VRT must share their credentials, and one VRT cannot mix S3 and HTTP(S)
+sources. If the VRT points to other `.vrt` files with sources on S3, pass those sources'
+`storage_options` to `open()` or `env()`.
