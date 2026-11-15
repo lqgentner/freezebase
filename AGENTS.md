@@ -64,11 +64,11 @@ uv run pytest -q --cov=freezebase --cov-branch --cov-report=term-missing
 [Vale](https://vale.sh) checks the Markdown and Quarto files against `.vale.ini`: the Google
 developer style, proselint and ai-tells, with the rules that conflict with these docs turned
 off and the reason beside each. The `prose` job in CI runs the same check and fails on any
-alert, warnings included. Install Vale, then:
+alert, warnings included. Vale is pinned in the `dev` group, so `uv sync` installs it:
 
 ```bash
-vale sync                             # downloads the packages into .vale/styles
-vale $(git ls-files '*.md' '*.qmd')
+uv run vale sync                      # downloads the packages into .vale/styles
+uv run vale $(git ls-files '*.md' '*.qmd')
 ```
 
 When the spelling check reports a correct term, add it to
@@ -91,7 +91,7 @@ Keep `--no-sync`. Without it, `uv run` re-resolves the environment at the latest
 
 ## Documentation
 
-Great Docs uses Quarto, which must be installed separately. See
+Great Docs uses Quarto, which the `docs` group installs. See
 [`user_guide/05-contributing.qmd`](user_guide/05-contributing.qmd) for preview and freeze-cache
 details.
 

@@ -26,12 +26,9 @@ jobs:
           # Own cache entry, as in ci.yml: only this job installs the docs group.
           cache-suffix: docs
 
-      - name: Set up Quarto
-        uses: quarto-dev/quarto-actions/setup@v2
-
       # `--all-extras` is required, not optional: the "Rasters on S3" guide
       # imports `freezebase.s3`, which lives behind the `s3` extra. The `docs`
-      # group carries great-docs itself plus the plotting stack the guides
+      # group carries great-docs, Quarto and the plotting stack the guides
       # execute with.
       - name: Install dependencies
         run: uv sync --all-extras --group docs

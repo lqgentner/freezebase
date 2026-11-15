@@ -92,9 +92,8 @@ re-resolves the environment back to the latest versions before running.
 ## Building the docs
 
 The documentation is built with [Great Docs](https://posit-dev.github.io/great-docs/),
-which renders through [Quarto](https://quarto.org/docs/get-started/). Quarto is a separate
-install — see [its getting-started page](https://quarto.org/docs/get-started/) — and is not
-managed by uv.
+which renders through [Quarto](https://quarto.org/). The `docs` group installs both, with
+Quarto pinned to the version CI uses:
 
 ```bash
 uv sync --group docs
