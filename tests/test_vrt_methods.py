@@ -196,18 +196,19 @@ class TestToRaster:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         source = from_raster(make_tiff(tmp_path / "a.tif", dtype="uint8", nodata=0))
-        real_copy = rasterio.shutil.copy
-        passed: dict[str, Any] = {}
-
-        def record(*args: Any, **kwargs: Any) -> None:
-            passed.update(kwargs)
-            real_copy(*args, **kwargs)
-
-        monkeypatch.setattr(rasterio.shutil, "copy", record)
-        profile = build_rasterio_profile({"driver": "PNG", "crs": "EPSG:4326", "count": 3})
+        passed = _record_copy_options(monkeypatch)
+        profile = {"tiled": True, "blockxsize": 256, "interleave": "pixel", "crs": "EPSG:4326"}
         source.to_raster(tmp_path / "q.png", profile, driver="PNG")
         assert passed == {"driver": "PNG"}
         assert "not support" not in caplog.text
+
+    def test_an_explicit_compress_reaches_another_driver(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        passed = _record_copy_options(monkeypatch)
+        _uint16(tmp_path).to_raster(tmp_path / "o.nc", {"compress": "deflate"}, driver="netCDF")
+        # Previously dropped for every driver but GTiff.
+        assert passed == {"driver": "netCDF", "compress": "deflate"}
 
     def test_missing_directory_names_the_destination(self, tmp_path: Path) -> None:
         dst = tmp_path / "nope" / "q.png"
@@ -217,25 +218,22 @@ class TestToRaster:
         with pytest.raises(RasterWriteError, match=f"directory of {dst} does not exist"):
             source.to_cog(dst)
 
-    def test_png_with_its_sidecar(self, tmp_path: Path) -> None:
+    @pytest.mark.filterwarnings("ignore::rasterio.errors.NotGeoreferencedWarning")
+    def test_png_is_one_file_without_a_crs(self, tmp_path: Path) -> None:
         source = from_raster(make_tiff(tmp_path / "a.tif", dtype="uint8", nodata=0))
         dst = tmp_path / "q.png"
         source.to_raster(dst, driver="PNG")
         with rasterio.open(dst) as ds:
             assert ds.driver == "PNG"
-            # The CRS lives in GDAL's .aux.xml sidecar, which lands beside the PNG.
-            assert ds.crs == source.crs
+            # PNG has no place for a CRS, and no .aux.xml sidecar holds it.
+            assert ds.crs is None
             np.testing.assert_array_equal(ds.read(), _read(tmp_path / "a.tif"))
-        assert sorted(p.name for p in tmp_path.iterdir()) == ["a.tif", "q.png", "q.png.aux.xml"]
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["a.tif", "q.png"]
 
-    def test_envi_keeps_its_header(self, tmp_path: Path) -> None:
-        source = _uint16(tmp_path)
-        source.to_raster(tmp_path / "e.img", driver="ENVI")
-        assert {"e.img", "e.hdr"} <= {p.name for p in tmp_path.iterdir()}
-        with rasterio.open(tmp_path / "e.img") as ds:
-            assert ds.driver == "ENVI"
-            np.testing.assert_array_equal(ds.read(), _read(tmp_path / "u.tif"))
-        assert not list(tmp_path.glob(".*"))
+    def test_a_driver_writing_several_files_is_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(RasterWriteError, match=r"ENVI driver writes several files \(e.hdr\)"):
+            _uint16(tmp_path).to_raster(tmp_path / "e.img", driver="ENVI")
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["u.tif"]
 
     def test_png_of_float32_is_a_write_error(self, tmp_path: Path) -> None:
         source = mosaic(_tiles(tmp_path))
@@ -278,20 +276,17 @@ class TestToRaster:
         with pytest.raises(RasterWriteError, match="Unsupported protocol 'memory'"):
             _uint16(tmp_path).to_raster("memory://bucket/o.tif")
 
-    def test_s3_uploads_the_raster_after_its_sidecar(
-        self, tmp_path: Path, s3_uploads: dict[str, bytes]
-    ) -> None:
+    def test_s3_png_is_one_upload(self, tmp_path: Path, s3_uploads: dict[str, bytes]) -> None:
         source = from_raster(make_tiff(tmp_path / "a.tif", dtype="uint8", nodata=0))
         source.to_raster("s3://bucket/q.png", driver="PNG")
-        assert list(s3_uploads) == ["s3://bucket/q.png.aux.xml", "s3://bucket/q.png"]
+        assert list(s3_uploads) == ["s3://bucket/q.png"]
         assert s3_uploads["s3://bucket/q.png"].startswith(b"\x89PNG")
 
-    def test_checksum_with_a_sidecar_is_of_the_raster(self, tmp_path: Path) -> None:
+    def test_checksum_is_of_the_written_file(self, tmp_path: Path) -> None:
         source = from_raster(make_tiff(tmp_path / "a.tif", dtype="uint8", nodata=0))
         dst = tmp_path / "q.png"
         digest = _encode(source.to_xml(), UPath(dst), {"driver": "PNG"}, checksum=True)
         assert digest == "1220" + hashlib.sha256(dst.read_bytes()).hexdigest()
-        assert (tmp_path / "q.png.aux.xml").exists()
 
     def test_s3_gtiff_is_one_upload(self, tmp_path: Path, s3_uploads: dict[str, bytes]) -> None:
         _uint16(tmp_path).to_raster("s3://bucket/o.tif")
@@ -305,22 +300,41 @@ def _utm_3d(tmp_path: Path) -> VRT:
     return source
 
 
-class TestCrsInSidecar:
-    """GDAL keeps a CRS that GeoTIFF cannot encode in a ``.aux.xml`` sidecar."""
+class TestCrsGeoTiffCannotStore:
+    """GeoTIFF has no keys for a projected CRS with ellipsoidal heights."""
 
     @pytest.mark.parametrize("write", ["to_cog", "to_raster"])
-    def test_local_sidecar_lands_beside_the_file(self, tmp_path: Path, write: str) -> None:
+    def test_local_write_is_refused(self, tmp_path: Path, write: str) -> None:
         dst = tmp_path / "out" / "dem.tif"
         dst.parent.mkdir()
-        getattr(_utm_3d(tmp_path), write)(dst)
-        # Previously left as a hidden temporary sidecar, so the file had no CRS.
-        assert sorted(p.name for p in dst.parent.iterdir()) == ["dem.tif", "dem.tif.aux.xml"]
-        with rasterio.open(dst) as ds:
+        # Previously written without a CRS, its .aux.xml left as a hidden temporary file.
+        with pytest.raises(RasterWriteError, match="GeoTIFF cannot store the CRS"):
+            getattr(_utm_3d(tmp_path), write)(dst)
+        assert not list(dst.parent.iterdir())
+
+    def test_s3_write_is_refused(self, tmp_path: Path, s3_uploads: dict[str, bytes]) -> None:
+        with pytest.raises(RasterWriteError, match="GeoTIFF cannot store the CRS"):
+            _utm_3d(tmp_path).to_cog("s3://bucket/dem.tif")
+        assert not s3_uploads
+
+    def test_compound_crs_is_stored(self, tmp_path: Path) -> None:
+        source = from_raster(make_tiff(tmp_path / "a.tif", crs="EPSG:32632"))
+        source.crs = rasterio.crs.CRS.from_user_input("EPSG:32632+3855")
+        source.to_cog(tmp_path / "dem.tif")
+        with rasterio.open(tmp_path / "dem.tif") as ds:
             assert ds.crs is not None
             assert len(pyproj.CRS(ds.crs.to_wkt()).axis_info) == 3
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["a.tif", "dem.tif"]
 
-    def test_s3_uploads_the_sidecar_first(
-        self, tmp_path: Path, s3_uploads: dict[str, bytes]
-    ) -> None:
-        _utm_3d(tmp_path).to_cog("s3://bucket/dem.tif")
-        assert list(s3_uploads) == ["s3://bucket/dem.tif.aux.xml", "s3://bucket/dem.tif"]
+
+def _record_copy_options(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Record the keyword arguments of every ``rasterio.shutil.copy`` call."""
+    real_copy = rasterio.shutil.copy
+    passed: dict[str, Any] = {}
+
+    def record(*args: Any, **kwargs: Any) -> None:
+        passed.update(kwargs)
+        real_copy(*args, **kwargs)
+
+    monkeypatch.setattr(rasterio.shutil, "copy", record)
+    return passed

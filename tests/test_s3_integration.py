@@ -327,7 +327,7 @@ class TestVrtOnS3:
             assert (ds.dtypes, ds.nodata) == (("uint8",), 255)
             assert set(np.unique(ds.read(1)).tolist()) == {1, 2}
 
-    def test_to_raster_uploads_a_png_with_its_sidecar(self, prefix: UPath, tmp_path: Path) -> None:
+    def test_to_raster_uploads_a_png_alone(self, prefix: UPath) -> None:
         tiles = self._upload_tiles(prefix)
         out = prefix / "q.png"
 
@@ -335,12 +335,9 @@ class TestVrtOnS3:
 
         out.fs.invalidate_cache()
         assert out.fs.info(out.path)["ContentType"] == CONTENT_TYPES[".png"]
-        # Read back locally: GDAL's S3 environment does not look for sidecars.
-        for name in ("q.png", "q.png.aux.xml"):
-            (tmp_path / name).write_bytes((prefix / name).read_bytes())
-        with rasterio.open(tmp_path / "q.png") as ds:
+        assert sorted(p.name for p in prefix.iterdir() if p.name.startswith("q.")) == ["q.png"]
+        with rasterio_open(out) as ds:
             assert ds.driver == "PNG"
-            assert ds.crs == "EPSG:32632"
             assert set(np.unique(ds.read(1)).tolist()) == {1, 2}
 
     def test_source_files_follow_a_local_vrt_to_s3(self, prefix: UPath, tmp_path: Path) -> None:

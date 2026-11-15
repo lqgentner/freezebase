@@ -805,10 +805,8 @@ class VRT:
     ) -> None:
         """Write the pixels as a raster file in any format GDAL can copy to.
 
-        Sidecar files the format needs, such as a PNG's ``.aux.xml`` holding its CRS, are
-        written beside ``path`` first; the raster itself lands last, atomically on local
-        disk. freezebase reads S3 without listing the bucket, so reading a raster back from
-        S3 through freezebase misses its sidecars.
+        The result is a single file, without a ``.aux.xml`` sidecar, so what the format
+        cannot hold, such as a PNG's CRS and transform, is dropped.
 
         Parameters
         ----------
@@ -819,9 +817,8 @@ class VRT:
             ``nodata`` apply as for ``to_cog``; the keys describing the dataset (``crs``,
             ``transform``, ``count``, ``width``, ``height``) are ignored. For ``GTiff``,
             the creation options default to ``RASTERIO_PROFILE_DEFAULTS``; for another
-            driver, its GTiff options (``tiled``, ``blockxsize``, ``blockysize``,
-            ``interleave``, ``compress``) are dropped. A ``driver`` key must match
-            ``driver``.
+            driver, the GTiff-only ``tiled``, ``blockxsize``, ``blockysize`` and
+            ``interleave`` are dropped. A ``driver`` key must match ``driver``.
         driver : str, optional
             GDAL driver name, such as ``"GTiff"`` or ``"PNG"``. Use ``to_cog`` for a COG.
         band_names : list[str] | None, optional
@@ -843,7 +840,8 @@ class VRT:
             dtype, or the bands differ in dtype or nodata without ``profile`` setting it.
         RasterWriteError
             If the write fails, also when ``driver`` cannot hold the bands, such as
-            ``float32`` in a PNG.
+            ``float32`` in a PNG, writes several files, or is GeoTIFF and cannot store the
+            CRS, such as a projected CRS with ellipsoidal heights.
         """
         from freezebase.raster import _write_raster_from_vrt  # noqa: PLC0415  # raster imports freezebase.vrt
 
