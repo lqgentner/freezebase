@@ -910,7 +910,7 @@ def _encode(
             if checksum:
                 digest = _SHA256_MULTIHASH_PREFIX + file_sha256(encoded)
             # Sidecars first, so the raster lands last.
-            for sidecar in _sidecars(encoded) if sidecars else []:
+            for sidecar in _sidecars(encoded):
                 _upload(sidecar, dst_file.with_name(sidecar.name))
             _upload(encoded, dst_file)
         return digest
@@ -924,13 +924,18 @@ def _encode(
         return _encode_with_sidecars(src, Path(dst_file.path), options, checksum=checksum)
     # A local write is an atomic rename of a hidden file beside the destination.
     work_dst = dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.tmp")
+    # GDAL keeps what GeoTIFF cannot encode, such as a 3D projected CRS, in this sidecar.
+    work_aux = work_dst.with_name(f"{work_dst.name}.aux.xml")
     try:
         rasterio.shutil.copy(src, _to_vsi_uri(work_dst), **options)
         if checksum:
             digest = _SHA256_MULTIHASH_PREFIX + file_sha256(work_dst)
+        if work_aux.exists():
+            work_aux.replace(dst_file.with_name(f"{dst_file.name}.aux.xml"))
         work_dst.replace(dst_file)
     except BaseException:
         work_dst.unlink(missing_ok=True)
+        work_aux.unlink(missing_ok=True)
         raise
     return digest
 

@@ -7,8 +7,10 @@ import inspect
 from typing import TYPE_CHECKING, Any, assert_type
 
 import numpy as np
+import pyproj
 import pytest
 import rasterio
+import rasterio.crs
 import rasterio.errors
 import rasterio.shutil
 from upath import UPath
@@ -294,3 +296,31 @@ class TestToRaster:
     def test_s3_gtiff_is_one_upload(self, tmp_path: Path, s3_uploads: dict[str, bytes]) -> None:
         _uint16(tmp_path).to_raster("s3://bucket/o.tif")
         assert list(s3_uploads) == ["s3://bucket/o.tif"]
+
+
+def _utm_3d(tmp_path: Path) -> VRT:
+    """Return a VRT in UTM zone 32N with ellipsoidal heights, which GeoTIFF has no keys for."""
+    source = from_raster(make_tiff(tmp_path / "a.tif", crs="EPSG:32632"))
+    source.crs = rasterio.crs.CRS.from_wkt(pyproj.CRS("EPSG:32632").to_3d().to_wkt())
+    return source
+
+
+class TestCrsInSidecar:
+    """GDAL keeps a CRS that GeoTIFF cannot encode in a ``.aux.xml`` sidecar."""
+
+    @pytest.mark.parametrize("write", ["to_cog", "to_raster"])
+    def test_local_sidecar_lands_beside_the_file(self, tmp_path: Path, write: str) -> None:
+        dst = tmp_path / "out" / "dem.tif"
+        dst.parent.mkdir()
+        getattr(_utm_3d(tmp_path), write)(dst)
+        # Previously left as a hidden temporary sidecar, so the file had no CRS.
+        assert sorted(p.name for p in dst.parent.iterdir()) == ["dem.tif", "dem.tif.aux.xml"]
+        with rasterio.open(dst) as ds:
+            assert ds.crs is not None
+            assert len(pyproj.CRS(ds.crs.to_wkt()).axis_info) == 3
+
+    def test_s3_uploads_the_sidecar_first(
+        self, tmp_path: Path, s3_uploads: dict[str, bytes]
+    ) -> None:
+        _utm_3d(tmp_path).to_cog("s3://bucket/dem.tif")
+        assert list(s3_uploads) == ["s3://bucket/dem.tif.aux.xml", "s3://bucket/dem.tif"]
