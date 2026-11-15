@@ -400,6 +400,18 @@ class TestRewriteTiffVrt:
         assert vrt.bands[0].description == "VV"
         assert "B" not in vrt.metadata
 
+    def test_rewrite_a_vrt_to_png_places_its_sidecar(self, tmp_path: Path) -> None:
+        src = tmp_path / "src.tif"
+        make_int_tiff(src, [0, 5], dtype="uint8", nodata=0)
+
+        rewrite_tiff(from_raster(src), tmp_path / "x.png", {"driver": "PNG"})
+
+        # Previously the .aux.xml stayed behind as a hidden temporary file.
+        names = sorted(p.name for p in tmp_path.iterdir())
+        assert names == ["src.tif", "x.png", "x.png.aux.xml"]
+        with rasterio.open(tmp_path / "x.png") as ds:
+            assert ds.crs == "EPSG:32632"
+
     def test_rewrite_vrt_with_move_raises(self, tmp_path: Path) -> None:
         src = tmp_path / "src.tif"
         make_tiff(src)

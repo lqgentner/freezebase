@@ -42,6 +42,9 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ### Fixed
 
+- `rewrite_tiff` of a `VRT` to a format that keeps metadata in a sidecar file, such as
+  PNG, writes the `.aux.xml` beside the destination instead of leaving it behind as a
+  hidden temporary file.
 - The error `reproject` raises when PROJ cannot find a geoid grid suggests `PROJ_NETWORK=ON`
   or `PROJ_DATA` instead of `python -m pyproj sync`, whose grids Rasterio's PROJ never
   searches.
