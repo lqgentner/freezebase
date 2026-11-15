@@ -5,12 +5,14 @@ from __future__ import annotations
 from functools import lru_cache
 import re
 
+import pyproj
 from rasterio.crs import CRS
 from rasterio.errors import CRSError
 
 _WKT = re.compile(r"[A-Z][A-Z0-9_]*\s*\[.*\]", re.DOTALL)
 _EPSG = re.compile(r"EPSG:(\d+)", re.IGNORECASE)
 _NAME = re.compile(r'"([^"]*)"')
+_AXES_WITH_HEIGHT = 3
 
 
 def crs_label(crs: CRS) -> str:
@@ -23,7 +25,14 @@ def _wkt_label(wkt: str) -> str:
     """Label a CRS given as WKT; cached, as identifying a CRS without a code is slow."""
     if (authority := CRS.from_wkt(wkt).to_authority()) is not None:
         return ":".join(authority)
-    return wkt_name(wkt)
+    name = wkt_name(wkt)
+    # A 3D CRS shares its name with the 2D one; its third axis is the ellipsoidal height.
+    if (
+        len(pyproj.CRS.from_wkt(wkt).axis_info) == _AXES_WITH_HEIGHT
+        and "height" not in name.lower()
+    ):
+        return f"{name} + ellipsoidal height"
+    return name
 
 
 def wkt_name(wkt: str) -> str:
