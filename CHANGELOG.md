@@ -8,9 +8,29 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## Unreleased
 
+### Added
+
+- `VRT.bounds`, `res`, `shape`, `count`, `dtypes` and `nodatavals` describe the grid and
+  bands as rasterio reports them for the opened VRT, without opening it.
+
+### Changed
+
+- **Breaking:** `mosaic`, `stack`, `derive` and `reproject` nest a copy of a `VRT` input
+  instead of the object itself, so editing the input afterwards no longer changes the
+  result, and identity checks fail. Before, `m = vrt.mosaic([a])` kept `a` itself
+  (`m.sources[0] is a`), and `a.bands[0].nodata = 0` also changed `m`. Now `m.sources[0]`
+  is an equal copy (`m.sources[0] == a`): edit `a` before building `m`, or edit the copy
+  (`m.sources[0]`, or `w.warp.source` for `w = vrt.reproject(a, crs=...)`).
+
+### Deprecated
+
+- `freezebase.vrt.warp` is renamed `freezebase.vrt.reproject`, the name rasterio and
+  rioxarray use. `warp` still works but emits a `DeprecationWarning`; replace
+  `vrt.warp(src, crs=...)` with `vrt.reproject(src, crs=...)`.
+
 ### Fixed
 
-- The error `warp` raises when PROJ cannot find a geoid grid suggests `PROJ_NETWORK=ON`
+- The error `reproject` raises when PROJ cannot find a geoid grid suggests `PROJ_NETWORK=ON`
   or `PROJ_DATA` instead of `python -m pyproj sync`, whose grids Rasterio's PROJ never
   searches.
 - `MGRSGeoBox.crs` is typed as a `CRS` rather than `CRS | None`, so type checkers no

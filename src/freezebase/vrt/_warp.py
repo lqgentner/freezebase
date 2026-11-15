@@ -1,8 +1,9 @@
-"""Warping a raster or VRT onto another grid."""
+"""Reprojecting a raster or VRT onto another grid."""
 
 from __future__ import annotations
 
 from contextlib import contextmanager
+import copy
 import re
 from typing import TYPE_CHECKING, Any, Literal
 from xml.etree import ElementTree as ET
@@ -19,6 +20,7 @@ from rasterio.vrt import WarpedVRT
 from rasterio.warp import calculate_default_transform, transform_bounds
 from upath import UPath
 
+from freezebase._deprecation import deprecated_alias
 from freezebase.raster import _env_for_path, _to_vsi_uri
 from freezebase.vrt._grid import (
     _DENSIFY_PTS,
@@ -57,7 +59,7 @@ _BAND_UNIT_TO_METRE = {
 type _Grid = tuple[CRS, Affine, int, int]
 
 
-def warp(
+def reproject(
     source: AnyPath | VRT,
     *,
     crs: CRS | str | None = None,
@@ -72,15 +74,16 @@ def warp(
     tolerance: float | Literal["auto"] = "auto",
     allow_ballpark: bool = False,
 ) -> VRT:
-    """Warp a raster or VRT onto another grid.
+    """Reproject a raster or VRT onto another grid.
 
-    The pixel type is not promoted: an averaging warp of a ``uint16`` band stays ``uint16``
+    The pixel type is not promoted: an averaging reprojection of a ``uint16`` band stays ``uint16``
     and rounds the mean (1.5 becomes 2). Pass ``dtype="float32"`` to keep the fraction.
 
     Parameters
     ----------
     source : str | Path | UPath | VRT
-        Raster to warp; a ``VRT`` is embedded in the warp.
+        Raster to reproject. A ``VRT`` is copied into the result, so later changes to it
+        do not affect the result.
     crs : CRS | str | None, optional
         Target CRS; required unless ``like`` is given.
     src_crs : CRS | str | None, optional
@@ -134,7 +137,7 @@ def warp(
         If GDAL's serialized transformer cannot be made exact or ballpark-free.
     """
     _check_tolerance(tolerance)
-    ref = source if isinstance(source, VRT) else _absolute(UPath(source))
+    ref = copy.deepcopy(source) if isinstance(source, VRT) else _absolute(UPath(source))
     with _opened(ref) as src:
         _check_no_colour_table(
             [_has_colour_table(src, i) for i in src.indexes],
@@ -192,7 +195,7 @@ def warp(
     if vrt.warp is None:  # pragma: no cover  # GDAL always writes a warped VRT here
         msg = "GDAL did not serialize a warped VRT"
         raise RuntimeError(msg)
-    # GDAL's path carries no storage options, and the source VRT is the caller's own.
+    # GDAL's path carries no storage options, and the source VRT is the snapshot taken above.
     vrt.warp.source = ref
     vrt.warp.options_xml = _set_transformer(
         vrt.warp.options_xml,
@@ -269,7 +272,8 @@ def _check_vertical_bands(src: DatasetReader, *, vertical: bool) -> None:
     if vertical and src.count > 1:
         msg = (
             f"Vertical shifts apply to single-band rasters, and the source has {src.count} "
-            "bands; warp the height band alone, or pass a 2D src_crs to keep values unshifted."
+            "bands; reproject the height band alone, or pass a 2D src_crs to keep values "
+            "unshifted."
         )
         raise ValueError(msg)
 
@@ -410,3 +414,6 @@ def _check_transformation(vrt: VRT, source_crs: CRS, dst_crs: CRS) -> None:
             "the grid and Rasterio's PROJ data, or pass allow_ballpark=True."
         )
         raise ValueError(msg) from err
+
+
+warp = deprecated_alias(reproject, "freezebase.vrt.warp", "freezebase.vrt.reproject")

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, ClassVar, Literal, Self
 from xml.etree import ElementTree as ET
 
 import numpy as np
+from rasterio.coords import BoundingBox
 from rasterio.enums import ColorInterp
 
 if TYPE_CHECKING:
@@ -388,6 +389,80 @@ class VRT:
     metadata: dict[str, str] = field(default_factory=dict)
     warp: Warp | None = None
     metadata_domains: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    @property
+    def bounds(self) -> BoundingBox:
+        """Extent in units of the CRS, as rasterio reports it for the opened VRT.
+
+        Returns
+        -------
+        rasterio.coords.BoundingBox
+            ``(left, bottom, right, top)``; for a rotated grid, the envelope of its corners.
+            For a south-up grid, ``bottom`` is above ``top``, as in rasterio.
+        """
+        a, b, c, d, e, f = self.transform[:6]
+        if b == d == 0:
+            return BoundingBox(c, f + e * self.height, c + a * self.width, f)
+        corners = [(0, 0), (0, self.height), (self.width, self.height), (self.width, 0)]
+        xs = [a * col + b * row + c for col, row in corners]
+        ys = [d * col + e * row + f for col, row in corners]
+        return BoundingBox(min(xs), min(ys), max(xs), max(ys))
+
+    @property
+    def res(self) -> tuple[float, float]:
+        """Pixel width and height in units of the CRS.
+
+        Returns
+        -------
+        tuple[float, float]
+            ``(x, y)`` pixel size, positive.
+        """
+        a, b, _, d, e, _ = self.transform[:6]
+        return math.hypot(a, d), math.hypot(b, e)
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        """Raster size in pixels.
+
+        Returns
+        -------
+        tuple[int, int]
+            ``(height, width)``.
+        """
+        return self.height, self.width
+
+    @property
+    def count(self) -> int:
+        """Number of bands.
+
+        Returns
+        -------
+        int
+            Length of ``bands``.
+        """
+        return len(self.bands)
+
+    @property
+    def dtypes(self) -> tuple[str, ...]:
+        """Data type of each band.
+
+        Returns
+        -------
+        tuple[str, ...]
+            NumPy dtype names, in band order.
+        """
+        return tuple(band.dtype for band in self.bands)
+
+    @property
+    def nodatavals(self) -> tuple[float | None, ...]:
+        """Nodata value of each band.
+
+        Returns
+        -------
+        tuple[float | None, ...]
+            Nodata values in band order; ``None`` for a band without one.
+        """
+        return tuple(band.nodata for band in self.bands)
 
     def to_xml(self, *, relative_to: UPath | None = None) -> str:
         """Serialize to VRT XML.

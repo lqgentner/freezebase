@@ -176,7 +176,7 @@ def _label(info: RasterInfo, index: int) -> str:
 def _check_north_up(info: RasterInfo, name: str) -> None:
     """Raise for a south-up raster, whose rows a north-up VRT grid would flip."""
     if info.transform.e > 0:
-        msg = f"'{name}' is south-up (positive pixel height); warp it north-up first."
+        msg = f"'{name}' is south-up (positive pixel height); reproject it north-up first."
         raise ValueError(msg)
 
 

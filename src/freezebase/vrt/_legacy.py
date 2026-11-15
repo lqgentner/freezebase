@@ -11,7 +11,7 @@ from upath import UPath
 from freezebase.vrt._builders import derive, mosaic, stack
 from freezebase.vrt._grid import raster_info
 from freezebase.vrt._model import VRT, Band, PixelFunction, Source
-from freezebase.vrt._warp import warp
+from freezebase.vrt._warp import reproject
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -217,7 +217,7 @@ def create_warped_vrt(
         missing), only one of the source CRS and ``crs`` has a vertical datum, or the
         nodata (``nodata``, else the source's) does not fit in the warped dtype.
     """
-    warp(
+    reproject(
         src_path,
         crs=crs,
         resolution=resolution,
