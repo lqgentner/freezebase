@@ -17,9 +17,10 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 - **Breaking:** `mosaic`, `stack`, `derive` and `reproject` nest a copy of a `VRT` input
   instead of the object itself, so editing the input afterwards no longer changes the
-  result. Before, `w = vrt.warp(a, crs=...)` kept `a` itself (`w.warp.source is a`), and
-  `a.bands[0].nodata = 0` also changed `w`. Now `w.warp.source` is a copy: edit `a` before
-  building `w`, or edit `w.warp.source`.
+  result, and identity checks fail. Before, `m = vrt.mosaic([a])` kept `a` itself
+  (`m.sources[0] is a`), and `a.bands[0].nodata = 0` also changed `m`. Now `m.sources[0]`
+  is an equal copy (`m.sources[0] == a`): edit `a` before building `m`, or edit the copy
+  (`m.sources[0]`, or `w.warp.source` for `w = vrt.reproject(a, crs=...)`).
 
 ### Deprecated
 
@@ -29,7 +30,7 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ### Fixed
 
-- The error `warp` raises when PROJ cannot find a geoid grid suggests `PROJ_NETWORK=ON`
+- The error `reproject` raises when PROJ cannot find a geoid grid suggests `PROJ_NETWORK=ON`
   or `PROJ_DATA` instead of `python -m pyproj sync`, whose grids Rasterio's PROJ never
   searches.
 - `MGRSGeoBox.crs` is typed as a `CRS` rather than `CRS | None`, so type checkers no

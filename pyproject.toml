@@ -223,7 +223,7 @@ filterwarnings = [
     # affine 3 deprecates `*` for matrix products, which rasterio still uses internally.
     "ignore:Use `@` matmul instead of `\\*` mul operator:PendingDeprecationWarning:rasterio\\..*",
     # freezebase must not call its own deprecated names; tests check them with pytest.warns.
-    "error::DeprecationWarning:freezebase",
+    "error:.* is deprecated and will be removed in a future release:DeprecationWarning:freezebase(\\.|$)",
 ]
 
 [tool.coverage.run]

@@ -76,7 +76,7 @@ def reproject(
 ) -> VRT:
     """Reproject a raster or VRT onto another grid.
 
-    The pixel type is not promoted: an averaging warp of a ``uint16`` band stays ``uint16``
+    The pixel type is not promoted: an averaging reprojection of a ``uint16`` band stays ``uint16``
     and rounds the mean (1.5 becomes 2). Pass ``dtype="float32"`` to keep the fraction.
 
     Parameters
@@ -272,7 +272,8 @@ def _check_vertical_bands(src: DatasetReader, *, vertical: bool) -> None:
     if vertical and src.count > 1:
         msg = (
             f"Vertical shifts apply to single-band rasters, and the source has {src.count} "
-            "bands; warp the height band alone, or pass a 2D src_crs to keep values unshifted."
+            "bands; reproject the height band alone, or pass a 2D src_crs to keep values "
+            "unshifted."
         )
         raise ValueError(msg)
 

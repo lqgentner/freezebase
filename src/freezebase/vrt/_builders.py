@@ -84,17 +84,10 @@ def _band(info: RasterInfo, index: int) -> Band:
 
 
 def _snapshot(inputs: Sequence[AnyPath | VRT]) -> list[AnyPath | VRT]:
-    """Copy each distinct VRT input once, so later edits to it leave the result unchanged."""
-    copies: dict[int, VRT] = {}
-    out: list[AnyPath | VRT] = []
-    for item in inputs:
-        if isinstance(item, VRT):
-            if id(item) not in copies:
-                copies[id(item)] = copy.deepcopy(item)
-            out.append(copies[id(item)])
-        else:
-            out.append(item)
-    return out
+    """Copy the VRT inputs, so later edits to them leave the result unchanged."""
+    # One memo keeps objects shared between inputs shared in the copies.
+    memo: dict[int, object] = {}
+    return [copy.deepcopy(item, memo) if isinstance(item, VRT) else item for item in inputs]
 
 
 def from_raster(path: AnyPath) -> VRT:
@@ -463,8 +456,8 @@ def derive(
     ------
     ValueError
         If ``nodata`` does not fit in ``dtype``, ``sources`` is empty, the grids differ
-        (use ``reproject`` first), ``band`` is out of range, or an input band is complex or has
-        a scale or offset.
+        (use ``reproject`` first), ``band`` is out of range, or an input band is complex or
+        has a scale or offset.
     """
     _check_nodata_fits(dtype, nodata)
     inputs = _snapshot([sources] if isinstance(sources, (str, Path, UPath, VRT)) else sources)
