@@ -1,0 +1,140 @@
+---
+title: "VRT recipes"
+---
+
+Short recipes that combine the [VRT](04-vrts.qmd) steps. Each builds a VRT and writes the
+result once at the end.
+
+## Convert heights between vertical datums
+
+A height is measured from a reference surface, its vertical datum. Many DEMs give heights
+relative to a geoid. The Copernicus DEM, for example, uses EGM2008. GNSS receivers give
+heights relative to the ellipsoid. Geoid and ellipsoid heights differ by tens of meters.
+
+`reproject` converts heights when both the source CRS and the target `crs` have a vertical datum
+(a compound CRS such as `EPSG:4326+3855`) or are 3D (such as `EPSG:4979`). There is no
+extra option:
+
+```python
+ellipsoidal = vrt.reproject("copdem.tif", crs="EPSG:4979", src_crs="EPSG:4326+3855")
+```
+
+`src_crs` adds the vertical datum when the file does not record it. For a projected target,
+such as the UTM zone of an MGRS square, pyproj makes the 3D version of a CRS:
+
+```python
+from pyproj import CRS
+
+utm_3d = CRS(square.crs).to_3d().to_wkt()
+ellipsoidal = vrt.reproject("copdem.tif", crs=utm_3d, src_crs="EPSG:4326+3855")
+```
+
+### Get the geoid grid
+
+PROJ needs each geoid model as a grid file, and neither Rasterio nor pyproj includes any.
+Either set `PROJ_NETWORK=ON` before the process starts, or in Python before Rasterio is
+first imported, so PROJ downloads the parts it needs, or download the grid once into a folder that also contains Rasterio's PROJ data:
+
+```python
+import shutil
+
+from rasterio.env import PROJDataFinder
+
+shutil.copytree(PROJDataFinder().search(), "proj_data", dirs_exist_ok=True)
+```
+
+```bash
+python -m pyproj sync --file us_nga_egm08_25 --target-directory proj_data  # 80 MB
+```
+
+Then point Rasterio at the folder:
+
+```python
+import rasterio
+
+with rasterio.Env(PROJ_DATA="proj_data"):
+    ellipsoidal = vrt.reproject("copdem.tif", crs="EPSG:4979", src_crs="EPSG:4326+3855")
+```
+
+PROJ remembers for the rest of the process whether it found a grid. Set `PROJ_DATA` or
+`PROJ_NETWORK` before the first reprojection. Setting it after a failed lookup has no effect.
+
+### Limits
+
+- Without the grid, `reproject` stops with an error instead of ignoring the geoid.
+  `allow_ballpark=True` accepts PROJ's fallback, which leaves the heights unchanged.
+- Either both CRSs need a vertical datum or a third axis, or neither does. To keep the
+  heights as they are, pass a 2D `src_crs` or a 2D `crs`.
+- Heights in other units, such as feet, are converted as `gdalwarp` converts them.
+- Only single-band rasters without a scale or offset are converted. Reproject the height
+  band on its own, or convert the stored values to heights first.
+
+## Mosaic tiles from two UTM zones
+
+Tiles in different CRSs cannot share one mosaic directly. Mosaic each zone, reproject each
+zone mosaic onto a shared CRS and resolution, then mosaic the results.
+`group_tiffs_by_crs` sorts the files by zone:
+
+```python
+import math
+
+from freezebase.raster import group_tiffs_by_crs
+
+zones = group_tiffs_by_crs(tiles)  # {"UTM32N": [...], "UTM33N": [...]}
+web = vrt.mosaic(
+    [
+        vrt.mosaic(files).reproject(crs="EPSG:3857", resolution=20.0, nodata=math.nan)
+        for files in zones.values()
+    ]
+)
+web.to_cog("web_mercator.tif")
+```
+
+With a shared `resolution` and no `bounds`, `reproject` snaps each extent onto the same
+pixel grid, so the zone mosaics line up. If the tiles have no nodata value, pass one, as
+here: otherwise the empty corners of the later zone cover the earlier one with zeros. NaN
+suits float tiles; for integer tiles, pass a value that fits the type, or `dtype="float32"`
+together with NaN. Web Mercator meters stretch with latitude, so 20 m here is about 14 m on
+the ground at 46° N.
+
+## Sentinel-1 VV/VH ratio in decibels
+
+The ratio of the two polarizations, in decibels, is one `derive` for the ratio and one for
+the conversion:
+
+```python
+ratio = vrt.derive(["vv.tif", "vh.tif"], vrt.PixelFunction.div())
+ratio_db = ratio.derive(vrt.PixelFunction.db())
+ratio_db.to_cog("vv_vh_db.tif", band_names=["VV/VH"], units=["dB"])
+```
+
+The inputs hold linear backscatter on one grid. A nodata pixel in either gives a nodata
+pixel in the ratio.
+
+## RGB from separate band files
+
+Sentinel-2 delivers each band as its own file. `stack` combines the 10 m red, green and blue
+bands and marks their color interpretation, so viewers show them as RGB:
+
+```python
+from rasterio.enums import ColorInterp
+
+rgb = vrt.stack(
+    ["B04.tif", "B03.tif", "B02.tif"],
+    band_names=["red", "green", "blue"],
+    color_interp=[ColorInterp.red, ColorInterp.green, ColorInterp.blue],
+)
+rgb.to_cog("rgb.tif")
+```
+
+## A colored PNG preview
+
+`colorize` maps one band through a colormap, and `to_raster` writes the result as a PNG:
+
+```python
+preview = vrt.from_raster("32TMS25.tif").colorize("terrain", vmin=500, vmax=4500)
+preview.to_raster("32TMS25.png", driver="PNG")
+```
+
+The PNG keeps its CRS and transform in a `.aux.xml` file beside it, and nodata pixels
+are transparent.

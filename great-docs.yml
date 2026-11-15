@@ -69,6 +69,7 @@ nav_icons:
     Accessing S3: box
     Reading and writing rasters: grid-3x3
     VRTs: layers
+    VRT recipes: book-open-text
     Contributing: wrench
 
 # API Reference Structure

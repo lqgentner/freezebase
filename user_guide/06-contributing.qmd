@@ -116,10 +116,11 @@ ignored by git.
 
 ### The freeze cache
 
-The user guide executes its code at build time — it reads a public S3 bucket and fetches
-basemap tiles. Those outputs are cached in the tracked `_freeze/` directory, so a page is
-only re-executed when its own `.qmd` changes. Editing the README or a docstring rebuilds
-without touching the network, which also keeps CI builds off the tile server.
+The user guide executes its code at build time — it reads a public S3 bucket, fetches
+basemap tiles, and on the VRT page reads DEM tiles over HTTPS. Those outputs are cached in
+the tracked `_freeze/` directory, so a page is only re-executed when its own `.qmd`
+changes. Editing the README or a docstring rebuilds without touching the network, which
+also keeps CI builds off the tile server.
 
 That caching is keyed on page source, not on library behavior. If you change something
 that alters a page's *output* without changing the page itself, refresh it explicitly:
@@ -129,6 +130,9 @@ uv run great-docs freeze --info                       # what is cached and stale
 uv run great-docs freeze user_guide/01-mgrs-grid.qmd  # re-execute one page
 git add _freeze/                                      # commit the new outputs
 ```
+
+Refreshing a page needs network access. The VRT page also downloads parts of the EGM2008
+geoid grid: it sets `PROJ_NETWORK=ON` itself, so no other setup is needed.
 
 ## Releasing
 
