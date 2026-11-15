@@ -123,7 +123,7 @@ from freezebase.raster import write_cog
 
 tiles = [f"{code}.tif" for code in grid.to_geodataframe()["mgrs_code"]]
 mosaic = vrt.mosaic(tiles)
-lv95 = vrt.warp(mosaic, crs="EPSG:2056", resolution=10.0)
+lv95 = vrt.reproject(mosaic, crs="EPSG:2056", resolution=10.0)
 write_cog(lv95, "zurich_lv95.tif")
 ```
 

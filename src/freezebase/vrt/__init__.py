@@ -12,7 +12,7 @@ from freezebase.vrt._legacy import (
     create_warped_vrt,
 )
 from freezebase.vrt._model import VRT, Band, PixelFunction, Source, SourceProperties, Warp
-from freezebase.vrt._warp import warp
+from freezebase.vrt._warp import reproject, warp
 
 __all__ = [
     "VRT",
@@ -30,6 +30,7 @@ __all__ = [
     "from_raster",
     "mosaic",
     "read",
+    "reproject",
     "stack",
     "warp",
 ]

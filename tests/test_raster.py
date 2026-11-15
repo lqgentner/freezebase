@@ -44,8 +44,8 @@ from freezebase.vrt import (
     derive,
     from_raster,
     mosaic,
+    reproject,
     stack,
-    warp,
 )
 
 WIDTH, HEIGHT = 8, 6
@@ -1462,7 +1462,7 @@ class TestWriteCogNodataRemap:
             nodata=0,
         ) as dst:
             dst.write(np.array([[0, 5], [6, 7]], np.uint16), 1)
-        w = warp(src, crs="EPSG:32632", resolution=10)
+        w = reproject(src, crs="EPSG:32632", resolution=10)
         write_cog(w, tmp_path / "o.tif", profile)
         with rasterio.open(tmp_path / "o.tif") as ds:
             np.testing.assert_array_equal(ds.read(1), np.array(expected))
@@ -1563,7 +1563,7 @@ class TestWriteCogInputs:
             msg = "cannot open"
             raise rasterio.errors.RasterioIOError(msg)
 
-        monkeypatch.setattr("freezebase.vrt.stack", fail)
+        monkeypatch.setattr("freezebase.vrt._builders._stack", fail)
         with pytest.raises(RasterWriteError, match="Failed to write COG: cannot open"):
             write_cog(src, tmp_path / "o.tif", {"nodata": 9})
 

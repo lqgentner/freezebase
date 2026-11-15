@@ -8,6 +8,25 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## Unreleased
 
+### Added
+
+- `VRT.bounds`, `res`, `shape`, `count`, `dtypes` and `nodatavals` describe the grid and
+  bands as rasterio reports them for the opened VRT, without opening it.
+
+### Changed
+
+- **Breaking:** `mosaic`, `stack`, `derive` and `reproject` nest a copy of a `VRT` input
+  instead of the object itself, so editing the input afterwards no longer changes the
+  result. Before, `w = vrt.warp(a, crs=...)` kept `a` itself (`w.warp.source is a`), and
+  `a.bands[0].nodata = 0` also changed `w`. Now `w.warp.source` is a copy: edit `a` before
+  building `w`, or edit `w.warp.source`.
+
+### Deprecated
+
+- `freezebase.vrt.warp` is renamed `freezebase.vrt.reproject`, the name rasterio and
+  rioxarray use. `warp` still works but emits a `DeprecationWarning`; replace
+  `vrt.warp(src, crs=...)` with `vrt.reproject(src, crs=...)`.
+
 ### Fixed
 
 - The error `warp` raises when PROJ cannot find a geoid grid suggests `PROJ_NETWORK=ON`

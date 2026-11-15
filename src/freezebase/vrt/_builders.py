@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -82,6 +83,20 @@ def _band(info: RasterInfo, index: int) -> Band:
     )
 
 
+def _snapshot(inputs: Sequence[AnyPath | VRT]) -> list[AnyPath | VRT]:
+    """Copy each distinct VRT input once, so later edits to it leave the result unchanged."""
+    copies: dict[int, VRT] = {}
+    out: list[AnyPath | VRT] = []
+    for item in inputs:
+        if isinstance(item, VRT):
+            if id(item) not in copies:
+                copies[id(item)] = copy.deepcopy(item)
+            out.append(copies[id(item)])
+        else:
+            out.append(item)
+    return out
+
+
 def from_raster(path: AnyPath) -> VRT:
     """Build a 1:1 VRT over one raster file.
 
@@ -125,7 +140,7 @@ def _check_same_grid(infos: Sequence[RasterInfo]) -> None:
         ):
             msg = (
                 "Sources must share one grid (CRS, transform, size); "
-                f"use warp to align {_label(info, index)}"
+                f"use reproject to align {_label(info, index)}"
             )
             raise ValueError(msg)
 
@@ -155,7 +170,8 @@ def stack(
     Parameters
     ----------
     sources : Sequence[str | Path | UPath | VRT]
-        Rasters or VRTs on an identical grid. A ``VRT`` is nested.
+        Rasters or VRTs on an identical grid. A ``VRT`` is copied and nested, so later
+        changes to it do not affect the result.
     bands : Sequence[Sequence[int] | None] | None, optional
         1-based bands to take from each source; ``None`` for an entry, or for the argument,
         takes all bands.
@@ -172,10 +188,23 @@ def stack(
     Raises
     ------
     ValueError
-        If ``sources`` is empty, the grids differ (use ``warp`` first), a source is
+        If ``sources`` is empty, the grids differ (use ``reproject`` first), a source is
         south-up or has a colour table, a ``bands`` entry is out of range, or ``bands``,
         ``band_names`` or ``color_interp`` do not match.
     """
+    return _stack(
+        _snapshot(sources), bands=bands, band_names=band_names, color_interp=color_interp
+    )
+
+
+def _stack(
+    sources: Sequence[AnyPath | VRT],
+    *,
+    bands: Sequence[Sequence[int] | None] | None = None,
+    band_names: Sequence[str] | None = None,
+    color_interp: Sequence[ColorInterp] | None = None,
+) -> VRT:
+    """Stack as ``stack`` does, nesting VRT inputs without copying them."""
     if not sources:
         msg = "sources must not be empty."
         raise ValueError(msg)
@@ -318,7 +347,7 @@ def mosaic(
     ----------
     sources : Sequence[str | Path | UPath | VRT]
         Tiles sharing a CRS, band count, dtypes, scales, offsets and NODATA values. A
-        ``VRT`` is nested.
+        ``VRT`` is copied and nested, so later changes to it do not affect the result.
         Band *i* of the mosaic reads band *i* of every tile.
     bounds : rasterio.coords.BoundingBox | tuple[float, float, float, float] | None, optional
         Extent as ``(left, bottom, right, top)``, a whole number of output pixels; its
@@ -361,7 +390,7 @@ def mosaic(
     if resampling not in _SOURCE_RESAMPLINGS:
         msg = f"VRT sources cannot use {resampling.name} resampling."
         raise ValueError(msg)
-    infos = [raster_info(source) for source in sources]
+    infos = [raster_info(source) for source in _snapshot(sources)]
     _validate_tiles(infos, same_pixel_size=resolution is None)
     first = infos[0]
     if band_names is not None and len(band_names) != first.count:
@@ -408,8 +437,9 @@ def derive(
     Parameters
     ----------
     sources : str | Path | UPath | VRT | Sequence[str | Path | UPath | VRT]
-        One input, or several on an identical grid. A ``VRT`` is nested whole, so the
-        function sees its mosaicked pixels.
+        One input, or several on an identical grid. A ``VRT`` is copied and nested whole,
+        so the function sees its mosaicked pixels and later changes to it do not affect
+        the result.
     function : PixelFunction
         Function applied to the sources. ``propagateNoData`` is set to ``"true"`` unless
         its arguments already set it, so a nodata input gives a nodata output.
@@ -433,11 +463,11 @@ def derive(
     ------
     ValueError
         If ``nodata`` does not fit in ``dtype``, ``sources`` is empty, the grids differ
-        (use ``warp`` first), ``band`` is out of range, or an input band is complex or has
+        (use ``reproject`` first), ``band`` is out of range, or an input band is complex or has
         a scale or offset.
     """
     _check_nodata_fits(dtype, nodata)
-    inputs = [sources] if isinstance(sources, (str, Path, UPath, VRT)) else list(sources)
+    inputs = _snapshot([sources] if isinstance(sources, (str, Path, UPath, VRT)) else sources)
     if not inputs:
         msg = "sources must not be empty."
         raise ValueError(msg)

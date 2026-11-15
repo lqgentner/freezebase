@@ -119,7 +119,7 @@ reference:
         - vrt.SourceProperties
         - vrt.Warp
         - vrt.mosaic
-        - vrt.warp
+        - vrt.reproject
         - vrt.stack
         - vrt.derive
         - vrt.from_raster

@@ -769,7 +769,7 @@ def _reject_reprojection_options(profile: Mapping[str, Any] | None) -> None:
     if keys:
         msg = (
             f"write_cog does not reproject, but {', '.join(keys)} would change the output "
-            "grid. Reproject with freezebase.vrt.warp first."
+            "grid. Reproject with freezebase.vrt.reproject first."
         )
         raise ValueError(msg)
 
@@ -784,12 +784,13 @@ def _require_profile(profile: dict[str, Any] | None) -> dict[str, Any]:
 
 def _wrap_for_nodata(vrt: VRT, nodata: float | None) -> VRT:
     """Nest ``vrt`` under bands with a new nodata, mapping its old nodata pixels to it."""
-    from freezebase.vrt import stack  # noqa: PLC0415  # freezebase.vrt imports raster
+    # The private stack: ``vrt`` is already the caller's copy.
+    from freezebase.vrt._builders import _stack  # noqa: PLC0415  # freezebase.vrt imports raster
     from freezebase.vrt._model import _nodata_equal  # noqa: PLC0415
 
     if nodata is None or all(_nodata_equal(band.nodata, nodata) for band in vrt.bands):
         return vrt
-    wrapper = stack([vrt])
+    wrapper = _stack([vrt])
     wrapper.metadata = dict(vrt.metadata)
     wrapper.metadata_domains = copy.deepcopy(vrt.metadata_domains)
     for band, inner in zip(wrapper.bands, vrt.bands, strict=True):

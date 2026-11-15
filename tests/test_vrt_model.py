@@ -37,7 +37,7 @@ from freezebase.vrt import (
     create_warped_vrt,
     mosaic,
     read,
-    warp,
+    reproject,
 )
 from freezebase.vrt._paths import gdal_path, parse_gdal_path
 from freezebase.vrt._xml import from_xml
@@ -1147,7 +1147,7 @@ class TestDiscovery:
         make_tiff(tmp_path / "a.tif")
         foreign = tmp_path / "foreign.vrt"
         foreign.write_text(FOREIGN_VRT)
-        with warp(foreign, crs="EPSG:3857", resolution=20.0).open() as ds:
+        with reproject(foreign, crs="EPSG:3857", resolution=20.0).open() as ds:
             assert ds.count == 1
         create_warped_vrt(foreign, tmp_path / "w.vrt", crs="EPSG:3857", resolution=20.0)
 
@@ -1183,12 +1183,12 @@ class TestDiscovery:
     def test_follows_escaped_and_warped_sources(self, tmp_path: Path) -> None:
         a = UPath(make_tiff(tmp_path / "a.tif"))
         b = UPath(make_tiff(tmp_path / "b.tif"))
-        warped = warp(vrt_over(b), crs="EPSG:3857", resolution=20.0)
+        warped = reproject(vrt_over(b), crs="EPSG:3857", resolution=20.0)
         mixed = vrt_over(a)
         mixed.bands[0].sources.append(Source(warped))
-        path = warp(mixed.write(tmp_path / "mixed.vrt"), crs="EPSG:3857", resolution=20.0).write(
-            tmp_path / "w.vrt"
-        )
+        path = reproject(
+            mixed.write(tmp_path / "mixed.vrt"), crs="EPSG:3857", resolution=20.0
+        ).write(tmp_path / "w.vrt")
         assert vrt_over(path).source_files() == [a, b]
 
     def test_same_path_with_other_options_is_kept(self) -> None:
@@ -1211,3 +1211,47 @@ class TestDiscovery:
             v.source_files()
         with pytest.raises(ImportError, match="aiohttp"):
             read("https://h/m.vrt")
+
+
+class TestGridProperties:
+    """The grid properties match what rasterio reports for the opened VRT."""
+
+    @pytest.mark.parametrize(
+        "transform",
+        [
+            Affine(10.0, 0.0, 500000.0, 0.0, -10.0, 5200000.0),
+            Affine(10.0, 2.0, 500000.0, 3.0, -10.0, 5200000.0),
+            Affine(10.0, 0.0, 500000.0, 0.0, 10.0, 5200000.0),
+        ],
+        ids=["north-up", "rotated", "south-up"],
+    )
+    def test_match_rasterio(self, tmp_path: Path, transform: Affine) -> None:
+        tif = UPath(make_tiff(tmp_path / "a.tif", size=(4, 3), count=2))
+        vrt = VRT(
+            crs=CRS.from_epsg(32632),
+            transform=transform,
+            width=4,
+            height=3,
+            bands=[
+                Band("uint16", [Source(tif, band=1)], nodata=0.0),
+                Band("float32", [Source(tif, band=2)]),
+            ],
+        )
+        with vrt.open() as ds:
+            assert vrt.bounds == ds.bounds
+            assert vrt.res == pytest.approx(ds.res)
+            assert vrt.shape == ds.shape
+            assert vrt.count == ds.count
+            assert vrt.dtypes == tuple(ds.dtypes)
+            assert vrt.nodatavals == ds.nodatavals
+
+    def test_no_io(self, tmp_path: Path) -> None:
+        vrt = VRT(
+            crs=None,
+            transform=from_origin(0.0, 30.0, 10.0, 10.0),
+            width=2,
+            height=3,
+            bands=[Band("uint8", [Source(UPath(tmp_path / "missing.tif"))])],
+        )
+        assert vrt.bounds == (0.0, 0.0, 20.0, 30.0)
+        assert vrt.shape == (3, 2)
