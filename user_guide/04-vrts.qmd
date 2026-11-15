@@ -161,6 +161,27 @@ web = vrt.reproject(zone, crs="EPSG:3857", resolution=20.0).to_vrt("web.vrt")
 
 Write the steps to files when other programs need to open them, or when the chain is long.
 
+### Select, label, clip and color
+
+These steps are methods of a VRT. Each returns a new VRT and leaves the original unchanged:
+
+- `select([3, 2, 1])` keeps the listed bands, in that order.
+- `set(band_names=["VV"])` changes band names, color interpretation or units, or adds tags,
+  but not the pixels.
+- `clip_box(minx, miny, maxx, maxy)` cuts out a box whose edges lie on the pixel grid,
+  without resampling.
+- `colorize` turns one band into a red, green, blue and alpha image through a color ramp.
+  Pixels holding the nodata value, and NaN pixels, become transparent.
+
+```python
+dem = vrt.mosaic(["a.tif", "b.tif"])
+part = dem.clip_box(500000, 5190000, 510000, 5200000)
+preview = part.colorize([(0, (0, 0, 255)), (3000, (255, 255, 255))])
+preview.to_raster("preview.png", driver="PNG")
+```
+
+`colorize` also takes a matplotlib colormap, such as `colorize("viridis", vmin=0, vmax=3000)`.
+
 ### Inspect and edit a VRT
 
 `vrt.read` loads a VRT file, including one written by `gdalbuildvrt`, and `vrt.from_raster`

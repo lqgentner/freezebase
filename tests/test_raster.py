@@ -1267,7 +1267,8 @@ class TestS3WritesUploadThroughS3fs:
         src = tmp_path / "src.tif"
         make_tiff(src)
         dst = "s3://bucket/out/x.vrt"
-        create_warped_vrt(src, UPath(dst), crs="EPSG:32632", resolution=20)
+        with pytest.warns(DeprecationWarning, match="is deprecated"):
+            create_warped_vrt(src, UPath(dst), crs="EPSG:32632", resolution=20)
         xml = s3_uploads[dst].decode()
         assert "<VRTDataset" in xml
         assert str(src) in xml
@@ -1276,7 +1277,8 @@ class TestS3WritesUploadThroughS3fs:
         src = tmp_path / "src.tif"
         make_tiff(src)
         dst = "s3://bucket/out/db.vrt"
-        create_decibel_vrt(src, UPath(dst))
+        with pytest.warns(DeprecationWarning, match="is deprecated"):
+            create_decibel_vrt(src, UPath(dst))
         assert s3_uploads[dst].decode().startswith("<VRTDataset")
 
     def test_a_failed_upload_raises_and_keeps_the_source(

@@ -212,7 +212,8 @@ class TestCreateWarpedVrtS3:
         src = tmp_path / "src.tif"
         write_cog(np.full((HEIGHT, WIDTH), 1.0, dtype=np.float32), src, _RASTER_PROFILE)
 
-        create_warped_vrt(src, s3_key, crs="EPSG:3857", resolution=20.0)
+        with pytest.warns(DeprecationWarning, match="is deprecated"):
+            create_warped_vrt(src, s3_key, crs="EPSG:3857", resolution=20.0)
 
         assert s3_key.exists()
         with rasterio_open(s3_key) as ds:
