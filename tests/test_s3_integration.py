@@ -218,7 +218,7 @@ class TestCreateWarpedVrtS3:
             assert ds.crs.to_epsg() == 3857
 
 
-class TestWarpS3:
+class TestReprojectS3:
     def test_path_source_keeps_its_storage_options(self, s3_key: UPath) -> None:
         write_cog(np.full((HEIGHT, WIDTH), 1.0, dtype=np.float32), s3_key, _RASTER_PROFILE)
 

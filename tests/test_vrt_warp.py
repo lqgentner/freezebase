@@ -1,4 +1,4 @@
-"""Tests for vrt.warp."""
+"""Tests for vrt.reproject."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ import rasterio.warp
 from rasterio.warp import calculate_default_transform
 from upath import UPath
 
+from freezebase import vrt
 from freezebase.vrt import VRT, _warp, from_raster, mosaic, read, reproject
 from freezebase.vrt._warp import _has_vertical, _set_transformer
 from tests.rasters import make_tiff
@@ -383,10 +384,12 @@ class TestSources:
 
     def test_warp_is_a_deprecated_alias(self, tmp_path: Path) -> None:
         src = make_tiff(tmp_path / "a.tif")
-        with pytest.warns(DeprecationWarning, match=r"freezebase\.vrt\.reproject"):
-            got = _warp.warp(src, crs="EPSG:4326", resolution=1e-4)
+        with pytest.warns(DeprecationWarning, match=r"freezebase\.vrt\.reproject") as record:
+            got = vrt.warp(src, crs="EPSG:4326", resolution=1e-4)
         assert got == reproject(src, crs="EPSG:4326", resolution=1e-4)
-        assert _warp.warp.__name__ == "warp"
+        assert vrt.warp.__name__ == "warp"
+        # Attributed to the caller, so the warning points at the line to change.
+        assert record[0].filename == __file__
 
 
 class TestOptions:
@@ -741,8 +744,8 @@ class TestVerticalUnits:
         w = reproject(src, crs="EPSG:4979", allow_ballpark=True)
         reread = read(w.write(tmp_path / "w.vrt"))
         assert reread == w
-        for vrt in (w, reread):
-            with vrt.open() as ds:
+        for candidate in (w, reread):
+            with candidate.open() as ds:
                 data = ds.read(1)
             assert np.isfinite(data).any()
             np.testing.assert_allclose(data[np.isfinite(data)], 100 * FTUS, rtol=1e-6)

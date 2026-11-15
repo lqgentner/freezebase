@@ -398,6 +398,7 @@ class VRT:
         -------
         rasterio.coords.BoundingBox
             ``(left, bottom, right, top)``; for a rotated grid, the envelope of its corners.
+            For a south-up grid, ``bottom`` is above ``top``, as in rasterio.
         """
         a, b, c, d, e, f = self.transform[:6]
         if b == d == 0:
