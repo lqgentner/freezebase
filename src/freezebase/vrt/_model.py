@@ -89,7 +89,7 @@ def _fields_equal(a: Source | Band, b: Source | Band) -> bool:
 
 def _ref_repr(ref: SourceRef) -> str:
     """Represent a source path, or a nested VRT on one line."""
-    return _summary.short(ref) if isinstance(ref, VRT) else repr(ref)
+    return _summary.safe_short(ref) if isinstance(ref, VRT) else repr(ref)
 
 
 @dataclass
@@ -280,8 +280,9 @@ class Source:
         parts = [f"path={_ref_repr(self.path)}", f"band={self.band}"]
         parts += [
             f"{item.name}={value!r}"
-            for item in fields(self)[2:]
-            if (value := getattr(self, item.name)) is not None
+            for item in fields(self)
+            if item.name not in {"path", "band"}
+            and (value := getattr(self, item.name)) is not None
         ]
         return f"Source({', '.join(parts)})"
 
@@ -434,12 +435,11 @@ class VRT:
         str
             A header line, one line per band, and a tree of the steps and their sources.
         """
-        return _summary.to_text(_summary.summarize(self))
+        return _summary.text_repr(self)
 
     def _repr_html_(self) -> str:
         """Render the summary as HTML for notebooks."""
-        summary = _summary.summarize(self)
-        return _summary.to_html(summary, _summary.to_text(summary))
+        return _summary.html_repr(self)
 
     @property
     def bounds(self) -> BoundingBox:

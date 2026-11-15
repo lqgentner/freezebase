@@ -5,26 +5,33 @@ from __future__ import annotations
 from dataclasses import dataclass
 import html
 import json
-import re
+import numbers
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit, urlunsplit
 from xml.etree import ElementTree as ET
 
-from rasterio.crs import CRS
-from rasterio.errors import CRSError
 from upath import UPath
 
+from freezebase.vrt._crs import crs_label, parse_srs, wkt_name
+
 if TYPE_CHECKING:
+    from rasterio.crs import CRS
+
     from freezebase.vrt._model import VRT, Band
 
 MAX_BANDS = 10
 MAX_FILES = 5
 MAX_CHILDREN = 5
+# Bounds the indentation of the text tree; MAX_NODES bounds its length.
 MAX_DEPTH = 6
 MAX_NODES = 40
 MAX_CHARS = 60
 
 _TIMES = "\N{MULTIPLICATION SIGN}"
 _UNITS = {"metre": "m", "meter": "m", "degree": "°", "foot": "ft", "US survey foot": "US ft"}
+# Integers up to this size print in full; larger ones as floats, as they are stored.
+_MAX_INTEGER = 2**64
 
 
 @dataclass(frozen=True)
@@ -43,8 +50,8 @@ class Node:
     files: tuple[File, ...] = ()
     more_files: int = 0
     children: tuple[Node, ...] = ()
-    more_children: int = 0
     grid: str = ""
+    muted: bool = False
 
 
 @dataclass(frozen=True)
@@ -69,32 +76,50 @@ class Summary:
     pipeline: Node
 
 
-def crs_label(crs: CRS) -> str:
-    """Name a CRS by its authority code, else by the name in its WKT."""
-    if (authority := crs.to_authority()) is not None:
-        return ":".join(authority)
-    return _wkt_name(crs)
+def text_repr(vrt: VRT) -> str:
+    """Return the text repr of ``vrt``, or a short form if the model is invalid."""
+    try:
+        return to_text(summarize(vrt))
+    except Exception:  # noqa: BLE001  # a repr must not raise
+        return safe_short(vrt)
+
+
+def html_repr(vrt: VRT) -> str:
+    """Return the HTML repr of ``vrt``, or a short form if the model is invalid."""
+    try:
+        summary = summarize(vrt)
+        return to_html(summary, to_text(summary))
+    except Exception:  # noqa: BLE001  # a repr must not raise
+        return f"<pre>{html.escape(safe_short(vrt))}</pre>"
+
+
+def safe_short(vrt: VRT) -> str:
+    """Return ``short(vrt)``, or the default object repr if the model is invalid."""
+    try:
+        return short(vrt)
+    except Exception:  # noqa: BLE001  # a repr must not raise
+        return object.__repr__(vrt)
 
 
 def short(vrt: VRT) -> str:
     """One-line description of a VRT, for reprs of objects that hold one."""
-    crs = crs_label(vrt.crs) if vrt.crs is not None else "no CRS"
-    return f"VRT({vrt.width}{_TIMES}{vrt.height}, {_clip(crs)}, {_plural(len(vrt.bands), 'band')})"
+    crs = _crs_text(vrt.crs)
+    return f"VRT({vrt.width}{_TIMES}{vrt.height}, {crs}, {_plural(len(vrt.bands), 'band')})"
 
 
 def summarize(vrt: VRT) -> Summary:
     """Summarize ``vrt`` from the model alone."""
-    crs = _clip(crs_label(vrt.crs)) if vrt.crs is not None else "no CRS"
+    crs = _crs_text(vrt.crs)
     size = f"{vrt.width} {_TIMES} {vrt.height} px"
     res = _resolution(vrt)
-    dtypes = ", ".join(dict.fromkeys(vrt.dtypes))
+    dtypes = _clip(", ".join(dict.fromkeys(vrt.dtypes)))
     header = tuple(
         part for part in (size, _plural(len(vrt.bands), "band"), dtypes, crs, res) if part
     )
     grid = [("Size", size), ("CRS", crs)]
-    if vrt.crs is not None and (name := _clip(_wkt_name(vrt.crs))) != crs:
+    if vrt.crs is not None and (name := _clip(wkt_name(vrt.crs.to_wkt()))) != crs:
         grid[-1] = ("CRS", f"{crs} ({name})")
-    grid += [("Resolution", res), ("Bounds", ", ".join(_number(v) for v in vrt.bounds))]
+    grid += [("Resolution", res), ("Bounds", ", ".join(f"{v:.12g}" for v in vrt.bounds))]
     rows = tuple(_band_row(index, band) for index, band in enumerate(vrt.bands[:MAX_BANDS], 1))
     return Summary(
         header=header,
@@ -103,6 +128,11 @@ def summarize(vrt: VRT) -> Summary:
         more_bands=max(len(vrt.bands) - MAX_BANDS, 0),
         pipeline=_Tree().node(vrt, 0),
     )
+
+
+def _crs_text(crs: CRS | None) -> str:
+    """Label a CRS, or its absence."""
+    return _clip(crs_label(crs)) if crs is not None else "no CRS"
 
 
 def _plural(count: int, noun: str) -> str:
@@ -116,16 +146,14 @@ def _clip(text: str, limit: int = MAX_CHARS) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _number(value: float) -> str:
-    """Format a number compactly."""
-    return f"{value:.12g}"
-
-
-def _wkt_name(crs: CRS) -> str:
-    """Return the name in a CRS's WKT, else the WKT."""
-    wkt = crs.to_wkt()
-    match = re.search(r'"([^"]*)"', wkt)
-    return match.group(1) if match else wkt
+def _nodata(value: float) -> str:
+    """Format a nodata value exactly: integers in full, other floats as Python does."""
+    if isinstance(value, numbers.Integral):
+        return str(int(value))
+    value = float(value)
+    if value.is_integer() and abs(value) < _MAX_INTEGER:
+        return str(int(value))
+    return repr(value)
 
 
 def _resolution(vrt: VRT) -> str:
@@ -143,41 +171,69 @@ def _resolution(vrt: VRT) -> str:
 
 def _band_row(index: int, band: Band) -> BandRow:
     """Collect the display values of a band."""
-    nodata = None if band.nodata is None else _number(band.nodata)
+    nodata = None if band.nodata is None else _nodata(band.nodata)
     unit = _clip(band.unit) if band.unit else None
     return BandRow(index, _clip(band.description), band.dtype, nodata, unit)
 
 
 def _file(path: UPath) -> File:
     """Name a file by its base name, keeping the protocol of a remote one."""
-    name = _clip(path.name)
+    full, name = str(path), path.name
+    if path.protocol in {"http", "https"}:
+        # Query strings and user info may hold credentials, such as presigned signatures.
+        parts = urlsplit(full)
+        full = urlunsplit((parts.scheme, parts.netloc.rpartition("@")[2], parts.path, "", ""))
+        name = PurePosixPath(parts.path).name
+    if not name:
+        return File(_clip(full), full)
     if path.protocol not in {"", "file"}:
-        name = f"{path.protocol}://…/{name}"
-    return File(name, str(path))
+        return File(f"{path.protocol}://…/{_clip(name)}", full)
+    return File(_clip(name), full)
 
 
-def _srs_label(text: str) -> str:
-    """Label a CRS serialized in warp options."""
-    try:
-        return _clip(crs_label(CRS.from_user_input(text)))
-    except CRSError:
-        return _clip(text)
+def _srs_text(text: str, crs: CRS | None) -> str:
+    """Label a CRS serialized in warp options, by its raw text if it did not parse."""
+    return _clip(crs_label(crs)) if crs is not None else _clip(text)
 
 
 def _warp_label(vrt: VRT, options_xml: str) -> str:
     """Label a warp by the CRSs it reprojects between, from its serialized options."""
-    target = _clip(crs_label(vrt.crs)) if vrt.crs is not None else "no CRS"
     try:
         # The options come from GDAL or from a VRT the caller chose to read.
         options = ET.fromstring(options_xml)  # noqa: S314
     except ET.ParseError:
         return "warped"
-    source = options.findtext(".//SourceSRS")
+    source = (options.findtext(".//SourceSRS") or "").strip()
+    target = (options.findtext(".//TargetSRS") or "").strip()
     if not source:
-        return f"resampled: {target}"
-    if destination := options.findtext(".//TargetSRS"):
-        target = _srs_label(destination)
-    return f"reprojected: {_srs_label(source)} → {target}"
+        return f"resampled: {_crs_text(vrt.crs)}"
+    source_crs = parse_srs(source)
+    target_crs = parse_srs(target) if target else vrt.crs
+    target_text = _srs_text(target, target_crs) if target else _crs_text(vrt.crs)
+    if source_crs is not None and target_crs is not None:
+        same = source_crs == target_crs
+    else:
+        same = source == target
+    if same:
+        return f"resampled: {target_text}"
+    return f"reprojected: {_srs_text(source, source_crs)} → {target_text}"
+
+
+def _step(vrt: VRT, count: int) -> tuple[str, bool]:
+    """Label what ``vrt`` does to its ``count`` sources, and whether it only arranges them."""
+    if vrt.warp is not None:
+        return _warp_label(vrt, vrt.warp.options_xml), False
+    derived = [band.pixel_function.name for band in vrt.bands if band.pixel_function is not None]
+    if derived:
+        names = ", ".join(dict.fromkeys(derived))
+        if len(derived) < len(vrt.bands):
+            return f"derived in {len(derived)} of {len(vrt.bands)} bands: {names}", False
+        return f"derived: {names}", False
+    if count < 2:  # noqa: PLR2004  # one source is a view, not a mosaic or stack
+        return "", True
+    if any(len(band.sources) > 1 for band in vrt.bands):
+        return "mosaic", True
+    return "stack", True
 
 
 class _Tree:
@@ -205,42 +261,18 @@ class _Tree:
             return self.parent(label, files, nested, depth, grid)
         if not files:
             return Node("no sources", grid=grid)
-        if label:
-            label = f"{label} of {_plural(len(files), 'file')}"
-        return _files_node(label or _files_label(files), files, grid)
+        return _files_node(f"{label} of {len(files)} files" if label else "", files, grid)
 
     def parent(
         self, label: str, files: list[UPath], nested: list[VRT], depth: int, grid: str
     ) -> Node:
         """Return a node whose children are its nested VRTs, then its files."""
         children = [self.node(ref, depth + 1) for ref in nested[:MAX_CHILDREN]]
+        if len(nested) > MAX_CHILDREN:
+            children.append(Node(f"… +{len(nested) - MAX_CHILDREN} more", muted=True))
         if files:
-            children.append(_files_node(_files_label(files), files))
-        return Node(
-            label,
-            children=tuple(children),
-            more_children=max(len(nested) - MAX_CHILDREN, 0),
-            grid=grid,
-        )
-
-
-def _step(vrt: VRT, count: int) -> tuple[str, bool]:
-    """Label what ``vrt`` does to its ``count`` sources, and whether it only arranges them."""
-    if vrt.warp is not None:
-        return _warp_label(vrt, vrt.warp.options_xml), False
-    functions = dict.fromkeys(
-        band.pixel_function.name for band in vrt.bands if band.pixel_function is not None
-    )
-    if functions:
-        return f"derived: {', '.join(functions)}", False
-    if any(len(band.sources) > 1 for band in vrt.bands):
-        return "mosaic", True
-    return ("stack" if count > 1 else ""), True
-
-
-def _files_label(files: list[UPath]) -> str:
-    """Label a list of files by their count, or nothing for a single file."""
-    return "" if len(files) == 1 else f"{len(files)} files"
+            children.append(_files_node("" if len(files) == 1 else f"{len(files)} files", files))
+        return Node(label, children=tuple(children), grid=grid)
 
 
 def _files_node(label: str, files: list[UPath], grid: str = "") -> Node:
@@ -301,13 +333,11 @@ def _tree_lines(node: Node, prefix: str, *, last: bool) -> list[str]:
     lines = [prefix + ("└─ " if last else "├─ ") + _node_text(node)]
     inner = prefix + ("   " if last else "│  ")
     for index, child in enumerate(node.children):
-        is_last = index == len(node.children) - 1 and not node.more_children
-        lines += _tree_lines(child, inner, last=is_last)
-    if node.more_children:
-        lines.append(f"{inner}└─ … +{node.more_children} more")
+        lines += _tree_lines(child, inner, last=index == len(node.children) - 1)
     return lines
 
 
+# Jupyter's and Bootstrap's table and list rules are more specific, hence !important.
 _CSS = """
 .fzb-vrt-wrap { display: block !important; color: inherit; line-height: 1.45; }
 .fzb-vrt-fallback { display: none; }
@@ -326,22 +356,25 @@ _CSS = """
 .fzb-vrt-wrap dd { margin: 0; }
 .fzb-vrt-wrap table {
   border-collapse: collapse; border: none; margin: .25em 0 .35em 1.2em;
-  font-size: inherit; color: inherit; table-layout: auto;
+  font-size: inherit; color: inherit; table-layout: auto; width: auto;
 }
 .fzb-vrt-wrap tr, .fzb-vrt-wrap th, .fzb-vrt-wrap td {
-  background: transparent !important; color: inherit; border: none;
-  padding: .05em 1.2em .05em 0; text-align: left !important; vertical-align: top;
+  background: transparent !important; box-shadow: none !important; color: inherit;
+  border: none; padding: .05em 1.2em .05em 0; text-align: left !important;
+  vertical-align: top;
 }
 .fzb-vrt-wrap th { font-weight: normal; opacity: .65; }
 .fzb-vrt-wrap thead {
   border-bottom: 1px solid color-mix(in srgb, currentColor 18%, transparent);
 }
-.fzb-vrt-wrap ul { list-style: none; margin: .25em 0 .35em 1.2em; padding: 0; }
+.fzb-vrt-wrap ul {
+  list-style: none !important; margin: .25em 0 .35em 1.2em !important; padding: 0 !important;
+}
 .fzb-vrt-wrap ul ul {
-  margin: .1em 0 .1em .35em; padding-left: .9em;
+  margin: .1em 0 .1em .35em !important; padding-left: .9em !important;
   border-left: 1px solid color-mix(in srgb, currentColor 25%, transparent);
 }
-.fzb-vrt-wrap li { margin: .1em 0; }
+.fzb-vrt-wrap li { list-style: none !important; margin: .1em 0 !important; }
 """.strip()
 
 
@@ -375,7 +408,9 @@ def _bands_html(summary: Summary) -> str:
     if not summary.bands:
         return '<p class="fzb-vrt-muted">none</p>'
     esc = html.escape
-    head = "".join(f"<th>{name}</th>" for name in ("#", "Description", "Dtype", "Nodata", "Unit"))
+    head = "".join(
+        f'<th scope="col">{name}</th>' for name in ("#", "Description", "Dtype", "Nodata", "Unit")
+    )
     rows = "".join(
         "<tr>"
         + "".join(
@@ -389,12 +424,18 @@ def _bands_html(summary: Summary) -> str:
         rows += (
             f'<tr><td colspan="5" class="fzb-vrt-muted">… +{summary.more_bands} bands</td></tr>'
         )
-    return f"<table><thead><tr>{head}</tr></thead><tbody>{rows}</tbody></table>"
+    # Quarto would otherwise restyle the table as a Bootstrap one.
+    return (
+        '<table data-quarto-disable-processing="true">'
+        f"<thead><tr>{head}</tr></thead><tbody>{rows}</tbody></table>"
+    )
 
 
 def _node_html(node: Node) -> str:
     """Render a node and its children as a list item."""
     esc = html.escape
+    if node.muted:
+        return f'<li class="fzb-vrt-muted">{esc(node.label)}</li>'
     parts = [f'<span title="{esc(node.grid)}">{esc(node.label)}</span>'] if node.label else []
     files = [f'<span title="{esc(file.path)}">{esc(file.name)}</span>' for file in node.files]
     if node.more_files:
@@ -402,7 +443,5 @@ def _node_html(node: Node) -> str:
     if files:
         parts.append(", ".join(files))
     children = "".join(_node_html(child) for child in node.children)
-    if node.more_children:
-        children += f'<li class="fzb-vrt-muted">… +{node.more_children} more</li>'
     nested = f"<ul>{children}</ul>" if children else ""
     return f"<li>{': '.join(parts)}{nested}</li>"

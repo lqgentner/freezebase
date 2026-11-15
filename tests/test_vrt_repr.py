@@ -6,22 +6,22 @@
 from __future__ import annotations
 
 import html as htmllib
+import http.server
 from pathlib import Path
 import re
-from typing import TYPE_CHECKING, NoReturn
+import threading
+from typing import ClassVar, NoReturn
 
 from affine import Affine
 import fsspec
+import pytest
 import rasterio
 from rasterio.crs import CRS
 from upath import UPath
 
 from freezebase import vrt
-from freezebase.vrt import VRT, Band, PixelFunction, Source, Warp, _model, _summary
+from freezebase.vrt import VRT, Band, PixelFunction, Source, Warp, _crs, _model, _summary
 from tests.rasters import make_tiff
-
-if TYPE_CHECKING:
-    import pytest
 
 UTM = CRS.from_epsg(32632)
 GRID = Affine(10.0, 0.0, 500000.0, 0.0, -10.0, 5200000.0)
@@ -360,3 +360,186 @@ def test_reprs_do_no_io(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     assert warped.warp is not None
     assert repr(warped.warp)
     assert repr(stacked.bands[1].sources[0])
+
+
+CUSTOM_TM = CRS.from_wkt(
+    'PROJCS["Custom TM",GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,'
+    '298.257223563]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]],'
+    'PROJECTION["Transverse_Mercator"],PARAMETER["latitude_of_origin",0],'
+    'PARAMETER["central_meridian",9.1],PARAMETER["scale_factor",0.9996],'
+    'PARAMETER["false_easting",500000],PARAMETER["false_northing",0],UNIT["metre",1]]'
+)
+
+
+def warped_with(options_xml: str) -> VRT:
+    """Build a warped VRT model of a file with the given warp options."""
+    return VRT(
+        UTM, GRID, 6, 4, [Band("float32")], warp=Warp(UPath("/d/a.tif"), options_xml, (6, 4))
+    )
+
+
+def warp_line(options_xml: str) -> str:
+    """Return the pipeline line of a warped VRT with the given warp options."""
+    return repr(warped_with(options_xml)).splitlines()[2]
+
+
+class _Hits(http.server.BaseHTTPRequestHandler):
+    """Record every request and answer with an EPSG code."""
+
+    hits: ClassVar[list[str]] = []
+
+    def do_GET(self) -> None:  # the name http.server calls
+        """Record the request and answer it."""
+        self.hits.append(self.path)
+        body = b"EPSG:3035"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class TestWarpLabels:
+    def test_srs_file_name_is_not_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "srs.prj").write_text(CRS.from_epsg(3035).to_wkt())
+        monkeypatch.chdir(tmp_path)
+        # Previously GDAL read the file and labeled the warp EPSG:3035.
+        assert warp_line("<W><SourceSRS>srs.prj</SourceSRS></W>") == (
+            "└─ reprojected: srs.prj → EPSG:32632"
+        )
+
+    def test_srs_url_is_not_requested(self) -> None:
+        server = http.server.HTTPServer(("127.0.0.1", 0), _Hits)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/crs"
+            # Previously GDAL fetched the URL.
+            assert warp_line(f"<W><SourceSRS>{url}</SourceSRS></W>") == (
+                f"└─ reprojected: {url} → EPSG:32632"
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+        assert _Hits.hits == []
+
+    def test_epsg_code(self) -> None:
+        assert warp_line("<W><SourceSRS> epsg:4326 </SourceSRS></W>") == (
+            "└─ reprojected: EPSG:4326 → EPSG:32632"
+        )
+
+    def test_unparsable_wkt_shows_its_text(self) -> None:
+        assert warp_line("<W><SourceSRS>FOO[1]</SourceSRS></W>") == (
+            "└─ reprojected: FOO[1] → EPSG:32632"
+        )
+
+    def test_same_crs_is_resampled(self) -> None:
+        wkt = UTM.to_wkt()
+        assert warp_line(
+            f"<W><SourceSRS>{wkt}</SourceSRS><TargetSRS>EPSG:32632</TargetSRS></W>"
+        ) == ("└─ resampled: EPSG:32632")
+        assert warp_line("<W><SourceSRS>x</SourceSRS><TargetSRS>x</TargetSRS></W>") == (
+            "└─ resampled: x"
+        )
+
+    def test_blank_source_srs_is_resampled(self) -> None:
+        assert warp_line("<W><SourceSRS>  \n </SourceSRS></W>") == "└─ resampled: EPSG:32632"
+
+
+class TestLabels:
+    def test_custom_crs_is_named_and_identified_once(self) -> None:
+        _crs._wkt_label.cache_clear()
+        custom = VRT(CUSTOM_TM, GRID, 6, 4, [Band("float32", [Source(UPath("/d/a.tif"))])])
+        assert (
+            repr(custom).splitlines()[0] == "VRT  6 × 4 px · 1 band · float32 · Custom TM · 10 m"
+        )
+        repr(custom)
+        assert _crs._wkt_label.cache_info().misses == 1
+
+    def test_two_bands_of_one_file(self) -> None:
+        a = UPath("/d/a.tif")
+        composite = model(Source(a, band=1), Source(a, band=2))
+        assert repr(composite).splitlines()[2] == "└─ a.tif"
+
+    def test_derived_next_to_plain_bands(self) -> None:
+        a, b, c = (Source(UPath(f"/d/{name}.tif")) for name in "abc")
+        mixed = VRT(
+            UTM,
+            GRID,
+            6,
+            4,
+            [Band("float32", [a, b], pixel_function=PixelFunction.div()), Band("float32", [c])],
+        )
+        assert repr(mixed).splitlines()[3:] == [
+            "└─ derived in 1 of 2 bands: div",
+            "   └─ 3 files: a.tif, b.tif, c.tif",
+        ]
+
+    def test_more_vrts_come_before_the_files(self) -> None:
+        nested = [model(Source(UPath(f"/d/n{i}.tif"))) for i in range(7)]
+        mixed = model(*(Source(v) for v in nested), Source(UPath("/d/a.tif")))
+        lines = repr(mixed).splitlines()
+        assert lines[2] == "└─ mosaic of 8 sources"
+        assert lines[-2:] == ["   ├─ … +2 more", "   └─ a.tif"]
+        html = mixed._repr_html_()
+        assert html.index("… +2 more") < html.index(">a.tif<")
+
+    @pytest.mark.parametrize(
+        ("nodata", "text"),
+        [
+            (255, "255"),
+            (-9223372036854775808, "-9223372036854775808"),
+            (float(-(2**63)), "-9223372036854775808"),
+            (-3.4028234663852886e38, "-3.4028234663852886e+38"),
+            (0.1, "0.1"),
+            (float("inf"), "inf"),
+        ],
+    )
+    def test_nodata_is_exact(self, nodata: float, text: str) -> None:
+        band = model(Source(UPath("/d/a.tif"))).bands[0]
+        band.nodata = nodata
+        row = VRT(UTM, GRID, 6, 4, [band])
+        assert repr(row).splitlines()[1] == f"bands  1  float32  nodata={text}"
+
+    def test_files_without_a_name(self) -> None:
+        unnamed = model(Source(UPath("/")), Source(UPath("s3://bucket", anon=True)))
+        assert repr(unnamed).splitlines()[2] == "└─ mosaic of 2 files: /, s3://bucket/"
+
+    def test_urls_lose_their_query_and_credentials(self) -> None:
+        url = "https://user:pw@example.com/data/a.tif?X-Amz-Signature=SECRET#frag"
+        presigned = model(Source(UPath(url)))
+        assert repr(presigned).splitlines()[2] == "└─ https://…/a.tif"
+        html = presigned._repr_html_()
+        assert 'title="https://example.com/data/a.tif"' in html
+        assert "SECRET" not in html
+        assert "pw@" not in html
+
+
+class TestInvalidModels:
+    def test_falls_back_to_the_short_form(self) -> None:
+        broken = VRT(UTM, GRID, 6, 4, [Band(None)])  # pyrefly: ignore[bad-argument-type]  # invalid on purpose
+        assert repr(broken) == "VRT(6×4, EPSG:32632, 1 band)"
+        assert broken._repr_html_() == "<pre>VRT(6×4, EPSG:32632, 1 band)</pre>"
+
+    def test_falls_back_to_the_object_repr(self) -> None:
+        broken = VRT("EPSG:32632", GRID, 6, 4)  # A str, not a CRS.
+        assert repr(broken).startswith("<freezebase.vrt._model.VRT object at ")
+        assert repr(Source(broken)).startswith("Source(path=<freezebase.vrt._model.VRT object at ")
+
+
+def test_many_dtypes_are_clipped() -> None:
+    dtypes = [
+        "uint8",
+        "int8",
+        "uint16",
+        "int16",
+        "uint32",
+        "int32",
+        "float32",
+        "float64",
+        "complex64",
+    ]
+    mixed = VRT(UTM, GRID, 6, 4, [Band(dtype) for dtype in dtypes])
+    listed = repr(mixed).splitlines()[0].split(" · ")[2]
+    assert listed == "uint8, int8, uint16, int16, uint32, int32, float32, float64…"

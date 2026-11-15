@@ -21,6 +21,7 @@ from upath import UPath
 
 from freezebase._deprecation import deprecated_alias
 from freezebase.raster import _env_for_path, _to_vsi_uri
+from freezebase.vrt._crs import crs_label
 from freezebase.vrt._grid import (
     _DENSIFY_PTS,
     _assert_extent_aligned,
@@ -31,7 +32,6 @@ from freezebase.vrt._grid import (
     raster_info,
 )
 from freezebase.vrt._model import VRT, _check_nodata_fits
-from freezebase.vrt._summary import crs_label
 from freezebase.vrt._xml import from_xml
 
 if TYPE_CHECKING:
