@@ -68,6 +68,8 @@ PROJ remembers for the rest of the process whether it found a grid. Set `PROJ_DA
 - Heights in other units, such as feet, are converted as `gdalwarp` converts them.
 - Only single-band rasters without a scale or offset are converted. Reproject the height
   band on its own, or convert the stored values to heights first.
+- GeoTIFF has no code for a projected CRS with ellipsoidal heights, such as `utm_3d`, so
+  `to_cog` refuses it. It stores `EPSG:4979` and compound CRSs such as `EPSG:32632+3855`.
 
 ## Mosaic tiles from two UTM zones
 
@@ -136,5 +138,5 @@ preview = vrt.from_raster("32TMS25.tif").colorize("terrain", vmin=500, vmax=4500
 preview.to_raster("32TMS25.png", driver="PNG")
 ```
 
-The PNG keeps its CRS and transform in a `.aux.xml` file beside it, and nodata pixels
-are transparent.
+In the PNG, nodata pixels are transparent. A PNG has no place for a CRS or transform, so
+the preview is a plain image.

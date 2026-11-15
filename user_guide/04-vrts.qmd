@@ -12,15 +12,9 @@ warnings.filterwarnings("ignore")
 
 `freezebase.vrt` builds GDAL virtual rasters in Python and chains them into one lazy recipe.
 These lines mosaic two Copernicus DEM tiles, put them onto MGRS square `32TMS25` around the
-Eiger, Mönch and Jungfrau, convert the heights from the EGM2008 geoid to the WGS 84
-ellipsoid, and write a COG:
+Eiger, Mönch and Jungfrau, and write a COG:
 
 ```{python}
-import os
-
-os.environ["PROJ_NETWORK"] = "ON"  # let PROJ fetch the geoid grid; set before rasterio loads
-
-from pyproj import CRS
 from rasterio.enums import Resampling
 
 from freezebase import vrt
@@ -34,7 +28,7 @@ dem = (
     vrt.mosaic(tiles)
     .reproject(
         src_crs="EPSG:4326+3855",  # WGS 84 with heights above the EGM2008 geoid
-        crs=CRS(square.crs).to_3d().to_wkt(),  # UTM zone 32N with ellipsoidal heights
+        crs=f"EPSG:{square.crs.epsg}+3855",  # UTM zone 32N, same heights
         resolution=20.0,
         bounds=square.boundingbox,
         resampling=Resampling.bilinear,
@@ -46,15 +40,12 @@ dem
 ```
 
 Each tile is a 42 MB file, and neither was downloaded in full. GDAL read the blocks under
-the square, about 4 MB, and PROJ fetched the part of the geoid grid it needed. Every height
-rose by about 53 m, the distance between geoid and ellipsoid in this area. GeoTIFF has no
-code for UTM with ellipsoidal heights, so GDAL keeps that CRS in `32TMS25.tif.aux.xml` next
-to the COG, where GDAL-based tools such as Rasterio and QGIS find it. Keep the two files
-together; on S3, freezebase reads the COG without its sidecar.
+the square, about 4 MB. The tiles don't record their vertical datum, so `src_crs` adds it,
+and the COG's CRS records EGM2008 as the vertical datum of its heights.
 
 ```{python}
 #| code-fold: true
-#| fig-cap: "The COG: Copernicus DEM GLO-30 on MGRS square 32TMS25 as heights above the WGS 84 ellipsoid, shaded from the northwest."
+#| fig-cap: "The COG: Copernicus DEM GLO-30 on MGRS square 32TMS25 as heights above the EGM2008 geoid, shaded from the northwest."
 #| warning: false
 import matplotlib.patheffects as pe
 import matplotlib.pyplot as plt
@@ -75,7 +66,7 @@ shaded = LightSource(azdeg=315, altdeg=45).shade(
 fig, ax = plt.subplots(figsize=(6.5, 5.5))
 ax.imshow(shaded, extent=(left, right, bottom, top))
 fig.colorbar(
-    ScalarMappable(norm=norm, cmap="cividis"), ax=ax, label="ellipsoidal height (m)", shrink=0.85
+    ScalarMappable(norm=norm, cmap="cividis"), ax=ax, label="height above EGM2008 (m)", shrink=0.85
 )
 to_utm = Transformer.from_crs("EPSG:4326", square.crs.epsg, always_xy=True)
 peaks = {"Eiger": (8.0053, 46.5775), "Mönch": (7.9967, 46.5586), "Jungfrau": (7.9631, 46.5367)}
@@ -94,12 +85,8 @@ ax.set(title=f"MGRS {square.mgrs_code}", xlabel="easting (m)", ylabel="northing 
 ax.ticklabel_format(style="plain")
 ```
 
-::: {.callout-note}
-The height conversion needs the EGM2008 geoid grid. The first lines set `PROJ_NETWORK=ON`
-before Rasterio loads, so PROJ downloads the parts of the grid it needs; set later, it has no
-effect. [VRT recipes](05-vrt-recipes.qmd#convert-heights-between-vertical-datums) shows how to keep
-a local copy instead.
-:::
+[VRT recipes](05-vrt-recipes.qmd#convert-heights-between-vertical-datums) shows how
+`reproject` converts the heights to another vertical datum, such as the WGS 84 ellipsoid.
 
 ## How it works
 
@@ -120,11 +107,10 @@ shortened and unescaped:
 
 ```xml
 <VRTDataset rasterXSize="500" rasterYSize="500" subClass="VRTWarpedDataset">
-  <SRS>PROJCRS["WGS 84 / UTM zone 32N", ...]</SRS>
+  <SRS>COMPD_CS["WGS 84 / UTM zone 32N + EGM2008 height", ...]</SRS>
   <GeoTransform>420000.0, 20.0, 0.0, 5160000.0, 0.0, -20.0</GeoTransform>
   <GDALWarpOptions>
     <ResampleAlg>Bilinear</ResampleAlg>
-    <Option name="APPLY_VERTICAL_SHIFT">YES</Option>
     <SourceDataset relativeToVRT="0">
       <VRTDataset rasterXSize="7200" rasterYSize="3600">
         <VRTRasterBand dataType="Float32" band="1">
@@ -144,9 +130,8 @@ shortened and unescaped:
 </VRTDataset>
 ```
 
-The outer VRT is the reprojection: its grid is the MGRS square, and the warp options include
-the height conversion. The mosaic is nested inside it, where `DstRect` places the two
-3600 × 3600 pixel tiles side by side. `dem.to_xml()` returns the full document.
+The outer VRT is the reprojection, and its grid is the MGRS square. The mosaic is nested
+inside it, where `DstRect` places the two 3600 × 3600 pixel tiles side by side. `dem.to_xml()` returns the full document.
 
 ### When to write a COG
 
@@ -208,7 +193,7 @@ resampling is `average`, which suits a coarser target. For a finer target, as at
 of this page, pass `Resampling.bilinear` or `Resampling.cubic`. `reproject` keeps the
 source's data type, so averaging `uint16` values rounds the result: pass `dtype="float32"` to keep the
 fractions. When the source and target CRS both carry heights, `reproject` also converts
-them, as in the example at the top.
+them; see [VRT recipes](05-vrt-recipes.qmd#convert-heights-between-vertical-datums).
 
 ### Stack bands
 
