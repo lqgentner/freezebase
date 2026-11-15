@@ -184,7 +184,9 @@ def _file(path: UPath) -> File:
         parts = urlsplit(full)
         full = urlunsplit((parts.scheme, parts.netloc.rpartition("@")[2], parts.path, "", ""))
         name = PurePosixPath(parts.path).name
-    if not name:
+    # A bucket root: UPath versions disagree on whether its name is the bucket or empty.
+    remote = path.protocol not in {"", "file", "http", "https"}
+    if not name or (remote and "/" not in path.path.strip("/")):
         return File(_clip(full), full)
     if path.protocol not in {"", "file"}:
         return File(f"{path.protocol}://…/{_clip(name)}", full)
