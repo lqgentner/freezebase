@@ -42,6 +42,10 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ### Fixed
 
+- `write_cog` keeps a CRS that GeoTIFF cannot encode, such as UTM with ellipsoidal heights.
+  GDAL stores it in a `.aux.xml` sidecar, which now lands next to the COG (and is uploaded
+  to S3) instead of being left behind as a hidden temporary file, leaving the COG without
+  a CRS.
 - `rewrite_tiff` of a `VRT` to a format that keeps metadata in a sidecar file, such as
   PNG, writes the `.aux.xml` beside the destination instead of leaving it behind as a
   hidden temporary file.
