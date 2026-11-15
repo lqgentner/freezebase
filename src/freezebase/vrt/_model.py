@@ -12,7 +12,6 @@ from rasterio.coords import BoundingBox
 from rasterio.enums import ColorInterp, Resampling
 
 from freezebase._deprecation import deprecated_alias
-
 from freezebase.vrt import _summary
 
 if TYPE_CHECKING:
@@ -806,8 +805,10 @@ class VRT:
     ) -> None:
         """Write the pixels as a raster file in any format GDAL can copy to.
 
-        Sidecar files the format needs, such as a PNG's ``.aux.xml``, are written beside
-        ``path``. Local writes are atomic.
+        Sidecar files the format needs, such as a PNG's ``.aux.xml`` holding its CRS, are
+        written beside ``path`` first; the raster itself lands last, atomically on local
+        disk. freezebase reads S3 without listing the bucket, so reading a raster back from
+        S3 through freezebase misses its sidecars.
 
         Parameters
         ----------
@@ -815,10 +816,14 @@ class VRT:
             Destination (local or S3).
         profile : dict[str, Any] | None, optional
             ``dtype``, ``nodata`` and GDAL creation options of ``driver``. ``dtype`` and
-            ``nodata`` apply as for ``to_cog``. For ``GTiff``, the creation options default
-            to ``RASTERIO_PROFILE_DEFAULTS``. A ``driver`` key must match ``driver``.
+            ``nodata`` apply as for ``to_cog``; the keys describing the dataset (``crs``,
+            ``transform``, ``count``, ``width``, ``height``) are ignored. For ``GTiff``,
+            the creation options default to ``RASTERIO_PROFILE_DEFAULTS``; for another
+            driver, its GTiff options (``tiled``, ``blockxsize``, ``blockysize``,
+            ``interleave``, ``compress``) are dropped. A ``driver`` key must match
+            ``driver``.
         driver : str, optional
-            GDAL driver name, such as ``"GTiff"`` or ``"PNG"``.
+            GDAL driver name, such as ``"GTiff"`` or ``"PNG"``. Use ``to_cog`` for a COG.
         band_names : list[str] | None, optional
             Band descriptions, one per band.
         color_interp : list[ColorInterp] | None, optional
@@ -833,9 +838,9 @@ class VRT:
         Raises
         ------
         ValueError
-            If ``profile`` sets another driver, a per-band sequence has the wrong length,
-            the dtype is unknown, a nodata value does not fit the dtype, or the bands
-            differ in dtype or nodata without ``profile`` setting it.
+            If ``driver`` is ``COG``, ``profile`` sets another driver, a per-band sequence
+            has the wrong length, the dtype is unknown, a nodata value does not fit the
+            dtype, or the bands differ in dtype or nodata without ``profile`` setting it.
         RasterWriteError
             If the write fails, also when ``driver`` cannot hold the bands, such as
             ``float32`` in a PNG.

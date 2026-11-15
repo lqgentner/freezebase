@@ -516,6 +516,17 @@ def group_tiffs_by_crs(src_tiffs: Sequence[AnyPath]) -> dict[str, list[UPath]]:
     return groups
 
 
+# Dataset properties, which a raster's creation options never hold.
+_DATASET_KEYS = ("driver", "dtype", "nodata", "crs", "transform", "count", "width", "height")
+_GTIFF_ONLY_KEYS = ("tiled", "blockxsize", "blockysize", "interleave")
+
+
+def _creation_options(profile: Mapping[str, Any], driver: str) -> dict[str, Any]:
+    """Return ``profile`` without dataset keys, nor GTiff-only ones for another driver."""
+    dropped = _DATASET_KEYS if driver == "GTiff" else _DATASET_KEYS + _GTIFF_ONLY_KEYS
+    return {key: value for key, value in profile.items() if key not in dropped}
+
+
 def rewrite_tiff(
     src_file: AnyPath | VRT,
     dst_file: AnyPath,
@@ -569,14 +580,8 @@ def rewrite_tiff(
     dst_file = UPath(dst_file)
 
     dst_profile = build_rasterio_profile(profile)
-    driver = dst_profile.pop("driver", "GTiff")
-    # Remove dataset metadata from the creation options.
-    for _k in ("dtype", "nodata", "crs", "transform", "count", "width", "height"):
-        dst_profile.pop(_k, None)
-    if driver != "GTiff":
-        # Remove GTiff-only defaults.
-        for _k in ("tiled", "blockxsize", "blockysize", "interleave"):
-            dst_profile.pop(_k, None)
+    driver = dst_profile.get("driver", "GTiff")
+    dst_profile = _creation_options(dst_profile, driver)
 
     if isinstance(src_file, VRT):
         _rewrite_vrt(
@@ -887,31 +892,57 @@ def _is_vrt_input(data: object) -> bool:
     return isinstance(data, VRT | str | UPath) or hasattr(data, "__fspath__")
 
 
+# Drivers that write everything into the one file, never a sidecar.
+_SINGLE_FILE_DRIVERS = frozenset({"COG", "GTIFF"})
+
+
 def _encode(
     src: str, dst_file: UPath, options: Mapping[str, Any], *, checksum: bool
 ) -> str | None:
     """Encode ``src`` with ``options`` at ``dst_file``, sidecars included; return the digest."""
+    sidecars = str(options.get("driver", "")).upper() not in _SINGLE_FILE_DRIVERS
     digest: str | None = None
     if dst_file.protocol == "s3":
-        # Encoded to a temporary file and uploaded in one put each, never through /vsis3/.
+        # Encoded to a temporary file and uploaded in one put, never through /vsis3/.
         with tempfile.TemporaryDirectory(prefix="freezebase-") as tmp:
             encoded = Path(tmp) / dst_file.name
             rasterio.shutil.copy(src, str(encoded), **options)
             if checksum:
                 digest = _SHA256_MULTIHASH_PREFIX + file_sha256(encoded)
             # Sidecars first, so the raster lands last.
-            for sidecar in _sidecars(encoded):
+            for sidecar in _sidecars(encoded) if sidecars else []:
                 _upload(sidecar, dst_file.with_name(sidecar.name))
             _upload(encoded, dst_file)
         return digest
     if dst_file.protocol != "":
         msg = f"Unsupported protocol '{dst_file.protocol}'."
         raise ValueError(msg)
-    target = Path(dst_file.path)
-    # A hidden directory beside the destination: sidecars such as a PNG's .aux.xml take
-    # the encoded file's name, and the raster lands by an atomic rename.
+    if not Path(dst_file.path).parent.is_dir():
+        msg = f"The directory of {dst_file} does not exist."
+        raise FileNotFoundError(msg)
+    if sidecars:
+        return _encode_with_sidecars(src, Path(dst_file.path), options, checksum=checksum)
+    # A local write is an atomic rename of a hidden file beside the destination.
+    work_dst = dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.tmp")
+    try:
+        rasterio.shutil.copy(src, _to_vsi_uri(work_dst), **options)
+        if checksum:
+            digest = _SHA256_MULTIHASH_PREFIX + file_sha256(work_dst)
+        work_dst.replace(dst_file)
+    except BaseException:
+        work_dst.unlink(missing_ok=True)
+        raise
+    return digest
+
+
+def _encode_with_sidecars(
+    src: str, target: Path, options: Mapping[str, Any], *, checksum: bool
+) -> str | None:
+    """Encode in a hidden directory beside ``target``, then move sidecars and raster out."""
+    # Sidecars such as a PNG's .aux.xml take the encoded file's name.
     work_dir = target.with_name(f".{target.name}.{token_hex(8)}.tmp")
     work_dir.mkdir()
+    digest: str | None = None
     try:
         encoded = work_dir / target.name
         rasterio.shutil.copy(src, str(encoded), **options)
@@ -919,6 +950,7 @@ def _encode(
             digest = _SHA256_MULTIHASH_PREFIX + file_sha256(encoded)
         for sidecar in _sidecars(encoded):
             sidecar.replace(target.with_name(sidecar.name))
+        # The raster lands last, by an atomic rename.
         encoded.replace(target)
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
@@ -926,8 +958,13 @@ def _encode(
 
 
 def _sidecars(encoded: Path) -> list[Path]:
-    """Return the files GDAL wrote beside ``encoded``."""
-    return sorted(path for path in encoded.parent.iterdir() if path != encoded)
+    """Return the files GDAL wrote beside ``encoded`` under its stem, such as ``.aux.xml``."""
+    # The stem, not the name: ENVI writes x.hdr beside x.img.
+    return sorted(
+        path
+        for path in encoded.parent.iterdir()
+        if path.name.startswith(f"{encoded.stem}.") and path != encoded
+    )
 
 
 def _prepare_vrt_for_file(
@@ -1001,16 +1038,16 @@ def _write_cog_from_vrt(
     return digest
 
 
-# Dataset properties, which a raster's creation options never hold.
-_DATASET_KEYS = ("driver", "dtype", "nodata", "crs", "transform", "count", "width", "height")
-
-
 def _raster_creation_options(profile: Mapping[str, Any], driver: str) -> dict[str, Any]:
     """Return ``driver`` and the creation options of ``profile``, over the GTiff defaults."""
-    defaults = RASTERIO_PROFILE_DEFAULTS if driver.upper() == "GTIFF" else {}
-    options = {**defaults, **profile}
-    for key in _DATASET_KEYS:
-        options.pop(key, None)
+    if driver == "GTiff":
+        return {
+            "driver": driver,
+            **_creation_options({**RASTERIO_PROFILE_DEFAULTS, **profile}, driver),
+        }
+    options = _creation_options(profile, driver)
+    # GTiff's default codec, which build_rasterio_profile sets for every driver.
+    options.pop("compress", None)
     return {"driver": driver, **options}
 
 
@@ -1027,11 +1064,16 @@ def _write_raster_from_vrt(
     units: list[str] | None,
 ) -> None:
     """Stream a VRT into a raster file of any format GDAL can copy to; see ``VRT.to_raster``."""
+    if driver.upper() == "COG":
+        msg = "to_raster does not write COGs; use to_cog, which also refuses reprojection."
+        raise ValueError(msg)
     profile = profile or {}
     requested = profile.get("driver", driver)
     if str(requested).upper() != driver.upper():
         msg = f"profile sets driver {requested!r} but driver is {driver!r}; pass one of them."
         raise ValueError(msg)
+    # GDAL matches driver names in any case; the GTiff defaults key on this spelling.
+    driver = "GTiff" if driver.upper() == "GTIFF" else driver
     dst_file = UPath(dst_file)
     try:
         prepared = _prepare_vrt_for_file(

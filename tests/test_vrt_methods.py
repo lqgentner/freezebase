@@ -15,7 +15,7 @@ from upath import UPath
 
 from freezebase import vrt
 from freezebase.errors import RasterWriteError
-from freezebase.raster import build_rasterio_profile, write_cog
+from freezebase.raster import _encode, build_rasterio_profile, write_cog
 from freezebase.vrt import VRT, PixelFunction, from_raster, mosaic
 from tests.rasters import make_tiff
 
@@ -68,6 +68,14 @@ def test_methods_match_their_functions(
     method: Callable[..., Any], function: Callable[..., Any], skip: int
 ) -> None:
     assert _parameters(method, skip) == _parameters(function, skip)
+
+
+def test_to_raster_metadata_keywords_match_to_cog() -> None:
+    names = {"band_names", "color_interp", "tags", "band_tags", "units"}
+    to_raster = [p for p in _parameters(VRT.to_raster, 0) if p[0] in names]
+    to_cog = [p for p in _parameters(VRT.to_cog, 0) if p[0] in names]
+    assert len(to_raster) == len(names)
+    assert to_raster == to_cog
 
 
 class TestChaining:
@@ -174,6 +182,39 @@ class TestToRaster:
             _uint16(tmp_path).to_raster(tmp_path / "o.png", build_rasterio_profile(), driver="PNG")
         assert not (tmp_path / "o.png").exists()
 
+    @pytest.mark.parametrize("driver", ["COG", "cog"])
+    def test_cog_driver_points_to_to_cog(self, tmp_path: Path, driver: str) -> None:
+        with pytest.raises(ValueError, match="use to_cog"):
+            _uint16(tmp_path).to_raster(
+                tmp_path / "o.tif", {"target_srs": "EPSG:3857"}, driver=driver
+            )
+        assert not (tmp_path / "o.tif").exists()
+
+    def test_png_gets_no_gtiff_options(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        source = from_raster(make_tiff(tmp_path / "a.tif", dtype="uint8", nodata=0))
+        real_copy = rasterio.shutil.copy
+        passed: dict[str, Any] = {}
+
+        def record(*args: Any, **kwargs: Any) -> None:
+            passed.update(kwargs)
+            real_copy(*args, **kwargs)
+
+        monkeypatch.setattr(rasterio.shutil, "copy", record)
+        profile = build_rasterio_profile({"driver": "PNG", "crs": "EPSG:4326", "count": 3})
+        source.to_raster(tmp_path / "q.png", profile, driver="PNG")
+        assert passed == {"driver": "PNG"}
+        assert "not support" not in caplog.text
+
+    def test_missing_directory_names_the_destination(self, tmp_path: Path) -> None:
+        dst = tmp_path / "nope" / "q.png"
+        source = from_raster(make_tiff(tmp_path / "a.tif", dtype="uint8", nodata=0))
+        with pytest.raises(RasterWriteError, match=f"directory of {dst} does not exist"):
+            source.to_raster(dst, driver="PNG")
+        with pytest.raises(RasterWriteError, match=f"directory of {dst} does not exist"):
+            source.to_cog(dst)
+
     def test_png_with_its_sidecar(self, tmp_path: Path) -> None:
         source = from_raster(make_tiff(tmp_path / "a.tif", dtype="uint8", nodata=0))
         dst = tmp_path / "q.png"
@@ -184,6 +225,15 @@ class TestToRaster:
             assert ds.crs == source.crs
             np.testing.assert_array_equal(ds.read(), _read(tmp_path / "a.tif"))
         assert sorted(p.name for p in tmp_path.iterdir()) == ["a.tif", "q.png", "q.png.aux.xml"]
+
+    def test_envi_keeps_its_header(self, tmp_path: Path) -> None:
+        source = _uint16(tmp_path)
+        source.to_raster(tmp_path / "e.img", driver="ENVI")
+        assert {"e.img", "e.hdr"} <= {p.name for p in tmp_path.iterdir()}
+        with rasterio.open(tmp_path / "e.img") as ds:
+            assert ds.driver == "ENVI"
+            np.testing.assert_array_equal(ds.read(), _read(tmp_path / "u.tif"))
+        assert not list(tmp_path.glob(".*"))
 
     def test_png_of_float32_is_a_write_error(self, tmp_path: Path) -> None:
         source = mosaic(_tiles(tmp_path))
@@ -233,6 +283,13 @@ class TestToRaster:
         source.to_raster("s3://bucket/q.png", driver="PNG")
         assert list(s3_uploads) == ["s3://bucket/q.png.aux.xml", "s3://bucket/q.png"]
         assert s3_uploads["s3://bucket/q.png"].startswith(b"\x89PNG")
+
+    def test_checksum_with_a_sidecar_is_of_the_raster(self, tmp_path: Path) -> None:
+        source = from_raster(make_tiff(tmp_path / "a.tif", dtype="uint8", nodata=0))
+        dst = tmp_path / "q.png"
+        digest = _encode(source.to_xml(), UPath(dst), {"driver": "PNG"}, checksum=True)
+        assert digest == "1220" + hashlib.sha256(dst.read_bytes()).hexdigest()
+        assert (tmp_path / "q.png.aux.xml").exists()
 
     def test_s3_gtiff_is_one_upload(self, tmp_path: Path, s3_uploads: dict[str, bytes]) -> None:
         _uint16(tmp_path).to_raster("s3://bucket/o.tif")
