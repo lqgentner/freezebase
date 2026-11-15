@@ -6,6 +6,8 @@ import copy
 import importlib
 import itertools
 import math
+import numbers
+import operator
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -14,7 +16,6 @@ import rasterio.windows
 from rasterio.windows import Window
 
 from freezebase.raster import _apply_vrt_metadata
-from freezebase.vrt._builders import _snapshot, _stack
 from freezebase.vrt._grid import _ALIGNMENT_TOL
 from freezebase.vrt._model import VRT, Band, Source
 
@@ -25,7 +26,7 @@ type ColorStop = tuple[float, tuple[int, ...]]
 
 _RGBA = (ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha)
 _OPAQUE = 255
-# Samples taken from a colormap, as many as matplotlib's default lookup table holds.
+# Samples taken from a continuous colormap, as many as matplotlib's default lookup table.
 _COLORMAP_SAMPLES = 256
 
 
@@ -36,16 +37,65 @@ def _check_band(vrt: VRT, band: int) -> None:
         raise ValueError(msg)
 
 
-def select(vrt: VRT, bands: Sequence[int]) -> VRT:
+def _views(vrt: VRT, bands: Sequence[int]) -> list[tuple[VRT, int]]:
+    """Return, per 1-based band, a copy of what it reads and its band number in that copy.
+
+    Each view holds only its own band, so a chain of steps nests each band once rather
+    than every band once per output band. A warp covers all bands at once, so the bands
+    of a warped VRT share one whole copy.
+    """
+    if vrt.warp is not None:
+        whole = copy.deepcopy(vrt)
+        return [(whole, band) for band in bands]
+    return [
+        (VRT(vrt.crs, vrt.transform, vrt.width, vrt.height, [copy.deepcopy(vrt.bands[b - 1])]), 1)
+        for b in bands
+    ]
+
+
+def _reading(band: Band, view: VRT, view_band: int, window: Window | None) -> Band:
+    """Build a band with the metadata of ``band`` that reads ``view_band`` of ``view``."""
+    return Band(
+        dtype=band.dtype,
+        sources=[
+            Source(
+                path=view,
+                band=view_band,
+                src_window=window,
+                dst_window=None if window is None else Window(0, 0, window.width, window.height),
+            )
+        ],
+        nodata=band.nodata,
+        description=band.description,
+        color_interp=band.color_interp,
+        unit=band.unit,
+        metadata=dict(band.metadata),
+        # The source is read raw, so the band keeps the scale and offset that apply to it.
+        scale=band.scale,
+        offset=band.offset,
+    )
+
+
+def select(vrt: VRT, bands: Sequence[int] | np.ndarray) -> VRT:
     """Return the bands ``bands`` of ``vrt``, in that order, as ``VRT.select`` documents."""
-    if not bands:
+    if len(bands) == 0:
         msg = "bands must not be empty."
         raise ValueError(msg)
-    for band in bands:
+    try:
+        wanted = [operator.index(band) for band in bands]
+    except TypeError:
+        msg = f"bands must hold integers, got {list(bands)}."
+        raise ValueError(msg) from None
+    for band in wanted:
         _check_band(vrt, band)
-    out = _stack(_snapshot([vrt]), bands=[bands])
-    out.metadata = dict(vrt.metadata)
-    return out
+    if vrt.warp is None:
+        out = [copy.deepcopy(vrt.bands[band - 1]) for band in wanted]
+    else:
+        out = [
+            _reading(vrt.bands[band - 1], view, view_band, None)
+            for band, (view, view_band) in zip(wanted, _views(vrt, wanted), strict=True)
+        ]
+    return VRT(vrt.crs, vrt.transform, vrt.width, vrt.height, out, metadata=dict(vrt.metadata))
 
 
 def set_metadata(
@@ -84,34 +134,47 @@ def clip_box(vrt: VRT, minx: float, miny: float, maxx: float, maxy: float) -> VR
     if b != 0 or d != 0 or a <= 0 or e >= 0:
         msg = "clip_box needs a north-up grid without rotation; reproject the VRT first."
         raise ValueError(msg)
+    box = (minx, miny, maxx, maxy)
+    if not all(math.isfinite(edge) for edge in box):
+        msg = f"The box {box} has an edge that is not finite."
+        raise ValueError(msg)
     if minx >= maxx or miny >= maxy:
-        msg = f"The box ({minx}, {miny}, {maxx}, {maxy}) is empty."
+        msg = f"The box {box} is empty."
         raise ValueError(msg)
     col0 = _grid_offset((minx - c) / a, "minx")
     col1 = _grid_offset((maxx - c) / a, "maxx")
     row0 = _grid_offset((maxy - f) / e, "maxy")
     row1 = _grid_offset((miny - f) / e, "miny")
     if col0 < 0 or row0 < 0 or col1 > vrt.width or row1 > vrt.height:
-        msg = (
-            f"The box ({minx}, {miny}, {maxx}, {maxy}) extends beyond the VRT's bounds "
-            f"{tuple(vrt.bounds)}."
-        )
+        msg = f"The box {box} extends beyond the VRT's bounds {tuple(vrt.bounds)}."
         raise ValueError(msg)
     window = Window(col0, row0, col1 - col0, row1 - row0)
-    out = _stack(_snapshot([vrt]))
-    for band in out.bands:
-        band.sources[0].src_window = window
-        band.sources[0].dst_window = Window(0, 0, window.width, window.height)
-    out.transform = rasterio.windows.transform(window, out.transform)
-    out.width, out.height = col1 - col0, row1 - row0
-    out.metadata = dict(vrt.metadata)
-    return out
+    return VRT(
+        crs=vrt.crs,
+        transform=rasterio.windows.transform(window, vrt.transform),
+        width=col1 - col0,
+        height=row1 - row0,
+        bands=[
+            _reading(band, view, view_band, window)
+            for band, (view, view_band) in zip(
+                vrt.bands, _views(vrt, range(1, vrt.count + 1)), strict=True
+            )
+        ],
+        metadata=dict(vrt.metadata),
+    )
+
+
+def _sample(colormap: Callable[[np.ndarray], Any], positions: np.ndarray) -> list[tuple[int, ...]]:
+    """Return the 0-255 RGBA colors of ``colormap`` at ``positions`` from 0 to 1."""
+    rgba = np.asarray(colormap(positions), dtype=float)
+    channels = np.rint(np.clip(rgba, 0.0, 1.0) * 255).astype(int)
+    return [tuple(int(channel) for channel in color) for color in channels]
 
 
 def _colormap_stops(
     colormap: str | Callable[[np.ndarray], Any], vmin: float | None, vmax: float | None
 ) -> list[ColorStop]:
-    """Sample a matplotlib colormap, or its name, into stops from ``vmin`` to ``vmax``."""
+    """Turn a matplotlib colormap, or its name, into stops from ``vmin`` to ``vmax``."""
     if vmin is None or vmax is None:
         msg = "A colormap needs vmin and vmax."
         raise ValueError(msg)
@@ -129,13 +192,20 @@ def _colormap_stops(
             msg = f"matplotlib has no colormap named {colormap!r}."
             raise ValueError(msg)
         colormap = mpl.colormaps[colormap]
-    rgba = np.asarray(colormap(np.linspace(0.0, 1.0, _COLORMAP_SAMPLES)), dtype=float)
-    channels = np.rint(np.clip(rgba, 0.0, 1.0) * 255).astype(int)
-    values = np.linspace(vmin, vmax, _COLORMAP_SAMPLES)
-    return [
-        (float(value), (int(r), int(g), int(b), int(alpha)))
-        for value, (r, g, b, alpha) in zip(values, channels, strict=True)
-    ]
+    count = getattr(colormap, "N", _COLORMAP_SAMPLES)
+    if count >= _COLORMAP_SAMPLES:
+        values = np.linspace(vmin, vmax, _COLORMAP_SAMPLES)
+        colors = _sample(colormap, np.linspace(0.0, 1.0, _COLORMAP_SAMPLES))
+        return [(float(v), color) for v, color in zip(values, colors, strict=True)]
+    # Few colors, as in a listed colormap: one flat step each, so no two classes blend.
+    # Matplotlib gives the value at an edge the color above it.
+    edges = np.linspace(vmin, vmax, count + 1)
+    colors = _sample(colormap, (np.arange(count) + 0.5) / count)
+    stops: list[ColorStop] = []
+    for k, color in enumerate(colors):
+        end = edges[k + 1] if k == count - 1 else np.nextafter(edges[k + 1], -np.inf)
+        stops += [(float(edges[k]), color), (float(end), color)]
+    return stops
 
 
 def _check_stops(stops: Sequence[ColorStop]) -> None:
@@ -144,8 +214,10 @@ def _check_stops(stops: Sequence[ColorStop]) -> None:
         msg = f"colors needs at least two stops, got {len(stops)}."
         raise ValueError(msg)
     for value, color in stops:
-        if len(color) not in {3, 4} or not all(0 <= c <= _OPAQUE for c in color):
-            msg = f"The color of stop {value} must be 3 or 4 values from 0 to 255, got {color}."
+        if len(color) not in {3, 4} or not all(
+            isinstance(c, numbers.Integral) and 0 <= c <= _OPAQUE for c in color
+        ):
+            msg = f"The color of stop {value} must be 3 or 4 integers from 0 to 255, got {color}."
             raise ValueError(msg)
     values = [value for value, _ in stops]
     if not all(math.isfinite(v) for v in values) or any(
@@ -173,12 +245,18 @@ def colorize(
             raise ValueError(msg)
         stops = list(colors)
         _check_stops(stops)
-    nested = copy.deepcopy(vrt)
-    nodata = vrt.bands[band - 1].nodata
-    channels = [
-        [(float(value), float(color[i] if i < len(color) else _OPAQUE)) for value, color in stops]
+    source = vrt.bands[band - 1]
+    # GDAL maps NaN through a leading NaN entry only; integer pixels are never NaN.
+    head = [(math.nan, 0.0)] if source.dtype.startswith("float") else []
+    tables = [
+        head
+        + [
+            (float(value), float(color[i] if i < len(color) else _OPAQUE))
+            for value, color in stops
+        ]
         for i in range(4)
     ]
+    ((view, view_band),) = _views(vrt, [band])
     return VRT(
         crs=vrt.crs,
         transform=vrt.transform,
@@ -188,9 +266,9 @@ def colorize(
         bands=[
             Band(
                 dtype="uint8",
-                sources=[Source(path=nested, band=band, nodata=nodata, lut=table)],
+                sources=[Source(path=view, band=view_band, nodata=source.nodata, lut=table)],
                 color_interp=interp,
             )
-            for interp, table in zip(_RGBA, channels, strict=True)
+            for interp, table in zip(_RGBA, tables, strict=True)
         ],
     )

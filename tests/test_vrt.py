@@ -10,7 +10,7 @@ from xml.etree import ElementTree as ET
 import numpy as np
 import pytest
 import rasterio
-from rasterio.enums import Resampling
+from rasterio.enums import ColorInterp, Resampling
 from rasterio.transform import Affine, from_origin
 from rasterio.vrt import WarpedVRT
 
@@ -931,9 +931,22 @@ class TestRgbaVrt:
             create_rgba_vrt(src, tmp_path / "rgba.vrt", luts=[[(0.0, 0), (1.0, 255)]])
 
 
-def _pixels(path: Path | UPath) -> np.ndarray:
+def _read_all(path: Path | UPath) -> tuple[np.ndarray, tuple[object, ...]]:
+    """Return the pixels and the per-band metadata a deprecation test compares."""
     with rasterio.open(path) as ds:
-        return ds.read()
+        bands = np.stack([ds.read(i) for i in ds.indexes])
+        return bands, (ds.dtypes, ds.descriptions, ds.colorinterp, ds.units, ds.nodatavals)
+
+
+def _assert_same(old: Path | UPath, new: Path | UPath) -> None:
+    """Assert two rasters hold equal pixels and per-band metadata, NaN equal to NaN."""
+    (old_pixels, old_meta), (new_pixels, new_meta) = _read_all(old), _read_all(new)
+    np.testing.assert_array_equal(old_pixels, new_pixels, strict=True)
+    assert old_meta[:4] == new_meta[:4]
+    np.testing.assert_array_equal(old_meta[4], new_meta[4])
+
+
+DEPRECATED = "is deprecated and will be removed in a future release; use "
 
 
 class TestDeprecations:
@@ -941,14 +954,16 @@ class TestDeprecations:
         make_tiff(tmp_path / "a.tif", fill=1.0)
         make_tiff(tmp_path / "b.tif", fill=2.0, origin=(500000 + WIDTH * 10, 5200000))
         files = [tmp_path / "a.tif", tmp_path / "b.tif"]
-        with pytest.warns(DeprecationWarning, match=r"use freezebase\.vrt\.mosaic\(") as record:
+        match = DEPRECATED + r"freezebase\.vrt\.mosaic\("
+        with pytest.warns(DeprecationWarning, match=match) as record:
             build_vrt_mosaic(files, tmp_path / "old.vrt")
         assert record[0].filename == __file__
         new = mosaic(files).to_vrt(tmp_path / "new.vrt")
         assert (tmp_path / "old.vrt").read_text() == new.read_text()
 
     def test_create_warped_vrt(self, vv_tiff: Path, tmp_path: Path) -> None:
-        with pytest.warns(DeprecationWarning, match=r"use freezebase\.vrt\.reproject\(") as record:
+        match = DEPRECATED + r"freezebase\.vrt\.reproject\("
+        with pytest.warns(DeprecationWarning, match=match) as record:
             create_warped_vrt(vv_tiff, tmp_path / "old.vrt", crs="EPSG:3857", resolution=20.0)
         assert record[0].filename == __file__
         warped = reproject(vv_tiff, crs="EPSG:3857", resolution=20.0)
@@ -956,27 +971,56 @@ class TestDeprecations:
         assert (tmp_path / "old.vrt").read_text() == new.read_text()
 
     def test_create_decibel_vrt(self, vv_tiff: Path, tmp_path: Path) -> None:
-        with pytest.warns(DeprecationWarning, match=r"use freezebase\.vrt\.derive\(") as record:
+        match = DEPRECATED + r"freezebase\.vrt\.derive\(.*description='dB'"
+        with pytest.warns(DeprecationWarning, match=match) as record:
             create_decibel_vrt(vv_tiff, tmp_path / "old.vrt")
         assert record[0].filename == __file__
-        new = derive(vv_tiff, PixelFunction.db(), band=1).to_vrt(tmp_path / "new.vrt")
-        np.testing.assert_array_equal(_pixels(tmp_path / "old.vrt"), _pixels(new))
+        new = derive(vv_tiff, PixelFunction.db(), description="dB", band=1)
+        assert (tmp_path / "old.vrt").read_text() == new.to_vrt(tmp_path / "new.vrt").read_text()
 
-    def test_create_rgb_vrt(self, vv_tiff: Path, vh_tiff: Path, tmp_path: Path) -> None:
-        with pytest.warns(DeprecationWarning, match=r"use freezebase\.vrt\.stack") as record:
-            create_rgb_vrt(vv_tiff, vh_tiff, tmp_path / "old.vrt")
+    @pytest.mark.parametrize("decibel_scale", [False, True])
+    def test_create_rgb_vrt(self, tmp_path: Path, decibel_scale: bool) -> None:
+        vv, vh = tmp_path / "vv.tif", tmp_path / "vh.tif"
+        make_uint16_tiff(vv)
+        make_uint16_tiff(vh, nodata=0)
+        match = DEPRECATED + r"freezebase\.vrt\.stack\("
+        with pytest.warns(DeprecationWarning, match=match) as record:
+            create_rgb_vrt(vv, vh, tmp_path / "old.vrt", decibel_scale=decibel_scale)
         assert record[0].filename == __file__
-        ratio = derive([vv_tiff, vh_tiff], PixelFunction.div())
-        new = stack([vv_tiff, vh_tiff, ratio], bands=[[1], [1], None]).to_vrt(tmp_path / "new.vrt")
-        np.testing.assert_array_equal(_pixels(tmp_path / "old.vrt"), _pixels(new))
+        names = ["VV_dB", "VH_dB", "VV_dB-VH_dB"] if decibel_scale else ["VV", "VH", "VV/VH"]
+        blue = PixelFunction.diff() if decibel_scale else PixelFunction.div()
+        rgb = stack(
+            [
+                derive(vv, PixelFunction.scale(), band=1),
+                derive(vh, PixelFunction.scale(), band=1),
+                derive([vv, vh], blue),
+            ]
+        ).set(
+            band_names=names,
+            color_interp=[ColorInterp.red, ColorInterp.green, ColorInterp.blue],
+        )
+        new = rgb.to_vrt(tmp_path / "new.vrt")
+        (old_pixels, old_meta), (new_pixels, new_meta) = (
+            _read_all(tmp_path / "old.vrt"),
+            _read_all(new),
+        )
+        assert old_meta[:4] == new_meta[:4]
+        np.testing.assert_array_equal(old_meta[4], new_meta[4])
+        # Only the inputs' nodata pixels differ: NaN now, their raw value 0 before.
+        valid = np.ones(old_pixels.shape[1:], dtype=bool)
+        valid[0, 0] = False
+        np.testing.assert_array_equal(old_pixels[:, valid], new_pixels[:, valid])
+        assert np.isnan(new_pixels[:, 0, 0]).all()
+        assert (old_pixels[:2, 0, 0] == 0).all()
 
     def test_create_rgba_vrt(self, tmp_path: Path) -> None:
         src = tmp_path / "src.tif"
         make_uint16_tiff(src)
         luts = [[(0.0, 0), (24.0, 255)], [(0.0, 255), (24.0, 0)], [(0.0, 9), (24.0, 9)]]
-        with pytest.warns(DeprecationWarning, match=r"colorize") as record:
+        match = DEPRECATED + r"freezebase\.vrt\.from_raster\(src_path\)\.colorize"
+        with pytest.warns(DeprecationWarning, match=match) as record:
             create_rgba_vrt(src, tmp_path / "old.vrt", luts=luts)
         assert record[0].filename == __file__
         stops = [(v, (r, g, b)) for (v, r), (_, g), (_, b) in zip(*luts, strict=True)]
         new = from_raster(src).colorize(stops).to_vrt(tmp_path / "new.vrt")
-        np.testing.assert_array_equal(_pixels(tmp_path / "old.vrt"), _pixels(new))
+        _assert_same(tmp_path / "old.vrt", new)

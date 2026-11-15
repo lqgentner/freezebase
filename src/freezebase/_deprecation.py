@@ -10,20 +10,13 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-def warn_deprecated(old: str, new: str) -> None:
-    """Warn that ``old`` is deprecated in favor of ``new``, from a wrapper of ``old``."""
-    msg = f"{old} is deprecated and will be removed in a future release; use {new}."
-    # Past this helper and the wrapper, so the warning points at the caller.
-    warnings.warn(msg, DeprecationWarning, stacklevel=3)
-
-
-def deprecated[**P, T](old: str, new: str) -> Callable[[Callable[P, T]], Callable[P, T]]:
-    """Make the function public as ``old`` warn on every call that ``new`` replaces it."""
+def deprecated[**P, T](message: str) -> Callable[[Callable[P, T]], Callable[P, T]]:
+    """Make the decorated function warn ``message`` on every call, like PEP 702's decorator."""
 
     def decorator(func: Callable[P, T]) -> Callable[P, T]:
         @functools.wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
-            warn_deprecated(old, new)
+            warnings.warn(message, DeprecationWarning, stacklevel=2)
             return func(*args, **kwargs)
 
         return wrapper
@@ -36,7 +29,8 @@ def deprecated_alias[F: Callable[..., Any]](func: F, old: str, new: str) -> F:
 
     @functools.wraps(func)
     def alias(*args: Any, **kwargs: Any) -> Any:
-        warn_deprecated(old, new)
+        msg = f"{old} is deprecated and will be removed in a future release; use {new}."
+        warnings.warn(msg, DeprecationWarning, stacklevel=2)
         return func(*args, **kwargs)
 
     alias.__name__ = alias.__qualname__ = old.rpartition(".")[2]
