@@ -2,8 +2,10 @@ AOIs
 CRSs
 Ceph
 DEMs
+Eiger
 GDAL
 PROJ('s)?
+Pythonic
 Rasterio('s)?
 VRT(s|'s)?
 [Bb]ackscatter
@@ -14,7 +16,7 @@ VRT(s|'s)?
 [Pp]yrefly
 [Rr]asterized
 [Rr]efreshable
-[Rr]eproject(ed|ing|ion|s)?
+[Rr]eproject(ed|ing|ions?|s)?
 [Rr]esampl(e|ed|ing)
 [Rr]etiled?
 aiohttp
@@ -32,4 +34,5 @@ proselint
 pyproj
 suppressions
 swisstopo
+unescaped
 uv
