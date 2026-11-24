@@ -5,6 +5,7 @@ DEMs
 Eiger
 GDAL
 PROJ('s)?
+Pythonic
 Rasterio('s)?
 VRT(s|'s)?
 [Bb]ackscatter

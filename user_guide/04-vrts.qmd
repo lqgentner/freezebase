@@ -1,5 +1,6 @@
 ---
 title: "VRTs"
+reference-location: section
 ---
 
 ```{python}
@@ -10,9 +11,9 @@ import warnings
 warnings.filterwarnings("ignore")
 ```
 
-`freezebase.vrt` builds GDAL virtual rasters in Python and chains them into one lazy recipe.
-These lines mosaic two Copernicus DEM tiles, put them onto MGRS square `32TMS25` around the
-Eiger, Mönch and Jungfrau, and write a COG:
+`freezebase.vrt` builds GDAL virtual rasters in Python. It allows efficient and Pythonic
+method chaining with lazy execution. The following example mosaics two Copernicus DEM tiles,
+puts them onto MGRS square `32TMS25` in UTM coordinates, and writes a COG:
 
 ```{python}
 from rasterio.enums import Resampling
@@ -90,7 +91,7 @@ ax.ticklabel_format(style="plain")
 
 ## How it works
 
-### Nothing is read until you write
+### Lazy execution
 
 `vrt.mosaic` read the headers of the two tiles. `reproject` worked out the target grid and
 the transformation from the headers and the CRSs. Neither read a pixel. `to_cog` then ran
@@ -133,37 +134,35 @@ shortened and unescaped:
 The outer VRT is the reprojection, and its grid is the MGRS square. The mosaic is nested
 inside it, where `DstRect` places the two 3600 × 3600 pixel tiles side by side. `dem.to_xml()` returns the full document.
 
-### When to write a COG
+### When to write a VRT and when to write a raster
 
-Every read of a VRT goes back to the sources and computes the result again. A VRT suits a
-result you read once, or a recipe you want to inspect and edit. Write a COG when you
-read the same pixels often, when the sources are remote or the chain is long, or when other
-people need a plain raster.
+Every read of a VRT goes back to the sources and computes the result again. Save a VRT with
+`to_vrt` for a result you read once, or a recipe you want to inspect and edit. Write a raster
+with `to_cog` or `to_raster` when you read the same pixels often, when the sources are
+remote or the chain is long, or when other people need a plain raster.
+[Write a VRT or a raster](#write-a-vrt-or-a-raster) describes the three methods.
 
-## Compared with GDAL tools
+## Compared with Rasterio and GDAL
 
-GDAL's command-line tools and Rasterio also build VRTs, and GDAL 3.11's
-`gdal raster pipeline` chains steps in one command. freezebase writes the same format, so
-any GDAL program can open its `.vrt` files. It adds a Python object you can inspect and
-edit between steps, without the GDAL Python bindings, and S3 credentials that come with
-the paths.
+freezebase writes standard VRT XML, so any GDAL program can open its `.vrt` files. It builds
+them through Rasterio, without the GDAL Python bindings, and takes S3 credentials from the
+source paths.
 
-| | Builds | Result | Chaining | S3 credentials | Vertical datums |
-|---|---|---|---|---|---|
-| `gdalbuildvrt` | mosaics, band stacks | `.vrt` file | through files | GDAL settings or environment variables | — |
-| `gdalwarp -of VRT` | reprojections | `.vrt` file | through files | GDAL settings or environment variables | converts heights |
-| `gdal_translate -of VRT` | band selections, subsets, rescaling | `.vrt` file | through files | GDAL settings or environment variables | — |
-| Rasterio `WarpedVRT` | reprojections | open dataset, in memory | wraps another open dataset | `rasterio.Env` | through GDAL warp options you set |
-| `freezebase.vrt` | mosaics, stacks, reprojections, pixel functions, band selection, clips, color ramps | Python object, written as `.vrt`, COG or other raster | in memory | taken from the sources' paths | converts heights |
+| | `freezebase.vrt` | Rasterio | GDAL Python bindings |
+|---|---|---|---|
+| Mosaic tiles | ● | ○ | ● |
+| Stack bands | ● | ○ | ● |
+| Reproject | ● | ● | ● |
+| Pixel functions | ● | ○ | ◐[^pixel-functions] |
+| Chain steps without writing files | ● | ○ | ● |
+| Edit sources in Python | ● | ○ | ◐[^sources] |
+
+● supported, ◐ partly supported, ○ not supported.
+
+[^pixel-functions]: Through hand-written VRT XML, or `gdal raster calc` from GDAL 3.11.
+[^sources]: Only as XML strings.
 
 ## Building blocks
-
-`mosaic`, `stack`, `reproject` and `derive` are functions that take file paths or VRTs.
-`reproject`, `derive` and the other steps below are also methods of a VRT, with the VRT as
-the source. The steps return a new VRT, and a VRT passed in is copied, so editing it later
-does not change the result. The deprecated `create_*_vrt` and `build_vrt_mosaic` functions
-each have a replacement listed in the
-[changelog](https://github.com/lqgentner/freezebase/blob/main/CHANGELOG.md).
 
 ### Mosaic tiles
 
