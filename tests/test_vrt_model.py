@@ -417,11 +417,11 @@ class TestPixelFunction:
 
 
 class TestWrite:
-    """Path policy and ``VRT.write``."""
+    """Path policy and ``VRT.to_vrt``."""
 
     def test_source_beside_the_vrt_is_a_bare_name(self, tmp_path: Path) -> None:
         tile = make_tiff(tmp_path / "a.tif")
-        out = vrt_over(tile).write(tmp_path / "m.vrt")
+        out = vrt_over(tile).to_vrt(tmp_path / "m.vrt")
         assert out == UPath(tmp_path / "m.vrt")
         name = find(parse(out.read_text()), ".//SourceFilename")
         assert (name.text, name.get("relativeToVRT")) == ("a.tif", "1")
@@ -430,7 +430,7 @@ class TestWrite:
         (tmp_path / "tiles").mkdir()
         (tmp_path / "vrts").mkdir()
         tile = make_tiff(tmp_path / "tiles" / "a.tif")
-        vrt_over(tile).write(tmp_path / "vrts" / "m.vrt")
+        vrt_over(tile).to_vrt(tmp_path / "vrts" / "m.vrt")
         name = find(parse((tmp_path / "vrts" / "m.vrt").read_text()), ".//SourceFilename")
         assert (name.text, name.get("relativeToVRT")) == ("../tiles/a.tif", "1")
         moved = tmp_path.parent / f"{tmp_path.name}_moved"
@@ -443,13 +443,13 @@ class TestWrite:
         (tmp_path / "proj" / "tiles").mkdir(parents=True)
         (tmp_path / "proj" / "out").symlink_to(tmp_path / "scratch")
         tile = make_tiff(tmp_path / "proj" / "tiles" / "a.tif")
-        out = vrt_over(tile).write(tmp_path / "proj" / "out" / "m.vrt")
+        out = vrt_over(tile).to_vrt(tmp_path / "proj" / "out" / "m.vrt")
         # Previously relative to the symlink's target, which GDAL does not resolve.
         name = find(parse(out.read_text()), ".//SourceFilename")
         assert (name.text, name.get("relativeToVRT")) == ("../tiles/a.tif", "1")
         with rasterio.open(out.path) as ds:
             assert ds.read(1).shape == (4, 6)
-        again = read(out).write(tmp_path / "proj" / "out" / "again.vrt")
+        again = read(out).to_vrt(tmp_path / "proj" / "out" / "again.vrt")
         with rasterio.open(again.path) as ds:
             assert ds.read(1).shape == (4, 6)
 
@@ -469,7 +469,7 @@ class TestWrite:
 
     def test_relative_false_writes_absolute(self, tmp_path: Path) -> None:
         tile = make_tiff(tmp_path / "a.tif")
-        vrt_over(tile).write(tmp_path / "m.vrt", relative=False)
+        vrt_over(tile).to_vrt(tmp_path / "m.vrt", relative=False)
         name = find(parse((tmp_path / "m.vrt").read_text()), ".//SourceFilename")
         assert (name.text, name.get("relativeToVRT")) == (str(tile.resolve()), "0")
 
@@ -490,12 +490,12 @@ class TestWrite:
     def test_write_to_other_protocols_raises(self, tmp_path: Path, path: str) -> None:
         # Previously treated as local and failed obscurely.
         with pytest.raises(ValueError, match="local or s3://"):
-            vrt_over(make_tiff(tmp_path / "a.tif")).write(path)
+            vrt_over(make_tiff(tmp_path / "a.tif")).to_vrt(path)
 
     def test_write_to_a_file_url_is_local(self, tmp_path: Path) -> None:
         tile = make_tiff(tmp_path / "a.tif")
         # Previously refused as a protocol other than local and s3.
-        out = vrt_over(tile).write(f"file://{tmp_path / 'm.vrt'}")
+        out = vrt_over(tile).to_vrt(f"file://{tmp_path / 'm.vrt'}")
         assert out == UPath(tmp_path / "m.vrt")
         name = find(parse(out.read_text()), ".//SourceFilename")
         assert (name.text, name.get("relativeToVRT")) == ("a.tif", "1")
@@ -514,7 +514,7 @@ class TestWrite:
         with pytest.MonkeyPatch.context() as patch:
             patch.setattr(Path, "replace", fail_replace)
             with pytest.raises(OSError, match="boom"):
-                vrt_over(tile).write(dst)
+                vrt_over(tile).to_vrt(dst)
         assert dst.read_text() == "old"
         assert list(tmp_path.glob("*.tmp")) == []
 
@@ -522,14 +522,14 @@ class TestWrite:
         tiles = tmp_path / "ü"
         tiles.mkdir()
         vrt = vrt_over(make_tiff(tiles / "t.tif"))
-        out = vrt.write(tmp_path / "m.vrt", relative=False)
+        out = vrt.to_vrt(tmp_path / "m.vrt", relative=False)
         # Previously written with the locale encoding, unlike the S3 upload.
         assert out.read_bytes() == vrt.to_xml().encode("utf-8")
         assert "ü".encode() in out.read_bytes()
 
     def test_write_to_s3_uploads_once(self, tmp_path: Path, s3_uploads: dict[str, bytes]) -> None:
         tile = make_tiff(tmp_path / "a.tif")
-        out = vrt_over(tile).write("s3://bucket/v/m.vrt")
+        out = vrt_over(tile).to_vrt("s3://bucket/v/m.vrt")
         assert out == UPath("s3://bucket/v/m.vrt")
         assert list(s3_uploads) == ["s3://bucket/v/m.vrt"]
         name = find(parse(s3_uploads["s3://bucket/v/m.vrt"]), ".//SourceFilename")
@@ -548,7 +548,7 @@ class TestWrite:
             ],
         )
         for vrt, name in ((inner, "plain.vrt"), (outer, "nested.vrt")):
-            out = vrt.write(tmp_path / "v" / name)
+            out = vrt.to_vrt(tmp_path / "v" / name)
             with rasterio.open(out.path) as ds:
                 assert ds.read(1).shape == (4, 6)
 
@@ -632,7 +632,7 @@ class TestRead:
             pixel_function=DB_FLOAT32,
         )
         v = VRT(CRS.from_epsg(32632), UTM_GRID, 12, 4, [mosaic, derived], metadata={"A": "1"})
-        out = v.write(tmp_path / "v" / "m.vrt")
+        out = v.to_vrt(tmp_path / "v" / "m.vrt")
         assert find(parse(out.read_text()), ".//SourceFilename").text == "../tiles/a.tif"
         assert read(out) == v
 
@@ -675,7 +675,7 @@ class TestRead:
         assert v.warp.source == UPath(tile)
         assert "SourceDataset" not in v.warp.options_xml
         assert v.bands == [Band("float32", nodata=math.nan)]
-        out = v.write(tmp_path / "v" / "w.vrt")
+        out = v.to_vrt(tmp_path / "v" / "w.vrt")
         source = find(parse(out.read_text()), "GDALWarpOptions/SourceDataset")
         assert (source.text, source.get("relativeToVRT")) == ("../a.tif", "1")
         assert read(out) == v
@@ -695,7 +695,7 @@ class TestRead:
     def test_round_trip_keeps_s3_storage_options(self, s3_uploads: dict[str, bytes]) -> None:
         sources = [Source(UPath("s3://b/t/a.tif")), Source(UPath("s3://c/a.tif"))]
         v = VRT(CRS.from_epsg(32632), UTM_GRID, 6, 4, [Band("float32", sources)])
-        v.write(UPath("s3://b/v/m.vrt", anon=False, key="k"))
+        v.to_vrt(UPath("s3://b/v/m.vrt", anon=False, key="k"))
         xml = s3_uploads["s3://b/v/m.vrt"].decode()
         assert [name.text for name in parse(xml).iter("SourceFilename")] == [
             "../t/a.tif",
@@ -709,7 +709,7 @@ class TestRead:
     def test_storage_options_override_inheritance(self, tmp_path: Path) -> None:
         sources = [Source(UPath("s3://b/t/a.tif")), Source(UPath("s3://c/a.tif"))]
         v = VRT(None, UTM_GRID, 6, 4, [Band("float32", sources)])
-        local = read(v.write(tmp_path / "m.vrt"), storage_options={"profile": "p"})
+        local = read(v.to_vrt(tmp_path / "m.vrt"), storage_options={"profile": "p"})
         assert [path.storage_options for path in source_paths(local)] == [{"profile": "p"}] * 2
         on_s3 = from_xml(
             v.to_xml(relative_to=UPath("s3://b/v/m.vrt")),
@@ -950,7 +950,7 @@ class TestSourcesAndEnv:
         b = UPath(make_tiff(tmp_path / "b.tif"))
         warped = vrt_over(a)
         warped.bands[0].sources.append(Source(b))
-        warped_path = warped.write(tmp_path / "warped.vrt")
+        warped_path = warped.to_vrt(tmp_path / "warped.vrt")
         outer = vrt_over(warped_path)
         outer.bands[0].sources.append(Source(a))
         assert outer.source_files() == [a, b]
@@ -965,7 +965,7 @@ class TestSourcesAndEnv:
 
     def test_source_files_without_follow_stop_at_vrt_files(self, tmp_path: Path) -> None:
         a = UPath(make_tiff(tmp_path / "a.tif"))
-        warped_path = vrt_over(a).write(tmp_path / "warped.vrt")
+        warped_path = vrt_over(a).to_vrt(tmp_path / "warped.vrt")
         outer = vrt_over(warped_path)
         assert outer.source_files(follow=False) == [warped_path]
 
@@ -973,7 +973,7 @@ class TestSourcesAndEnv:
         tile = UPath("s3://b/t.tif")
         inner = VRT(None, UTM_GRID, 1, 1, [Band("float32", [Source(tile)])])
         outer = VRT(
-            None, UTM_GRID, 1, 1, [Band("float32", [Source(inner.write(tmp_path / "w.vrt"))])]
+            None, UTM_GRID, 1, 1, [Band("float32", [Source(inner.to_vrt(tmp_path / "w.vrt"))])]
         )
         found = outer.source_files(storage_options={"key": "k"})
         assert [(str(p), dict(p.storage_options)) for p in found] == [
@@ -1086,10 +1086,10 @@ class TestDiscovery:
     ) -> None:
         opts = {"profile": "research", "endpoint_url": "https://s3.example"}
         tile = UPath("s3://bucket/tiles/t0.tif", **opts)
-        warped = VRT(None, UTM_GRID, 1, 1, [Band("float32", [Source(tile)])]).write(
+        warped = VRT(None, UTM_GRID, 1, 1, [Band("float32", [Source(tile)])]).to_vrt(
             tmp_path / "warped.vrt"
         )
-        final = read(vrt_over(warped).write(tmp_path / "final.vrt"), storage_options=opts)
+        final = read(vrt_over(warped).to_vrt(tmp_path / "final.vrt"), storage_options=opts)
         # Previously env() read the local warped.vrt without options: a bare s3:// path.
         with final.env(storage_options=opts):
             pass
@@ -1187,8 +1187,8 @@ class TestDiscovery:
         mixed = vrt_over(a)
         mixed.bands[0].sources.append(Source(warped))
         path = reproject(
-            mixed.write(tmp_path / "mixed.vrt"), crs="EPSG:3857", resolution=20.0
-        ).write(tmp_path / "w.vrt")
+            mixed.to_vrt(tmp_path / "mixed.vrt"), crs="EPSG:3857", resolution=20.0
+        ).to_vrt(tmp_path / "w.vrt")
         assert vrt_over(path).source_files() == [a, b]
 
     def test_same_path_with_other_options_is_kept(self) -> None:

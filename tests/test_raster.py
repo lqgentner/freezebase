@@ -400,6 +400,57 @@ class TestRewriteTiffVrt:
         assert vrt.bands[0].description == "VV"
         assert "B" not in vrt.metadata
 
+    @pytest.mark.filterwarnings("ignore::rasterio.errors.NotGeoreferencedWarning")
+    @pytest.mark.parametrize("vrt", [True, False])
+    def test_rewrite_to_png_is_one_file(self, tmp_path: Path, vrt: bool) -> None:
+        src = tmp_path / "src.tif"
+        make_int_tiff(src, [0, 5], dtype="uint8", nodata=0)
+
+        rewrite_tiff(from_raster(src) if vrt else src, tmp_path / "x.png", {"driver": "PNG"})
+
+        # Previously the .aux.xml stayed behind as a hidden temporary file.
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["src.tif", "x.png"]
+        with rasterio.open(tmp_path / "x.png") as ds:
+            assert ds.crs is None
+
+    def test_rewrite_to_png_with_band_names_is_one_file(self, tmp_path: Path) -> None:
+        src = tmp_path / "src.tif"
+        make_int_tiff(src, [0, 5], dtype="uint8", nodata=0)
+
+        rewrite_tiff(src, tmp_path / "x.png", {"driver": "PNG"}, band_names=["b"])
+
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["src.tif", "x.png"]
+
+    def test_rewrite_reads_the_crs_from_a_sources_sidecar(self, tmp_path: Path) -> None:
+        src = tmp_path / "src.tif"
+        make_int_tiff(src, [0, 5], dtype="uint8", nodata=0)
+        rasterio.shutil.copy(src, tmp_path / "geo.png", driver="PNG")
+        assert (tmp_path / "geo.png.aux.xml").exists()
+
+        rewrite_tiff(tmp_path / "geo.png", tmp_path / "out.tif")
+
+        with rasterio.open(tmp_path / "out.tif") as ds:
+            assert ds.crs == "EPSG:32632"
+        assert not (tmp_path / "out.tif.aux.xml").exists()
+
+    @pytest.mark.parametrize("dst", ["out.tif", "s3://bucket/out.tif"])
+    def test_rewrite_of_a_crs_geotiff_cannot_store_is_refused(
+        self, tmp_path: Path, dst: str, s3_uploads: dict[str, bytes]
+    ) -> None:
+        src = tmp_path / "src.tif"
+        make_int_tiff(src, [0, 5], dtype="uint8", nodata=0)
+        utm_3d = CRS("EPSG:32632").to_3d().to_wkt()
+        with rasterio.open(src, "r+") as ds:
+            ds.crs = utm_3d
+        assert (tmp_path / "src.tif.aux.xml").exists()
+        target = UPath(dst) if dst.startswith("s3://") else tmp_path / dst
+
+        with pytest.raises(RasterWriteError, match="GeoTIFF cannot store the CRS"):
+            rewrite_tiff(src, target)
+
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["src.tif", "src.tif.aux.xml"]
+        assert not s3_uploads
+
     def test_rewrite_vrt_with_move_raises(self, tmp_path: Path) -> None:
         src = tmp_path / "src.tif"
         make_tiff(src)

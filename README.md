@@ -119,18 +119,16 @@ to the Swiss grid, EPSG:2056:
 
 ```python
 from freezebase import vrt
-from freezebase.raster import write_cog
 
 tiles = [f"{code}.tif" for code in grid.to_geodataframe()["mgrs_code"]]
-mosaic = vrt.mosaic(tiles)
-lv95 = vrt.reproject(mosaic, crs="EPSG:2056", resolution=10.0)
-write_cog(lv95, "zurich_lv95.tif")
+lv95 = vrt.mosaic(tiles).reproject(crs="EPSG:2056", resolution=10.0)
+lv95.to_cog("zurich_lv95.tif")
 ```
 
 `vrt.mosaic` needs tiles in one CRS, so the squares must lie in the same UTM
-zone. The pixels are read only when `write_cog` streams them into a Cloud
-Optimized GeoTIFF. `write_cog` also takes a raster file or a NumPy array, and the tiles and
-the COG can be local or on S3. See
+zone. The pixels are read only when `to_cog` streams them into a Cloud
+Optimized GeoTIFF. `freezebase.raster.write_cog` writes a raster file or a NumPy array
+the same way, and the tiles and the COG can be local or on S3. See
 [VRTs](https://lqgentner.github.io/freezebase/user-guide/vrts.html) for stacking
 bands, converting values and editing a VRT before writing it.
 

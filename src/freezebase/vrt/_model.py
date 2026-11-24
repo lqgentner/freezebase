@@ -4,24 +4,24 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
 import math
-from typing import TYPE_CHECKING, ClassVar, Literal, Self
+from typing import TYPE_CHECKING, ClassVar, Literal, Self, overload
 from xml.etree import ElementTree as ET
 
 import numpy as np
 from rasterio.coords import BoundingBox
-from rasterio.enums import ColorInterp
+from rasterio.enums import ColorInterp, Resampling
 
+from freezebase._deprecation import deprecated_alias
 from freezebase.vrt import _summary
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
     from contextlib import AbstractContextManager
     from pathlib import Path
     from typing import Any
 
     from affine import Affine
     from rasterio.crs import CRS
-    from rasterio.enums import Resampling
     from rasterio.io import DatasetReader
     from rasterio.windows import Window
     from upath import UPath
@@ -515,6 +515,121 @@ class VRT:
         """
         return tuple(band.nodata for band in self.bands)
 
+    def reproject(
+        self,
+        *,
+        crs: CRS | str | None = None,
+        src_crs: CRS | str | None = None,
+        resolution: float | tuple[float, float] | None = None,
+        bounds: BoundingBox | tuple[float, float, float, float] | None = None,
+        like: AnyPath | VRT | None = None,
+        resampling: Resampling = Resampling.average,
+        snap: bool = True,
+        dtype: str | None = None,
+        nodata: float | None = None,
+        tolerance: float | Literal["auto"] = "auto",
+        allow_ballpark: bool = False,
+    ) -> VRT:
+        """Reproject this VRT onto another grid.
+
+        Same as ``freezebase.vrt.reproject`` with this VRT as the source.
+
+        Parameters
+        ----------
+        crs : CRS | str | None, optional
+            Target CRS; required unless ``like`` is given.
+        src_crs : CRS | str | None, optional
+            Overrides this VRT's CRS.
+        resolution : float | tuple[float, float] | None, optional
+            Target pixel size, or ``(x, y)`` sizes, in units of ``crs``.
+        bounds : BoundingBox | tuple[float, float, float, float] | None, optional
+            Target extent as ``(left, bottom, right, top)`` in ``crs``. Needs ``resolution``.
+        like : str | Path | UPath | VRT | None, optional
+            Raster whose CRS, transform and size are copied exactly.
+        resampling : Resampling, optional
+            Warp kernel.
+        snap : bool, optional
+            Grow the derived extent outward onto the ``resolution`` grid.
+        dtype : str | None, optional
+            Data type of the warped bands. Defaults to this VRT's.
+        nodata : float | None, optional
+            NODATA value of the warped bands. Defaults to this VRT's.
+        tolerance : float | {"auto"}, optional
+            Error allowed when approximating the transformation, in source pixels.
+        allow_ballpark : bool, optional
+            Let PROJ fall back to a ballpark transformation.
+
+        Returns
+        -------
+        VRT
+            A warped VRT nesting a copy of this one; nothing is written.
+
+        Raises
+        ------
+        ValueError
+            As ``freezebase.vrt.reproject``.
+        RuntimeError
+            As ``freezebase.vrt.reproject``.
+        """
+        from freezebase.vrt._warp import reproject  # noqa: PLC0415  # _warp imports this module
+
+        return reproject(
+            self,
+            crs=crs,
+            src_crs=src_crs,
+            resolution=resolution,
+            bounds=bounds,
+            like=like,
+            resampling=resampling,
+            snap=snap,
+            dtype=dtype,
+            nodata=nodata,
+            tolerance=tolerance,
+            allow_ballpark=allow_ballpark,
+        )
+
+    def derive(
+        self,
+        function: PixelFunction,
+        *,
+        dtype: str = "float32",
+        nodata: float | None = math.nan,
+        description: str = "",
+        band: int | None = None,
+    ) -> VRT:
+        """Derive bands from this VRT with a GDAL pixel function.
+
+        Same as ``freezebase.vrt.derive`` with this VRT as the only source.
+
+        Parameters
+        ----------
+        function : PixelFunction
+            Function applied to each band.
+        dtype : str, optional
+            NumPy dtype name of the derived bands.
+        nodata : float | None, optional
+            NODATA of the derived bands.
+        description : str, optional
+            Description of every derived band.
+        band : int | None, optional
+            1-based band to derive; ``None`` derives every band.
+
+        Returns
+        -------
+        VRT
+            A derived band per selected band, nesting a copy of this VRT.
+
+        Raises
+        ------
+        ValueError
+            As ``freezebase.vrt.derive``.
+        """
+        from freezebase.vrt._builders import derive  # noqa: PLC0415  # _builders imports this module
+
+        return derive(
+            self, function, dtype=dtype, nodata=nodata, description=description, band=band
+        )
+
     def to_xml(self, *, relative_to: UPath | None = None) -> str:
         """Serialize to VRT XML.
 
@@ -543,8 +658,8 @@ class VRT:
         ET.indent(root)
         return ET.tostring(root, encoding="unicode")
 
-    def write(self, path: AnyPath, *, relative: bool = True) -> UPath:
-        """Write the VRT to ``path``.
+    def to_vrt(self, path: AnyPath, *, relative: bool = True) -> UPath:
+        """Write the VRT as a ``.vrt`` file at ``path``.
 
         Sources on the same store as ``path`` (local, or the same S3 bucket) are written
         relative to it; others as absolute GDAL paths. Local writes are atomic.
@@ -571,6 +686,176 @@ class VRT:
         from freezebase.vrt._io import write  # noqa: PLC0415  # _io imports raster, like _xml
 
         return write(self, path, relative=relative)
+
+    write = deprecated_alias(to_vrt, "VRT.write", "VRT.to_vrt")
+
+    @overload
+    def to_cog(
+        self,
+        path: AnyPath,
+        profile: dict[str, Any] | None = ...,
+        *,
+        band_names: list[str] | None = ...,
+        color_interp: list[ColorInterp] | None = ...,
+        tags: Mapping[str, str] | None = ...,
+        band_tags: Sequence[Mapping[str, str]] | None = ...,
+        units: list[str] | None = ...,
+        checksum: Literal[False] = ...,
+    ) -> None: ...
+    @overload
+    def to_cog(
+        self,
+        path: AnyPath,
+        profile: dict[str, Any] | None = ...,
+        *,
+        band_names: list[str] | None = ...,
+        color_interp: list[ColorInterp] | None = ...,
+        tags: Mapping[str, str] | None = ...,
+        band_tags: Sequence[Mapping[str, str]] | None = ...,
+        units: list[str] | None = ...,
+        checksum: Literal[True],
+    ) -> str: ...
+    @overload
+    def to_cog(
+        self,
+        path: AnyPath,
+        profile: dict[str, Any] | None = ...,
+        *,
+        band_names: list[str] | None = ...,
+        color_interp: list[ColorInterp] | None = ...,
+        tags: Mapping[str, str] | None = ...,
+        band_tags: Sequence[Mapping[str, str]] | None = ...,
+        units: list[str] | None = ...,
+        checksum: bool,
+    ) -> str | None: ...
+    def to_cog(
+        self,
+        path: AnyPath,
+        profile: dict[str, Any] | None = None,
+        *,
+        band_names: list[str] | None = None,
+        color_interp: list[ColorInterp] | None = None,
+        tags: Mapping[str, str] | None = None,
+        band_tags: Sequence[Mapping[str, str]] | None = None,
+        units: list[str] | None = None,
+        checksum: bool = False,
+    ) -> str | None:
+        """Write the pixels as a Cloud Optimized GeoTIFF.
+
+        Same as ``freezebase.raster.write_cog`` with this VRT as the data.
+
+        Parameters
+        ----------
+        path : str | Path | UPath
+            Destination COG (local or S3).
+        profile : dict[str, Any] | None, optional
+            ``dtype``, ``nodata`` and native GDAL ``COG`` creation options, as for
+            ``write_cog``.
+        band_names : list[str] | None, optional
+            Band descriptions, one per band.
+        color_interp : list[ColorInterp] | None, optional
+            Per-band color interpretation.
+        tags : Mapping[str, str] | None, optional
+            Dataset-level tags.
+        band_tags : Sequence[Mapping[str, str]] | None, optional
+            Per-band tags, one mapping per band.
+        units : list[str] | None, optional
+            Band unit strings, one per band.
+        checksum : bool, optional
+            Hash the encoded file and return the digest.
+
+        Returns
+        -------
+        str | None
+            The SHA-256 digest as a multihash (``"1220"`` + hex) when ``checksum`` is
+            ``True``, otherwise ``None``.
+
+        Raises
+        ------
+        ValueError
+            As ``write_cog``.
+        RasterWriteError
+            If the write fails.
+        """
+        from freezebase.raster import write_cog  # noqa: PLC0415  # raster imports freezebase.vrt
+
+        return write_cog(
+            self,
+            path,
+            profile,
+            band_names=band_names,
+            color_interp=color_interp,
+            tags=tags,
+            band_tags=band_tags,
+            units=units,
+            checksum=checksum,
+        )
+
+    def to_raster(
+        self,
+        path: AnyPath,
+        profile: dict[str, Any] | None = None,
+        *,
+        driver: str = "GTiff",
+        band_names: list[str] | None = None,
+        color_interp: list[ColorInterp] | None = None,
+        tags: Mapping[str, str] | None = None,
+        band_tags: Sequence[Mapping[str, str]] | None = None,
+        units: list[str] | None = None,
+    ) -> None:
+        """Write the pixels as a raster file in any format GDAL can copy to.
+
+        The result is a single file, without a ``.aux.xml`` sidecar, so what the format
+        cannot hold, such as a PNG's CRS and transform, is dropped.
+
+        Parameters
+        ----------
+        path : str | Path | UPath
+            Destination (local or S3).
+        profile : dict[str, Any] | None, optional
+            ``dtype``, ``nodata`` and GDAL creation options of ``driver``. ``dtype`` and
+            ``nodata`` apply as for ``to_cog``; the keys describing the dataset (``crs``,
+            ``transform``, ``count``, ``width``, ``height``) are ignored. For ``GTiff``,
+            the creation options default to ``RASTERIO_PROFILE_DEFAULTS``; for another
+            driver, the GTiff-only ``tiled``, ``blockxsize``, ``blockysize`` and
+            ``interleave`` are dropped. A ``driver`` key must match ``driver``.
+        driver : str, optional
+            GDAL driver name, such as ``"GTiff"`` or ``"PNG"``. Use ``to_cog`` for a COG.
+        band_names : list[str] | None, optional
+            Band descriptions, one per band.
+        color_interp : list[ColorInterp] | None, optional
+            Per-band color interpretation.
+        tags : Mapping[str, str] | None, optional
+            Dataset-level tags.
+        band_tags : Sequence[Mapping[str, str]] | None, optional
+            Per-band tags, one mapping per band.
+        units : list[str] | None, optional
+            Band unit strings, one per band.
+
+        Raises
+        ------
+        ValueError
+            If ``driver`` is ``COG``, ``profile`` sets another driver, a per-band sequence
+            has the wrong length, the dtype is unknown, a nodata value does not fit the
+            dtype, or the bands differ in dtype or nodata without ``profile`` setting it.
+        RasterWriteError
+            If the write fails, also when ``driver`` cannot hold the bands, such as
+            ``float32`` in a PNG, writes several files, or is GeoTIFF and cannot store the
+            CRS, such as a projected CRS with ellipsoidal heights.
+        """
+        from freezebase.raster import _write_raster_from_vrt  # noqa: PLC0415  # raster imports freezebase.vrt
+
+        _write_raster_from_vrt(
+            self,
+            path,
+            profile,
+            driver=driver,
+            band_names=band_names,
+            color_interp=color_interp,
+            tags=tags,
+            band_tags=band_tags,
+            units=units,
+        )
 
     @property
     def sources(self) -> list[SourceRef]:

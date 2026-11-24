@@ -323,7 +323,7 @@ class TestSources:
         assert w.warp is not None
         assert isinstance(w.warp.source, VRT)
         assert w.warp.source == mosaic([a, b])
-        out = w.write(tmp_path / "w.vrt")
+        out = w.to_vrt(tmp_path / "w.vrt")
         assert read(out) == w
         with w.open() as ds, rasterio.open(out) as written:
             assert set(np.unique(ds.read(1))) >= {1.0, 2.0}
@@ -335,7 +335,7 @@ class TestSources:
         assert len(w.bands) == 3
         # GDAL marks a pixel-interleaved source so all bands warp in one pass.
         assert w.metadata_domains == {"IMAGE_STRUCTURE": {"INTERLEAVE": "PIXEL"}}
-        assert read(w.write(tmp_path / "w.vrt")) == w
+        assert read(w.to_vrt(tmp_path / "w.vrt")) == w
         with w.open() as ds:
             assert ds.count == 3
             assert ds.tags(ns="IMAGE_STRUCTURE")["INTERLEAVE"] == "PIXEL"
@@ -347,7 +347,7 @@ class TestSources:
         # Previously raised "warp cannot keep the source's scale/offset".
         w = reproject(src, crs="EPSG:4326", resolution=1e-4)
         assert (w.bands[0].scale, w.bands[0].offset) == (0.01, 5.0)
-        assert read(w.write(tmp_path / "w.vrt")) == w
+        assert read(w.to_vrt(tmp_path / "w.vrt")) == w
         with w.open() as ds:
             assert (ds.scales, ds.offsets) == ((0.01,), (5.0,))
 
@@ -395,7 +395,7 @@ class TestSources:
 class TestOptions:
     def test_written_warp_keeps_its_options(self, tmp_path: Path) -> None:
         w = reproject(make_tiff(tmp_path / "utm.tif"), crs="EPSG:4326", resolution=1e-4)
-        text = w.write(tmp_path / "w.vrt").read_text()
+        text = w.to_vrt(tmp_path / "w.vrt").read_text()
         # A transformer option: GDAL rejects it as a warp option.
         assert '<Option key="ALLOW_BALLPARK">NO</Option>' in text
         assert '<Option name="ALLOW_BALLPARK">' not in text
@@ -419,7 +419,7 @@ class TestOptions:
         assert exact.warp is not None
         assert "ApproxTransformer" not in exact.warp.options_xml
         assert "<GenImgProjTransformer>" in exact.warp.options_xml
-        assert read(exact.write(tmp_path / "w.vrt")) == exact
+        assert read(exact.to_vrt(tmp_path / "w.vrt")) == exact
         expected = np.full((exact.height, exact.width), np.nan, dtype="float32")
         with rasterio.open(src) as ds:
             rasterio.warp.reproject(
@@ -617,7 +617,7 @@ class TestVerticalShift:
         # Previously GDAL's warped VRT of a compound-CRS source dropped them.
         w = reproject(src, src_crs=src_crs, crs=crs, resolution=20.0 if src_crs is None else None)
         assert (w.bands[0].scale, w.bands[0].offset) == (0.1, 2.0)
-        assert read(w.write(tmp_path / "w.vrt")) == w
+        assert read(w.to_vrt(tmp_path / "w.vrt")) == w
         with w.open() as ds:
             assert (ds.scales, ds.offsets) == ((0.1,), (2.0,))
 
@@ -660,7 +660,7 @@ class TestVerticalShift:
     ) -> None:
         with _grid_env(proj_grids):
             w = reproject(dem, crs="EPSG:4979", resampling=Resampling.nearest)
-            text = w.write(tmp_path / "w.vrt").read_text()
+            text = w.to_vrt(tmp_path / "w.vrt").read_text()
             reread = read(tmp_path / "w.vrt")
             with w.open() as ds, reread.open() as written:
                 expected = ds.read(1)
@@ -742,7 +742,7 @@ class TestVerticalUnits:
         )
         # Ballpark makes the geoid shift zero, so only the unit conversion remains.
         w = reproject(src, crs="EPSG:4979", allow_ballpark=True)
-        reread = read(w.write(tmp_path / "w.vrt"))
+        reread = read(w.to_vrt(tmp_path / "w.vrt"))
         assert reread == w
         for candidate in (w, reread):
             with candidate.open() as ds:
