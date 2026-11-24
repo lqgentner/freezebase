@@ -17,7 +17,7 @@ from rasterio.windows import Window
 
 from freezebase.raster import _apply_vrt_metadata
 from freezebase.vrt._grid import _ALIGNMENT_TOL
-from freezebase.vrt._model import VRT, Band, Source
+from freezebase.vrt._model import VRT, Band, Source, band_copy
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -38,19 +38,9 @@ def _check_band(vrt: VRT, band: int) -> None:
 
 
 def _views(vrt: VRT, bands: Sequence[int]) -> list[tuple[VRT, int]]:
-    """Return, per 1-based band, a copy of what it reads and its band number in that copy.
-
-    Each view holds only its own band, so a chain of steps nests each band once rather
-    than every band once per output band. A warp covers all bands at once, so the bands
-    of a warped VRT share one whole copy.
-    """
-    if vrt.warp is not None:
-        whole = copy.deepcopy(vrt)
-        return [(whole, band) for band in bands]
-    return [
-        (VRT(vrt.crs, vrt.transform, vrt.width, vrt.height, [copy.deepcopy(vrt.bands[b - 1])]), 1)
-        for b in bands
-    ]
+    """Return, per 1-based band, a copy of what it reads and its band number in that copy."""
+    memo: dict[tuple[int, int], VRT] = {}
+    return [band_copy(vrt, band, memo) for band in bands]
 
 
 def _reading(band: Band, view: VRT, view_band: int, window: Window | None) -> Band:

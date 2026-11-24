@@ -35,7 +35,9 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   result, and identity checks fail. Before, `m = vrt.mosaic([a])` kept `a` itself
   (`m.sources[0] is a`), and `a.bands[0].nodata = 0` also changed `m`. Now `m.sources[0]`
   is an equal copy (`m.sources[0] == a`): edit `a` before building `m`, or edit the copy
-  (`m.sources[0]`, or `w.warp.source` for `w = vrt.reproject(a, crs=...)`).
+  (`m.sources[0]`, or `w.warp.source` for `w = vrt.reproject(a, crs=...)`). `derive`
+  copies only the input band each output band reads, so its sources equal `a` only when
+  `a` has one band; this keeps chained steps from growing exponentially.
 
 ### Deprecated
 

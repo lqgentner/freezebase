@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field, fields
 import math
 from typing import TYPE_CHECKING, ClassVar, Literal, Self, overload
@@ -1112,3 +1113,44 @@ class VRT:
         from freezebase.vrt._io import open_vrt  # noqa: PLC0415  # _io imports raster, like _xml
 
         return open_vrt(self, storage_options=storage_options, **kwargs)
+
+
+def band_copy(vrt: VRT, band: int, memo: dict[tuple[int, int], VRT]) -> tuple[VRT, int]:
+    """Copy band ``band`` (1-based) of ``vrt`` into a VRT of its own, with its number there.
+
+    Nested VRTs are narrowed to the bands read as well, so a chain of steps nests each band
+    once instead of every band once per output band. A warp covers all bands at once, so a
+    warped VRT is copied whole. ``memo`` shares the copies of one call between bands.
+    """
+    if vrt.warp is not None:
+        whole = memo.get((id(vrt), 0))
+        if whole is None:
+            whole = memo[id(vrt), 0] = copy.deepcopy(vrt)
+        return whole, band
+    narrowed = memo.get((id(vrt), band))
+    if narrowed is None:
+        narrowed = memo[id(vrt), band] = VRT(
+            vrt.crs,
+            vrt.transform,
+            vrt.width,
+            vrt.height,
+            [_band_copy(vrt.bands[band - 1], memo)],
+            metadata=dict(vrt.metadata),
+            metadata_domains=copy.deepcopy(vrt.metadata_domains),
+        )
+    return narrowed, 1
+
+
+def _band_copy(band: Band, memo: dict[tuple[int, int], VRT]) -> Band:
+    """Copy ``band``, narrowing the nested VRTs it reads to the bands it reads."""
+    sources: list[Source] = []
+    for source in band.sources:
+        if isinstance(source.path, VRT):
+            path, number = band_copy(source.path, source.band, memo)
+            # Copy the rest of the source, not the VRT it reads.
+            copied = copy.deepcopy(source, {id(source.path): path})
+            copied.band = number
+        else:
+            copied = copy.deepcopy(source)
+        sources.append(copied)
+    return copy.deepcopy(band, {id(band.sources): sources})

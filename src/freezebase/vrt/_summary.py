@@ -22,6 +22,8 @@ from freezebase.vrt import _map
 from freezebase.vrt._crs import crs_label, parse_srs, wkt_name
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from rasterio.crs import CRS
 
     from freezebase.vrt._model import VRT, Band, Source, SourceRef
@@ -445,11 +447,12 @@ def _same_grid(vrt: VRT, other: VRT) -> bool:
     )
 
 
-def _rejoined(vrt: VRT) -> VRT:
-    """Join the one-band copies a clip reads its bands through into one input VRT.
+def _rejoined(vrt: VRT, files: Callable[[VRT], frozenset[str]]) -> VRT:
+    """Join the one-band copies ``vrt`` reads its bands through into one input VRT.
 
-    ``clip_box`` reads each band from a VRT holding only that band, so the copies of one
-    input would otherwise show as one step per band.
+    ``derive``, ``clip_box`` and ``colorize`` read each band from a VRT holding only that
+    band, so the copies of one input would otherwise show as one step per band. Copies
+    that read different files, as a stack of separate inputs does, stay apart.
     """
     refs = vrt.sources
     sources = _single(vrt)
@@ -459,24 +462,29 @@ def _rejoined(vrt: VRT) -> VRT:
         or sources is None
         or len(sources) != len(refs)
         or any(source.path is not ref for source, ref in zip(sources, refs, strict=True))
-        or any(source.band != 1 or source.src_window is None for source in sources)
-        or len({_value(source.src_window) for source in sources}) != 1
+        or any(source.band != 1 for source in sources)
+        # Read the same way: the fields after ``path`` agree.
+        or len(
+            {
+                tuple(_value(getattr(source, f.name)) for f in fields(source)[1:])
+                for source in sources
+            }
+        )
+        != 1
     ):
         return vrt
     copies = [ref for ref in refs if not isinstance(ref, UPath)]
     if len(copies) != len(refs) or any(
         copy.warp is not None
         or len(copy.bands) != 1
-        or copy.metadata
-        or copy.metadata_domains
         or not _same_grid(copies[0], copy)
+        or _value((copy.metadata, copy.metadata_domains))
+        != _value((copies[0].metadata, copies[0].metadata_domains))
+        or files(copy) != files(copies[0])
         for copy in copies
     ):
         return vrt
-    # The copies drop the dataset metadata, which the clip keeps.
-    joined = replace(
-        copies[0], bands=[copy.bands[0] for copy in copies], metadata=dict(vrt.metadata)
-    )
+    joined = replace(copies[0], bands=[copy.bands[0] for copy in copies])
     return replace(
         vrt,
         bands=[
@@ -575,6 +583,7 @@ class _Steps:
         self.interner = _Interner()
         # Keeps the joined VRTs alive, so the interner's ids are not reused.
         self.joined: list[VRT] = []
+        self.leaves: dict[int, frozenset[str]] = {}
 
     def build(self, vrt: VRT) -> tuple[Step, ...]:
         """Return the numbered steps; a VRT without sources has none."""
@@ -595,10 +604,31 @@ class _Steps:
 
     def rejoined(self, vrt: VRT) -> VRT:
         """Return ``vrt`` with its one-band copies joined, kept alive for the interner."""
-        joined = _rejoined(vrt)
+        joined = _rejoined(vrt, self.files)
         if joined is not vrt:
             self.joined.append(joined)
         return joined
+
+    def files(self, vrt: VRT) -> frozenset[str]:
+        """Return the paths of the files ``vrt`` reads in the end, through nested VRTs."""
+        stack = [vrt]
+        while stack:
+            node = stack[-1]
+            if id(node) in self.leaves:
+                stack.pop()
+                continue
+            refs = [*node.sources]
+            pending = [
+                ref for ref in refs if not isinstance(ref, UPath) and id(ref) not in self.leaves
+            ]
+            if pending:
+                stack += pending
+                continue
+            stack.pop()
+            self.leaves[id(node)] = frozenset().union(
+                *({str(ref)} if isinstance(ref, UPath) else self.leaves[id(ref)] for ref in refs)
+            )
+        return self.leaves[id(vrt)]
 
     def unique(self, refs: list[SourceRef]) -> list[SourceRef]:
         """Drop sources equal to an earlier one, such as the copies a read-back VRT holds."""

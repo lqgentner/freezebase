@@ -167,10 +167,9 @@ class TestText:
 
     def test_equal_steps_are_listed_once(self, tmp_path: Path) -> None:
         derived = vrt.derive(make_tiff(tmp_path / "a.tif"), PixelFunction.db())
-        # An equal copy reads like the same VRT read twice.
+        # Equal one-band inputs of the same file read as one derive of two bands.
         assert repr(vrt.stack([derived, copy.deepcopy(derived)])).splitlines()[3:] == [
-            "steps  ┌ 1  derive  a.tif · dB",
-            "       └ 2  select  bands 1, 1",
+            "steps  1  derive  a.tif · dB",
         ]
 
     def test_numbers_are_aligned(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -331,12 +330,12 @@ class TestOneInputSteps:
             .clip_box(left, bottom, left + 30, top)
             .colorize([(-10.0, (0, 0, 255)), (10.0, (255, 0, 0))])
         )
-        # A select that copies bands leaves no step of its own.
+        # Each step nests only the band the next reads.
         assert self.steps(chained) == [
-            "steps  ┌ 1  from_raster  rgb.tif",
-            "       │ 2  derive       dB",
-            "       │ 3  clip_box     3 × 4 px at col 0, row 0",
-            "       └ 4  colorize     -10 – 10",
+            "steps  ┌ 1  select    rgb.tif · band 2",
+            "       │ 2  derive    dB",
+            "       │ 3  clip_box  3 × 4 px at col 0, row 0",
+            "       └ 4  colorize  -10 – 10",
         ]
 
     def test_a_stack_of_one_band_vrts_is_not_joined(self, tmp_path: Path) -> None:
@@ -448,16 +447,17 @@ class TestTruncation:
         assert html.count("<tr>") == 1 + 10 + 1
 
     def test_nested_vrts_are_capped_per_step(self, tmp_path: Path) -> None:
-        tile = make_tiff(tmp_path / "a.tif")
-        derived = [vrt.derive(tile, PixelFunction.db(), description=f"d{i}") for i in range(7)]
+        derived = [
+            vrt.derive(make_tiff(tmp_path / f"a{i}.tif"), PixelFunction.db()) for i in range(7)
+        ]
         stacked = vrt.stack(derived)
         lines = repr(stacked).splitlines()
         assert lines[-6:] == [
-            "steps  1  derive  a.tif · dB",
-            "       2  derive  a.tif · dB",
-            "       3  derive  a.tif · dB",
-            "       4  derive  a.tif · dB",
-            "       5  derive  a.tif · dB",
+            "steps  1  derive  a0.tif · dB",
+            "       2  derive  a1.tif · dB",
+            "       3  derive  a2.tif · dB",
+            "       4  derive  a3.tif · dB",
+            "       5  derive  a4.tif · dB",
             "       6  stack   #1, #2, #3, #4, #5, … +2",
         ]
         assert "… +2" in stacked._repr_html_()
@@ -473,9 +473,8 @@ class TestTruncation:
 
     def test_step_count_is_capped(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(_summary, "MAX_NODES", 2)
-        tile = make_tiff(tmp_path / "a.tif")
         stacked = vrt.stack(
-            [vrt.derive(tile, PixelFunction.db(), description=f"d{i}") for i in range(3)]
+            [vrt.derive(make_tiff(tmp_path / f"a{i}.tif"), PixelFunction.db()) for i in range(3)]
         )
         assert repr(stacked).splitlines()[-1] == (
             "       3  stack   #1, #2, VRT(6×4, EPSG:32632, 1 band) …"

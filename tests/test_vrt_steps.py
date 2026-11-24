@@ -18,6 +18,7 @@ from freezebase.vrt import VRT, PixelFunction, derive, from_raster, mosaic, stac
 from tests.rasters import make_tiff
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 ORIGIN = (500000.0, 5200000.0)
@@ -40,6 +41,21 @@ def _three_bands(tmp_path: Path) -> VRT:
 def _uint16(tmp_path: Path) -> VRT:
     """Return a VRT over a 6x4 uint16 raster holding 0 to 23, with 0 as nodata."""
     return from_raster(make_tiff(tmp_path / "u.tif", dtype="uint16", nodata=0))
+
+
+def _select_clip(source: VRT) -> VRT:
+    """Select every band, then clip to the whole extent."""
+    return source.select([1, 2, 3]).clip_box(*source.bounds)
+
+
+def _derive(source: VRT) -> VRT:
+    """Derive every band with an identity scale."""
+    return derive(source, PixelFunction.scale())
+
+
+def _derive_clip(source: VRT) -> VRT:
+    """Derive every band, then clip to the whole extent."""
+    return _derive(source).clip_box(*source.bounds)
 
 
 class TestSelect:
@@ -70,12 +86,15 @@ class TestSelect:
         picked.bands[0].description = "changed"
         assert source.bands[0].description == picked.bands[1].description == "r"
 
-    def test_xml_grows_linearly_along_a_chain(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("step", [_select_clip, _derive, _derive_clip])
+    def test_xml_grows_linearly_along_a_chain(
+        self, tmp_path: Path, step: Callable[[VRT], VRT]
+    ) -> None:
         # Previously each step nested the whole input once per band: 3**depth copies.
         sizes = []
         chained = _three_bands(tmp_path)
         for _ in range(6):
-            chained = chained.select([1, 2, 3]).clip_box(*chained.bounds)
+            chained = step(chained)
             # Without the indentation, which deepens with each level.
             sizes.append(len("".join(chained.to_xml().split())))
         growth = [later - earlier for earlier, later in itertools.pairwise(sizes)]
