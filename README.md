@@ -8,19 +8,15 @@
 [![pyrefly](https://img.shields.io/endpoint?url=https://pyrefly.org/badge.json)](https://github.com/facebook/pyrefly)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-Raster I/O on the MGRS grid, locally or on S3.
+MGRS grids, S3 paths and GDAL VRTs for raster I/O in Python.
 
-freezebase grew out of large-scale glacier mapping, where study areas are
-scattered across several UTM zones and large raster collections live in object
-storage.
-
-Its centerpiece is **`MGRSGrid`**, a 10 km grid covering the world between 80°S
-and 84°N. Each MGRS square is an
-[`odc.geo.GeoBox`](https://odc-geo.readthedocs.io/en/latest/intro-geobox.html)
-with a fixed CRS, transform and shape, so rasters resampled onto the same square
-at the same resolution line up pixel for pixel. See
-[The MGRS grid](https://lqgentner.github.io/freezebase/user-guide/mgrs-grid.html)
-for the reasoning.
+- [**MGRS grid**](#mgrs-quick-start): Build the 10 km MGRS squares over any area between
+  80°S and 84°N. Rasters resampled onto the same square line up pixel for pixel.
+- [**S3 paths**](#rasters-on-s3): Read and write rasters on S3 as if they were local
+  files, with credentials and endpoint set per path.
+- [**VRTs**](#vrts): Mosaic and reproject rasters as one lazy chain of GDAL virtual
+  rasters, then write a Cloud Optimized GeoTIFF. No GDAL bindings or command-line tools
+  needed.
 
 ## Installation
 
@@ -59,14 +55,18 @@ square = grid[0]  # an odc.geo GeoBox per grid square
 
 Each square is an `MGRSGeoBox`, a subclass of
 [`odc.geo.GeoBox`](https://odc-geo.readthedocs.io/en/latest/intro-geobox.html)
-with the CRS, transform and shape needed to resample any raster onto it. You can
-also rebuild a square from its code alone, without building a grid:
+with a fixed CRS, transform and shape, so rasters resampled onto the same square at
+the same resolution line up pixel for pixel. You can also rebuild a square from its
+code alone, without building a grid:
 
 ```python
 from freezebase.mgrs import MGRSGeoBox
 
 square = MGRSGeoBox.from_mgrs("32TMT55", resolution=10.0)  # 1000 x 1000 px, EPSG:32632
 ```
+
+See [The MGRS grid](https://lqgentner.github.io/freezebase/user-guide/mgrs-grid.html)
+for why freezebase uses a fixed grid.
 
 ## Rasters on S3
 
@@ -90,9 +90,6 @@ s3_path = make_s3_upath(
 s3_anon_path = make_s3_upath("s3://copernicus-dem-30m/", anon=True)
 ```
 
-Selecting a profile also stops boto from falling back to `AWS_ACCESS_KEY_ID` and
-`AWS_SECRET_ACCESS_KEY` in the environment.
-
 The same path works with pathlib methods such as `exists()` and with Rasterio:
 
 ```python
@@ -111,37 +108,36 @@ for COG writes and copies between buckets.
 
 ## VRTs
 
-A [GDAL VRT](https://gdal.org/en/stable/drivers/raster/vrt.html) describes a
-raster built from other rasters without copying their pixels. `freezebase.vrt`
-builds VRTs in Python with Rasterio alone, without the GDAL command-line tools.
-Mosaic one COG per square of the preceding Zurich grid and reproject the mosaic
-to the Swiss grid, EPSG:2056:
+`freezebase.vrt` builds [GDAL VRTs](https://gdal.org/en/stable/drivers/raster/vrt.html)
+in Python, without the GDAL command-line tools. A VRT describes a raster built from
+other rasters without copying their pixels, which makes it a cheap way to chain steps
+such as mosaicking, reprojecting and writing a Cloud Optimized GeoTIFF. This mosaics two
+Copernicus DEM tiles and reprojects them onto an MGRS square:
 
 ```python
+from rasterio.enums import Resampling
+
 from freezebase import vrt
+from freezebase.mgrs import MGRSGeoBox
 
-tiles = [f"{code}.tif" for code in grid.to_geodataframe()["mgrs_code"]]
-lv95 = vrt.mosaic(tiles).reproject(crs="EPSG:2056", resolution=10.0)
-lv95.to_cog("zurich_lv95.tif")
+square = MGRSGeoBox.from_mgrs("32TMS25", resolution=20.0)
+names = [f"Copernicus_DSM_COG_10_N46_00_E{lon:03d}_00_DEM" for lon in (7, 8)]
+tiles = [f"https://copernicus-dem-30m.s3.amazonaws.com/{n}/{n}.tif" for n in names]
+
+dem = vrt.mosaic(tiles).reproject(
+    crs=f"EPSG:{square.crs.epsg}",
+    resolution=20.0,
+    bounds=square.boundingbox,
+    resampling=Resampling.bilinear,
+)
+dem.to_cog("32TMS25.tif")
 ```
 
-`vrt.mosaic` needs tiles in one CRS, so the squares must lie in the same UTM
-zone. The pixels are read only when `to_cog` streams them into a Cloud
-Optimized GeoTIFF. `freezebase.raster.write_cog` writes a raster file or a NumPy array
-the same way, and the tiles and the COG can be local or on S3. See
-[VRTs](https://lqgentner.github.io/freezebase/user-guide/vrts.html) for stacking
-bands, converting values and editing a VRT before writing it.
-
-## Other helpers
-
-Download a file with retries and a progress bar:
-
-```python
-from freezebase.download import HTTPDownloader
-
-with HTTPDownloader(auth=("user", "pass")) as download:
-    path = download("https://example.org/data.zip", "cache/")  # -> Path
-```
+GDAL reads pixels only when `to_cog` runs, and then only the blocks under the square:
+about 4 MB of the two 42 MB tiles. The tiles can be local, on S3 or over HTTPS, and the
+COG local or on S3. See [VRTs](https://lqgentner.github.io/freezebase/user-guide/vrts.html) for the
+other steps and [VRT recipes](https://lqgentner.github.io/freezebase/user-guide/vrt-recipes.html)
+for worked examples.
 
 ## Documentation
 
@@ -150,8 +146,7 @@ Full documentation, including guides to the MGRS grid, rasters on S3 and VRTs, i
 
 ## Support
 
-This is a small internal core library maintained on a best-effort basis. Please
-file bugs and questions on the
+Please file bugs and questions on the
 [issue tracker](https://github.com/lqgentner/freezebase/issues).
 
 ## Contributing
