@@ -1020,11 +1020,13 @@ dev = [
     { name = "ruff" },
     { name = "types-geopandas" },
     { name = "types-requests" },
+    { name = "vale" },
 ]
 docs = [
     { name = "contextily" },
     { name = "great-docs" },
     { name = "matplotlib" },
+    { name = "quarto-cli" },
 ]
 
 [package.metadata]
@@ -1059,11 +1061,13 @@ dev = [
     { name = "ruff", specifier = ">=0.16" },
     { name = "types-geopandas", specifier = ">=1.1" },
     { name = "types-requests", specifier = ">=2.33" },
+    { name = "vale", specifier = "==3.19.0.0" },
 ]
 docs = [
     { name = "contextily", specifier = ">=1.7" },
     { name = "great-docs", specifier = ">=0.17" },
     { name = "matplotlib", specifier = ">=3.11" },
+    { name = "quarto-cli", specifier = "==1.11.9" },
 ]
 
 [[package]]
@@ -3209,6 +3213,17 @@ wheels = [
 ]
 
 [[package]]
+name = "quarto-cli"
+version = "1.11.9"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jupyter" },
+    { name = "nbclient" },
+    { name = "wheel" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c7/77/71ab053f0d7876494d1ce093bec75c197c4d1a8aea61f018f59613cd14b7/quarto_cli-1.11.9.tar.gz", hash = "sha256:fedab81b0ace7450560db64d1773e0584951f34f192ecf384fa70f54eafe9ed9", size = 4784, upload-time = "2026-11-02T11:41:52.287Z" }
+
+[[package]]
 name = "rasterio"
 version = "1.5.2"
 source = { registry = "https://pypi.org/simple" }
@@ -3783,6 +3798,15 @@ wheels = [
 ]
 
 [[package]]
+name = "vale"
+version = "3.19.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d8/ab/ed0a4b871b6ac0abcfa61ce0c488d542e292bcdb8c3d19ff4ad5846ecc41/vale-3.19.0.0.tar.gz", hash = "sha256:d28640a3ce353c65a9a0f6138d9384ea6fc3523dc1152df36203cd7321acc618", size = 5377, upload-time = "2026-08-31T08:46:58.32Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b1/8a/92d794d09077e9e5c1adb1815c18df2401114c99ff105232755fd5bd1a9d/vale-3.19.0.0-py3-none-any.whl", hash = "sha256:91e434be465e11ef35956c0485e4409b56cf934023da5363dd31d4a8a760aeb0", size = 5941, upload-time = "2026-08-31T08:46:57.282Z" },
+]
+
+[[package]]
 name = "wcwidth"
 version = "0.8.3"
 source = { registry = "https://pypi.org/simple" }
@@ -3816,6 +3840,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d8/cb/a5abcc2891249f393827c650c6296660ce40374ac22d99ab9aea41f9d2a2/websocket_client-1.9.2.tar.gz", hash = "sha256:0fcb57545848be86992e128218fd96dd87a6769ffdb1a968dff79632b85604d0", size = 84110, upload-time = "2026-08-31T14:08:40.964Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d5/d2/cc4dc1271e464942db7ee278baae2daa99ee77cb2af744025c04da585a3e/websocket_client-1.9.2-py3-none-any.whl", hash = "sha256:e1a673830a9c7bfa47b1cd3d5e4178f4c9651d80a4eab02c9c23a1c3ec6250ce", size = 95786, upload-time = "2026-08-31T14:08:39.899Z" },
+]
+
+[[package]]
+name = "wheel"
+version = "0.48.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d0/20/50ed6bdf27dec98b568a8ae25dc599f35baa3d9709f9e83fd1edb56b9a90/wheel-0.48.0.tar.gz", hash = "sha256:94800765601e9171bf5d58d066e640662842bcedcbab982b2c90787a2c987322", size = 66471, upload-time = "2026-08-11T22:02:27.327Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2e/29/69cfbb602cd91690c55d38ba9fe53e6a7e76a6fa647bf38f19c138d25449/wheel-0.48.0-py3-none-any.whl", hash = "sha256:3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab", size = 33320, upload-time = "2026-08-11T22:02:26.1Z" },
 ]
 
 [[package]]

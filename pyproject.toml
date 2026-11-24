@@ -86,12 +86,15 @@ dev = [
     "ruff>=0.16",
     "types-geopandas>=1.1",
     "types-requests>=2.33",
+    # Exact pin, so the prose check reports the same alerts locally and in CI.
+    "vale==3.19.0.0",
 ]
-# Documentation toolchain. `great-docs` renders the site via Quarto (which must
-# be installed separately, see user_guide/). The plotting stack is only needed
+# Documentation toolchain. `great-docs` renders the site via Quarto, pinned
+# exactly so local and CI builds render alike. The plotting stack is only needed
 # because the user guide executes its figures at build time.
 docs = [
     "great-docs>=0.17",
+    "quarto-cli==1.11.9",
     "matplotlib>=3.11",
     "contextily>=1.7",
 ]
