@@ -6,96 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the project is pre-1.0 (`0.x`), minor releases may contain breaking changes.
 
-## Unreleased
+## [0.12.0] - 2026-11-24
+
+freezebase 0.12 makes VRTs chainable: build one step by step, such as
+`vrt.mosaic(tiles).reproject(crs=...)`, and write it with `to_cog`, `to_raster` or
+`to_vrt`. GDAL reads the source pixels only when the result is written.
 
 ### Added
 
-- `VRT.bounds`, `res`, `shape`, `count`, `dtypes` and `nodatavals` describe the grid and
-  bands as rasterio reports them for the opened VRT, without opening it.
-- Printing a `VRT` shows a short summary of its grid, its bands and the steps that build
-  it, numbered in the order they run. Notebooks show it as HTML with a world map and a plot
-  of its extent and source files. Neither opens a source or goes online.
-- `Source` and `Warp` reprs show a nested VRT on one line, and `Warp` shows only the length
-  of `options_xml`.
 - `VRT.reproject` and `VRT.derive` take the VRT as the source, so steps chain:
   `vrt.mosaic(tiles).reproject(crs=...).derive(...)`.
-- `VRT.to_cog` writes a COG like `write_cog`, including `checksum=True`, and
-  `VRT.to_raster` writes a single file in any format GDAL can create, such as GTiff or
-  PNG, applying the profile's `dtype` and `nodata` as `to_cog` does.
-- New `VRT` steps, each returning a new VRT: `select(bands)` picks and reorders bands,
-  `set(...)` changes band names, color interpretation and units and adds tags,
-  `clip_box(minx, miny, maxx, maxy)` cuts out whole pixels, and
-  `colorize(colors, vmin=..., vmax=...)` renders one band as RGBA through color stops or a
-  matplotlib colormap, with nodata and NaN transparent.
+- `VRT.to_cog` writes a COG like `write_cog`, and `VRT.to_raster` writes a single file in
+  any format GDAL can create, such as PNG.
+- New steps: `select` picks and reorders bands, `set` changes band names, color
+  interpretation, units and tags, `clip_box` cuts out a box, and `colorize` renders one
+  band as RGBA.
+- Printing a `VRT` summarizes its grid, bands and steps without opening a source;
+  notebooks show it as HTML with a map of its extent. `VRT.bounds`, `res`, `shape`,
+  `count`, `dtypes` and `nodatavals` give the grid and band details as properties.
 
 ### Changed
 
 - **Breaking:** `mosaic`, `stack`, `derive` and `reproject` nest a copy of a `VRT` input
-  instead of the object itself, so editing the input afterwards no longer changes the
-  result, and identity checks fail. Before, `m = vrt.mosaic([a])` kept `a` itself
-  (`m.sources[0] is a`), and `a.bands[0].nodata = 0` also changed `m`. Now `m.sources[0]`
-  is an equal copy (`m.sources[0] == a`): edit `a` before building `m`, or edit the copy
-  (`m.sources[0]`, or `w.warp.source` for `w = vrt.reproject(a, crs=...)`). `derive`
-  copies only the input band each output band reads, so its sources equal `a` only when
-  `a` has one band; this keeps chained steps from growing exponentially.
+  instead of the object itself. Before, after `m = vrt.mosaic([a])`, editing `a` also
+  changed `m`, and `m.sources[0] is a`. Now edit `a` before building `m`, or edit the
+  copy in `m.sources[0]`.
 
 ### Deprecated
 
-- `freezebase.vrt.warp` is renamed `freezebase.vrt.reproject`, the name rasterio and
-  rioxarray use. `warp` still works but emits a `DeprecationWarning`; replace
-  `vrt.warp(src, crs=...)` with `vrt.reproject(src, crs=...)`.
-- `VRT.write` is renamed `VRT.to_vrt`, next to `to_cog` and `to_raster`. `write` still
-  works but emits a `DeprecationWarning`; replace `v.write("a.vrt")` with
-  `v.to_vrt("a.vrt")`.
-- The functions that write a VRT file in one call emit a `DeprecationWarning`. Build the
-  VRT, then write it with `to_vrt`:
-  - `build_vrt_mosaic(files, out, bounds=b)` becomes
-    `vrt.mosaic(files, bounds=b).to_vrt(out)`.
-  - `create_warped_vrt(src, out, crs=c, resolution=r, ...)` becomes
-    `vrt.reproject(src, crs=c, resolution=r, ...).to_vrt(out, relative=False)`.
-  - `create_decibel_vrt(src, out)` becomes
-    `vrt.derive(src, vrt.PixelFunction.db(), description="dB", band=1).to_vrt(out)`; use
-    `PixelFunction.db(20)` for `from_intensity=False`.
-  - `create_rgb_vrt(vv, vh, out)` becomes the following, with `PixelFunction.diff()`
-    and the names `VV_dB`, `VH_dB` and `VV_dB-VH_dB` for `decibel_scale=True`:
-
-    ```python
-    from rasterio.enums import ColorInterp
-    from freezebase.vrt import PixelFunction
-
-    rgb = vrt.stack(
-        [
-            vrt.derive(vv, PixelFunction.scale(), band=1),
-            vrt.derive(vh, PixelFunction.scale(), band=1),
-            vrt.derive([vv, vh], PixelFunction.div()),
-        ]
-    ).set(
-        band_names=["VV", "VH", "VV/VH"],
-        color_interp=[ColorInterp.red, ColorInterp.green, ColorInterp.blue],
-    )
-    rgb.to_vrt(out)
-    ```
-
-    The bands are `float32` with NaN as nodata, as before, but an input's nodata pixels
-    now read as NaN instead of their stored value.
-  - `create_rgba_vrt(src, out, luts=luts)` becomes
-    `vrt.from_raster(src).colorize([(value, (r, g, b)), ...]).to_vrt(out)`, with one stop
-    per value that the three tables share. For other tables, such as
-    `src_bands=(1, 2, 3)`, build bands with `Source(lut=...)` directly.
+- `vrt.warp` is renamed `vrt.reproject`, and `VRT.write` is renamed `VRT.to_vrt`. The old
+  names still work but emit a `DeprecationWarning`.
+- `build_vrt_mosaic`, `create_warped_vrt`, `create_decibel_vrt`, `create_rgb_vrt` and
+  `create_rgba_vrt` emit a `DeprecationWarning` that names the replacement: build the VRT
+  with the steps above, then write it with `to_vrt`. For example,
+  `build_vrt_mosaic(files, out)` becomes `vrt.mosaic(files).to_vrt(out)`.
 
 ### Fixed
 
 - `write_cog` and `rewrite_tiff` raise `RasterWriteError` for a CRS that GeoTIFF cannot
-  store, such as UTM with ellipsoidal heights, instead of writing a file without a CRS. A
-  compound CRS such as `EPSG:32632+3855` (UTM with EGM2008 heights) is stored as before.
-- `write_cog` and `rewrite_tiff` no longer leave GDAL's `.aux.xml` sidecar behind as a
-  hidden temporary file. Writers write no sidecar files, so what a format cannot hold,
-  such as a PNG's CRS, is dropped.
-- The error `reproject` raises when PROJ cannot find a geoid grid suggests `PROJ_NETWORK=ON`
-  or `PROJ_DATA` instead of `python -m pyproj sync`, whose grids Rasterio's PROJ never
-  searches.
-- `MGRSGeoBox.crs` is typed as a `CRS` rather than `CRS | None`, so type checkers no
-  longer ask for a `None` check.
+  store, such as UTM with ellipsoidal heights, instead of writing a file without a CRS.
+- `write_cog` and `rewrite_tiff` no longer leave a hidden `.aux.xml` file behind.
+- `MGRSGeoBox.crs` is typed as `CRS` rather than `CRS | None`.
 
 ## [0.11.0] - 2026-11-02
 
