@@ -175,8 +175,8 @@ v.write("scene.vrt")
 
 A `VRT` has a CRS, a transform, a size and a list of bands. Each `Band` lists the sources it
 reads from, and `VRT.sources` lists them for the whole VRT. Printing a VRT summarizes its
-grid, its bands and the steps that build it, such as a mosaic or a reprojection. A notebook
-shows the same summary as HTML.
+grid, its bands and the steps that build it, such as a mosaic or a reprojection, in the order
+they run. A notebook shows the same summary as HTML, with a map of where the VRT lies.
 
 ## Saving the result
 
