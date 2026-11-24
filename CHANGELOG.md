@@ -12,6 +12,11 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 - `VRT.bounds`, `res`, `shape`, `count`, `dtypes` and `nodatavals` describe the grid and
   bands as rasterio reports them for the opened VRT, without opening it.
+- Printing a `VRT` shows a short summary of its grid, its bands and the steps that build
+  it, numbered in the order they run. Notebooks show it as HTML with a world map and a plot
+  of its extent and source files. Neither opens a source or goes online.
+- `Source` and `Warp` reprs show a nested VRT on one line, and `Warp` shows only the length
+  of `options_xml`.
 
 ### Changed
 
