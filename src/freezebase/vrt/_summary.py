@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit, urlunsplit
 from xml.etree import ElementTree as ET
 
+from rasterio.enums import ColorInterp
+import rasterio.windows
 from rasterio.windows import Window
 from upath import UPath
 
@@ -22,7 +24,7 @@ from freezebase.vrt._crs import crs_label, parse_srs, wkt_name
 if TYPE_CHECKING:
     from rasterio.crs import CRS
 
-    from freezebase.vrt._model import VRT, Band, SourceRef
+    from freezebase.vrt._model import VRT, Band, Source, SourceRef
 
 MAX_BANDS = 10
 MAX_FILES = 5
@@ -37,6 +39,7 @@ _KEY_DEPTH = 100
 _MAX_VIEWS = 10_000
 
 _TIMES = "\N{MULTIPLICATION SIGN}"
+_RGBA = (ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha)
 _UNITS = {
     "metre": "m",
     "meter": "m",
@@ -300,8 +303,8 @@ def _verb(vrt: VRT, refs: list[SourceRef]) -> tuple[str, str]:
         )
     if not refs:
         return "empty", ""
-    if len(refs) == 1 and _is_view(vrt, refs[0]):
-        return "from_raster", ""
+    if len(refs) == 1 and (named := _one_input_verb(vrt, refs[0])) is not None:
+        return named
     sources = [source for band in vrt.bands for source in band.sources]
     # One input placed in windows is a mosaic of it, which crops or resamples it.
     placed = len(refs) == 1 and any(
@@ -312,28 +315,174 @@ def _verb(vrt: VRT, refs: list[SourceRef]) -> tuple[str, str]:
     return "stack", ""
 
 
+def _one_input_verb(vrt: VRT, ref: SourceRef) -> tuple[str, str] | None:
+    """Name the one-input step that builds ``vrt`` from ``ref``, if it is one."""
+    if _is_view(vrt, ref):
+        return "from_raster", ""
+    for verb, check in (("colorize", _colorized), ("select", _selected), ("clip_box", _clipped)):
+        if (detail := check(vrt, ref)) is not None:
+            return verb, detail
+    return None
+
+
 def _is_view(vrt: VRT, ref: SourceRef) -> bool:
     """Whether ``vrt`` shows ``ref`` unchanged: each band reads its namesake whole, as is."""
+    whole = Window(0, 0, vrt.width, vrt.height)
     for index, band in enumerate(vrt.bands, 1):
         if len(band.sources) != 1 or band.scale is not None or band.offset is not None:
             return False
         source = band.sources[0]
-        if (
-            source.band != index
-            or source.src_window is not None
-            or source.dst_window is not None
-            or source.nodata is not None
-            or source.lut is not None
+        # A nested VRT on the same grid may be placed whole, as a full-extent clip does.
+        placed = source.src_window is not None or source.dst_window is not None
+        if placed and (
+            isinstance(ref, UPath) or source.src_window != whole or source.dst_window != whole
         ):
+            return False
+        if source.band != index or source.nodata is not None or source.lut is not None:
             return False
     if isinstance(ref, UPath):
         return True
     same_bands = [band.dtype for band in ref.bands] == [band.dtype for band in vrt.bands]
-    return same_bands and (ref.crs, ref.transform, ref.width, ref.height) == (
+    return same_bands and _same_grid(vrt, ref)
+
+
+def _single(vrt: VRT) -> list[Source] | None:
+    """Return the one source of each band, or None if a band has more or fewer."""
+    if not all(len(band.sources) == 1 for band in vrt.bands):
+        return None
+    return [band.sources[0] for band in vrt.bands]
+
+
+def _colorized(vrt: VRT, ref: SourceRef) -> str | None:
+    """Describe the color ramp of a ``colorize`` step, or return None if it is none."""
+    del ref
+    sources = _single(vrt)
+    interps = [band.color_interp for band in vrt.bands]
+    if (
+        sources is None
+        or interps != list(_RGBA)
+        or any(band.dtype != "uint8" for band in vrt.bands)
+        or any(source.lut is None for source in sources)
+        or len({source.band for source in sources}) != 1
+    ):
+        return None
+    values = [
+        float(value)
+        for value, _ in sources[0].lut or ()
+        if isinstance(value, numbers.Real) and math.isfinite(value)
+    ]
+    if not values:
+        return ""
+    low, high = min(values), max(values)
+    return f"{low:g}" if low == high else f"{low:g}{_map.TO}{high:g}"
+
+
+def _selected(vrt: VRT, ref: SourceRef) -> str | None:
+    """Name the bands a ``select`` step reads whole, or return None if it is none."""
+    sources = _single(vrt)
+    if sources is None or any(_changes(source) for source in sources):
+        return None
+    if not isinstance(ref, UPath) and (
+        not _same_grid(vrt, ref)
+        or any(
+            not 1 <= source.band <= len(ref.bands)
+            or ref.bands[source.band - 1].dtype != band.dtype
+            for source, band in zip(sources, vrt.bands, strict=True)
+        )
+    ):
+        return None
+    numbers = ", ".join(str(source.band) for source in sources)
+    return _clip(f"band {numbers}" if len(sources) == 1 else f"bands {numbers}")
+
+
+def _clipped(vrt: VRT, ref: SourceRef) -> str | None:
+    """Locate the window a ``clip_box`` step cuts from a VRT, or return None if it is none."""
+    sources = _single(vrt)
+    if sources is None or isinstance(ref, UPath) or ref.crs != vrt.crs:
+        return None
+    window = sources[0].src_window
+    whole = Window(0, 0, vrt.width, vrt.height)
+    if (
+        window is None
+        or vrt.width <= 0
+        or vrt.height <= 0
+        or (window.width, window.height) != (vrt.width, vrt.height)
+        or window == Window(0, 0, ref.width, ref.height)
+        or not vrt.transform.almost_equals(rasterio.windows.transform(window, ref.transform))
+    ):
+        return None
+    for index, source in enumerate(sources, 1):
+        moved = replace(source, src_window=None, dst_window=None)
+        if (
+            source.band != index
+            or source.src_window != window
+            or source.dst_window != whole
+            or _changes(moved)
+        ):
+            return None
+    return (
+        f"{vrt.width} {_TIMES} {vrt.height} px at col {window.col_off:g}, row {window.row_off:g}"
+    )
+
+
+def _changes(source: Source) -> bool:
+    """Whether ``source`` places, masks or maps the pixels it reads."""
+    return (
+        source.src_window is not None
+        or source.dst_window is not None
+        or source.nodata is not None
+        or source.lut is not None
+    )
+
+
+def _same_grid(vrt: VRT, other: VRT) -> bool:
+    """Whether two VRTs share a CRS, transform and size."""
+    return (other.crs, other.transform, other.width, other.height) == (
         vrt.crs,
         vrt.transform,
         vrt.width,
         vrt.height,
+    )
+
+
+def _rejoined(vrt: VRT) -> VRT:
+    """Join the one-band copies a clip reads its bands through into one input VRT.
+
+    ``clip_box`` reads each band from a VRT holding only that band, so the copies of one
+    input would otherwise show as one step per band.
+    """
+    refs = vrt.sources
+    sources = _single(vrt)
+    if (
+        vrt.warp is not None
+        or len(refs) < 2  # noqa: PLR2004  # one copy needs no joining
+        or sources is None
+        or len(sources) != len(refs)
+        or any(source.path is not ref for source, ref in zip(sources, refs, strict=True))
+        or any(source.band != 1 or source.src_window is None for source in sources)
+        or len({_value(source.src_window) for source in sources}) != 1
+    ):
+        return vrt
+    copies = [ref for ref in refs if not isinstance(ref, UPath)]
+    if len(copies) != len(refs) or any(
+        copy.warp is not None
+        or len(copy.bands) != 1
+        or copy.metadata
+        or copy.metadata_domains
+        or not _same_grid(copies[0], copy)
+        for copy in copies
+    ):
+        return vrt
+    # The copies drop the dataset metadata, which the clip keeps.
+    joined = replace(
+        copies[0], bands=[copy.bands[0] for copy in copies], metadata=dict(vrt.metadata)
+    )
+    return replace(
+        vrt,
+        bands=[
+            replace(band, sources=[replace(source, path=joined, band=index)])
+            for index, (band, source) in enumerate(zip(vrt.bands, sources, strict=True), 1)
+        ],
     )
 
 
@@ -424,6 +573,8 @@ class _Steps:
         self.steps: list[Step] = []
         self.seen: dict[int, Input] = {}
         self.interner = _Interner()
+        # Keeps the joined VRTs alive, so the interner's ids are not reused.
+        self.joined: list[VRT] = []
 
     def build(self, vrt: VRT) -> tuple[Step, ...]:
         """Return the numbered steps; a VRT without sources has none."""
@@ -442,16 +593,31 @@ class _Steps:
             for index, step in enumerate(steps)
         )
 
+    def rejoined(self, vrt: VRT) -> VRT:
+        """Return ``vrt`` with its one-band copies joined, kept alive for the interner."""
+        joined = _rejoined(vrt)
+        if joined is not vrt:
+            self.joined.append(joined)
+        return joined
+
+    def unique(self, refs: list[SourceRef]) -> list[SourceRef]:
+        """Drop sources equal to an earlier one, such as the copies a read-back VRT holds."""
+        found: dict[object, SourceRef] = {}
+        for ref in refs:
+            found.setdefault(self.interner.ref(ref, 0), ref)
+        return list(found.values())
+
     def visit(self, vrt: VRT, depth: int) -> Input:
         """Add the steps that build ``vrt`` and return the input that refers to it."""
-        refs = vrt.sources
+        vrt = self.rejoined(vrt)
+        refs = self.unique(vrt.sources)
         verb, detail = _verb(vrt, refs)
         # A plain view of one nested VRT adds nothing to show.
         for _ in range(_MAX_VIEWS):
             if verb != "from_raster" or isinstance(refs[0], UPath):
                 break
-            vrt = refs[0]
-            refs = vrt.sources
+            vrt = self.rejoined(refs[0])
+            refs = self.unique(vrt.sources)
             verb, detail = _verb(vrt, refs)
         key = self.interner.number(vrt)
         if key in self.seen:
