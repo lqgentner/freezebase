@@ -10,6 +10,20 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
+def deprecated[**P, T](message: str) -> Callable[[Callable[P, T]], Callable[P, T]]:
+    """Make the decorated function warn ``message`` on every call, like PEP 702's decorator."""
+
+    def decorator(func: Callable[P, T]) -> Callable[P, T]:
+        @functools.wraps(func)
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
+            warnings.warn(message, DeprecationWarning, stacklevel=2)
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
 def deprecated_alias[F: Callable[..., Any]](func: F, old: str, new: str) -> F:
     """Return ``func`` under the deprecated name ``old``, warning on every call."""
 

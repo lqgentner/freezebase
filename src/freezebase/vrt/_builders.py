@@ -32,6 +32,7 @@ from freezebase.vrt._model import (
     Source,
     SourceProperties,
     _check_nodata_fits,
+    band_copy,
 )
 
 if TYPE_CHECKING:
@@ -430,9 +431,9 @@ def derive(
     Parameters
     ----------
     sources : str | Path | UPath | VRT | Sequence[str | Path | UPath | VRT]
-        One input, or several on an identical grid. A ``VRT`` is copied and nested whole,
-        so the function sees its mosaicked pixels and later changes to it do not affect
-        the result.
+        One input, or several on an identical grid. Each band nests a copy of the ``VRT``
+        band it reads, so the function sees its mosaicked pixels and later changes to it
+        do not affect the result.
     function : PixelFunction
         Function applied to the sources. ``propagateNoData`` is set to ``"true"`` unless
         its arguments already set it, so a nodata input gives a nodata output.
@@ -478,10 +479,12 @@ def derive(
             _selected_bands(info, wanted, i)
         groups = [[(info, wanted[0]) for info in infos]]
     _check_derive_inputs(groups)
+    # Each band nests only the input band it reads, so chained steps grow linearly.
+    memo: dict[tuple[int, int], VRT] = {}
     out = [
         Band(
             dtype=dtype,
-            sources=[_derive_source(info, b) for info, b in group],
+            sources=[_derive_source(info, b, memo) for info, b in group],
             nodata=nodata,
             description=description,
             pixel_function=PixelFunction(function.name, args, function.transfer_type or dtype),
@@ -513,8 +516,10 @@ def _check_derive_inputs(groups: Sequence[Sequence[tuple[RasterInfo, int]]]) -> 
                 raise ValueError(msg)
 
 
-def _derive_source(info: RasterInfo, band: int) -> Source:
+def _derive_source(info: RasterInfo, band: int, memo: dict[tuple[int, int], VRT]) -> Source:
     """Build a whole-raster source of band ``band`` (1-based) carrying its input's nodata."""
     source = _band(info, band - 1).sources[0]
     source.nodata = info.nodatavals[band - 1]
+    if isinstance(source.path, VRT):
+        source.path, source.band = band_copy(source.path, source.band, memo)
     return source

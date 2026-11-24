@@ -23,6 +23,8 @@ import pyproj
 import pytest
 import rasterio
 from rasterio.crs import CRS
+from rasterio.enums import ColorInterp
+import rasterio.windows
 from upath import UPath
 
 from freezebase import vrt
@@ -165,9 +167,9 @@ class TestText:
 
     def test_equal_steps_are_listed_once(self, tmp_path: Path) -> None:
         derived = vrt.derive(make_tiff(tmp_path / "a.tif"), PixelFunction.db())
+        # Equal one-band inputs of the same file read as one derive of two bands.
         assert repr(vrt.stack([derived, copy.deepcopy(derived)])).splitlines()[3:] == [
             "steps  1  derive  a.tif · dB",
-            "       2  stack   #1, #1",
         ]
 
     def test_numbers_are_aligned(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -187,8 +189,11 @@ class TestText:
             "steps  ┌ 1  derive  a.tif · dB",
             "       └ 2  mosaic",
         ]
-        assert repr(vrt.stack([derived, derived])).splitlines()[-1] == "       └ 2  stack"
-        assert repr(vrt.stack([tile], bands=[[2]])).splitlines()[-1] == "steps  1  stack  a.tif"
+        # Reading bands of one input whole is a select, however it was built.
+        last = repr(vrt.stack([derived, derived])).splitlines()[-1]
+        assert last == "       └ 2  select  bands 1, 2, 1, 2"
+        last = repr(vrt.stack([tile], bands=[[2]])).splitlines()[-1]
+        assert last == "steps  1  select  a.tif · band 2"
         assert repr(vrt.mosaic([tile])).splitlines()[-1] == "steps  1  mosaic  a.tif"
 
     def test_equal_inputs_shared_deep_down_are_compared_once(self) -> None:
@@ -197,7 +202,7 @@ class TestText:
         for _ in range(30):
             node = VRT(UTM, GRID, 6, 4, [Band("float32", [Source(node), Source(node)])])
         top = VRT(UTM, GRID, 6, 4, [Band("float32", [Source(node), Source(copy.deepcopy(node))])])
-        assert repr(top).splitlines()[-1] == "         6  mosaic  #5, #5"
+        assert repr(top).splitlines()[-1] == "       └ 6  mosaic"
 
     def test_a_long_chain_of_views(self) -> None:
         chain = model(Source(UPath("/d/a.tif")))
@@ -257,6 +262,167 @@ class TestText:
         assert lines[2] == "steps  1  from_raster  " + "x" * 59 + "…"
 
 
+class TestOneInputSteps:
+    """The steps of ``VRT.select``, ``clip_box`` and ``colorize`` (``set`` adds none)."""
+
+    @staticmethod
+    def rgb(directory: Path) -> VRT:
+        """Return a VRT over a 3-band raster."""
+        return vrt.from_raster(make_tiff(directory / "rgb.tif", count=3))
+
+    @staticmethod
+    def steps(value: VRT) -> list[str]:
+        """Return the step lines of the text repr."""
+        lines = repr(value).splitlines()
+        first = next(i for i, line in enumerate(lines) if line.startswith("steps"))
+        return lines[first:]
+
+    def test_select(self, tmp_path: Path) -> None:
+        assert self.steps(self.rgb(tmp_path).select([3, 1])) == [
+            "steps  1  select  rgb.tif · bands 3, 1"
+        ]
+
+    def test_select_of_a_warped_vrt(self, tmp_path: Path) -> None:
+        warped = self.rgb(tmp_path).reproject(crs="EPSG:3857", resolution=20.0)
+        assert self.steps(warped.select([3, 2])) == [
+            "steps  ┌ 1  from_raster  rgb.tif",
+            "       │ 2  reproject    EPSG:32632 → EPSG:3857",
+            "       └ 3  select       bands 3, 2",
+        ]
+
+    def test_clip_box_reads_its_input_once(self, tmp_path: Path) -> None:
+        # Each band reads its own one-band copy, which would otherwise be one step per band.
+        mosaic = vrt.mosaic(tiles(tmp_path, 2))
+        left, bottom, right, top = mosaic.bounds
+        assert self.steps(mosaic.clip_box(left + 20, bottom, right - 30, top - 10)) == [
+            "steps  ┌ 1  mosaic    t0.tif, t1.tif",
+            "       └ 2  clip_box  7 × 3 px at col 2, row 1",
+        ]
+
+    def test_clip_box_of_a_warped_vrt(self, tmp_path: Path) -> None:
+        warped = self.rgb(tmp_path).reproject(crs="EPSG:3857", resolution=20.0)
+        left, bottom, _, top = warped.bounds
+        assert self.steps(warped.clip_box(left, bottom, left + 40, top))[-1] == (
+            "       └ 3  clip_box     2 × 4 px at col 0, row 0"
+        )
+
+    def test_clip_box_of_the_whole_extent_adds_no_step(self, tmp_path: Path) -> None:
+        source = self.rgb(tmp_path)
+        assert self.steps(source.clip_box(*source.bounds)) == ["steps  1  from_raster  rgb.tif"]
+
+    def test_colorize(self, tmp_path: Path) -> None:
+        stops = [(0.0, (0, 0, 0)), (20.0, (200, 100, 0))]
+        assert self.steps(self.rgb(tmp_path).colorize(stops, band=2)) == [
+            "steps  ┌ 1  select    rgb.tif · band 2",
+            "       └ 2  colorize  0 – 20",
+        ]
+
+    def test_set_adds_no_step(self, tmp_path: Path) -> None:
+        source = self.rgb(tmp_path)
+        assert self.steps(source.set(band_names=["r", "g", "b"])) == self.steps(source)
+
+    def test_chain(self, tmp_path: Path) -> None:
+        source = self.rgb(tmp_path)
+        left, bottom, _, top = source.bounds
+        chained = (
+            vrt.derive(source, PixelFunction.db())
+            .select([2, 1])
+            .clip_box(left, bottom, left + 30, top)
+            .colorize([(-10.0, (0, 0, 255)), (10.0, (255, 0, 0))])
+        )
+        # Each step nests only the band the next reads.
+        assert self.steps(chained) == [
+            "steps  ┌ 1  select    rgb.tif · band 2",
+            "       │ 2  derive    dB",
+            "       │ 3  clip_box  3 × 4 px at col 0, row 0",
+            "       └ 4  colorize  -10 – 10",
+        ]
+
+    def test_a_stack_of_one_band_vrts_is_not_joined(self, tmp_path: Path) -> None:
+        a, b = (vrt.from_raster(make_tiff(tmp_path / f"{n}.tif")) for n in "ab")
+        stacked = vrt.stack([vrt.derive(a, PixelFunction.db()), vrt.derive(b, PixelFunction.db())])
+        assert self.steps(stacked)[-1] == "         5  stack        #2, #4"
+
+    def test_steps_survive_a_write_and_read(self, tmp_path: Path) -> None:
+        # Previously each band's own copy of the input read back as a stack of equal steps.
+        source = self.rgb(tmp_path)
+        warped = source.reproject(crs="EPSG:3857", resolution=20.0)
+        left, bottom, _, top = warped.bounds
+        stops = [(0.0, (0, 0, 0)), (20.0, (200, 100, 0))]
+        for built in (
+            source.colorize(stops, band=2),
+            warped.select([3, 2]),
+            warped.clip_box(left, bottom, left + 40, top),
+        ):
+            path = built.to_vrt(tmp_path / "step.vrt")
+            assert self.steps(vrt.read(path))[-1] == self.steps(built)[-1]
+
+    def test_a_clip_beside_its_source_reads_one_step(self, tmp_path: Path) -> None:
+        # Previously the rejoined copies lacked the metadata, so the source was listed twice.
+        source = self.rgb(tmp_path)
+        source.metadata["SENSOR"] = "S2"
+        left, bottom, _, top = source.bounds
+        assert self.steps(vrt.mosaic([source, source.clip_box(left, bottom, left + 30, top)])) == [
+            "steps  ┌ 1  from_raster  rgb.tif",
+            "       └ 2  clip_box     3 × 4 px at col 0, row 0",
+            "         3  mosaic       #1, #2",
+        ]
+
+    @pytest.mark.parametrize(
+        ("lut", "detail"),
+        [
+            ([("x", 1.0), (2.0, 3.0)], "2"),
+            ([(float("-inf"), 0.0), (5.0, 1.0)], "5"),
+            ([(float("nan"), 0.0)], ""),
+        ],
+    )
+    def test_colorize_ranges_skip_values_that_are_not_finite(
+        self, lut: list[tuple[float, float]], detail: str
+    ) -> None:
+        file = UPath("/d/a.tif")
+        rgba = (ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha)
+        bands = [Band("uint8", [Source(file, lut=lut)], color_interp=c) for c in rgba]
+        assert self.steps(VRT(UTM, GRID, 6, 4, bands)) == [
+            f"steps  1  colorize  a.tif · {detail}".removesuffix(" · ")
+        ]
+
+    def test_lookalikes_keep_the_general_verbs(self) -> None:
+        inner = VRT(UTM, GRID, 6, 4, [Band("float32", [Source(UPath("/d/a.tif"))])] * 2)
+        moved = VRT(UTM, Affine(10.0, 0.0, 500010.0, 0.0, -10.0, 5200000.0), 6, 4, inner.bands[:1])
+        window = rasterio.windows.Window(1, 1, 6, 4)
+        whole = rasterio.windows.Window(0, 0, 6, 4)
+        # Reading a VRT on another grid resamples it: not a select.
+        assert self.steps(model(Source(moved)))[-1] == "       └ 2  stack"
+        # A window of the wrong band: not a clip.
+        at_window = Affine(10.0, 0.0, 500010.0, 0.0, -10.0, 5199990.0)
+        source = Source(inner, band=2, src_window=window, dst_window=whole)
+        cut = VRT(UTM, at_window, 6, 4, [Band("float32", [source])])
+        assert self.steps(cut)[-1] == "       └ 2  mosaic"
+        # A window placed on a grid that is not the window's: not a clip.
+        shifted = model(Source(inner, band=1, src_window=window, dst_window=whole))
+        assert self.steps(shifted)[-1] == "       └ 2  mosaic"
+        # One-band copies on different grids are not joined into one input.
+        split = VRT(
+            UTM,
+            GRID,
+            6,
+            4,
+            [
+                Band("float32", [Source(part, src_window=window, dst_window=whole)])
+                for part in (moved, VRT(UTM, GRID, 6, 4, inner.bands[:1]))
+            ],
+        )
+        assert self.steps(split)[-1].split()[-3:] == ["stack", "#1,", "#2"]
+
+    def test_html_names_the_steps(self, tmp_path: Path) -> None:
+        source = self.rgb(tmp_path)
+        html = html_of(
+            source.select([2]).clip_box(*source.bounds).colorize([(0, (0, 0, 0)), (9, (9, 9, 9))])
+        )
+        assert ">select<" in html
+        assert ">colorize<" in html
+
+
 class TestTruncation:
     def test_hundred_sources(self) -> None:
         many = model(*(Source(UPath(f"/data/t{i:03}.tif")) for i in range(100)))
@@ -281,16 +447,17 @@ class TestTruncation:
         assert html.count("<tr>") == 1 + 10 + 1
 
     def test_nested_vrts_are_capped_per_step(self, tmp_path: Path) -> None:
-        tile = make_tiff(tmp_path / "a.tif")
-        derived = [vrt.derive(tile, PixelFunction.db(), description=f"d{i}") for i in range(7)]
+        derived = [
+            vrt.derive(make_tiff(tmp_path / f"a{i}.tif"), PixelFunction.db()) for i in range(7)
+        ]
         stacked = vrt.stack(derived)
         lines = repr(stacked).splitlines()
         assert lines[-6:] == [
-            "steps  1  derive  a.tif · dB",
-            "       2  derive  a.tif · dB",
-            "       3  derive  a.tif · dB",
-            "       4  derive  a.tif · dB",
-            "       5  derive  a.tif · dB",
+            "steps  1  derive  a0.tif · dB",
+            "       2  derive  a1.tif · dB",
+            "       3  derive  a2.tif · dB",
+            "       4  derive  a3.tif · dB",
+            "       5  derive  a4.tif · dB",
             "       6  stack   #1, #2, #3, #4, #5, … +2",
         ]
         assert "… +2" in stacked._repr_html_()
@@ -306,9 +473,8 @@ class TestTruncation:
 
     def test_step_count_is_capped(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(_summary, "MAX_NODES", 2)
-        tile = make_tiff(tmp_path / "a.tif")
         stacked = vrt.stack(
-            [vrt.derive(tile, PixelFunction.db(), description=f"d{i}") for i in range(3)]
+            [vrt.derive(make_tiff(tmp_path / f"a{i}.tif"), PixelFunction.db()) for i in range(3)]
         )
         assert repr(stacked).splitlines()[-1] == (
             "       3  stack   #1, #2, VRT(6×4, EPSG:32632, 1 band) …"

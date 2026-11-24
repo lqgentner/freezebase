@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field, fields
 import math
 from typing import TYPE_CHECKING, ClassVar, Literal, Self, overload
@@ -15,7 +16,7 @@ from freezebase._deprecation import deprecated_alias
 from freezebase.vrt import _summary
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from contextlib import AbstractContextManager
     from pathlib import Path
     from typing import Any
@@ -630,6 +631,151 @@ class VRT:
             self, function, dtype=dtype, nodata=nodata, description=description, band=band
         )
 
+    def select(self, bands: Sequence[int] | np.ndarray) -> VRT:
+        """Select bands of this VRT, in any order.
+
+        Parameters
+        ----------
+        bands : Sequence[int] | numpy.ndarray
+            1-based bands to keep, in output order; a band may repeat.
+
+        Returns
+        -------
+        VRT
+            The selected bands, copied, with this VRT's dataset metadata.
+
+        Raises
+        ------
+        ValueError
+            If ``bands`` is empty, holds a non-integer or names a band this VRT lacks.
+        """
+        from freezebase.vrt._steps import select  # noqa: PLC0415  # _steps imports this module
+
+        return select(self, bands)
+
+    def set(
+        self,
+        *,
+        band_names: list[str] | None = None,
+        color_interp: list[ColorInterp] | None = None,
+        units: list[str] | None = None,
+        tags: Mapping[str, str] | None = None,
+        band_tags: Sequence[Mapping[str, str]] | None = None,
+    ) -> VRT:
+        """Return a copy of this VRT with new metadata; the pixels are unchanged.
+
+        Parameters
+        ----------
+        band_names : list[str] | None, optional
+            Band descriptions, one per band.
+        color_interp : list[ColorInterp] | None, optional
+            Per-band color interpretation.
+        units : list[str] | None, optional
+            Band unit strings, one per band.
+        tags : Mapping[str, str] | None, optional
+            Dataset-level tags, added to the existing ones.
+        band_tags : Sequence[Mapping[str, str]] | None, optional
+            Per-band tags, one mapping per band, added to the existing ones.
+
+        Returns
+        -------
+        VRT
+            The copy; ``None`` arguments leave that metadata as it is.
+
+        Raises
+        ------
+        ValueError
+            If a per-band sequence does not hold one entry per band.
+        """
+        from freezebase.vrt._steps import set_metadata  # noqa: PLC0415  # _steps imports this module
+
+        return set_metadata(
+            self,
+            band_names=band_names,
+            color_interp=color_interp,
+            units=units,
+            tags=tags,
+            band_tags=band_tags,
+        )
+
+    def clip_box(self, minx: float, miny: float, maxx: float, maxy: float) -> VRT:
+        """Cut out the pixels inside a box, without resampling.
+
+        The box edges must lie on this VRT's pixel grid, so the result keeps whole pixels;
+        its transform and size are those of the ``rasterio.windows`` window over the box.
+        Unlike rioxarray's ``clip_box``, the box must lie inside the raster and is not
+        snapped to the pixels it touches.
+
+        Parameters
+        ----------
+        minx, miny, maxx, maxy : float
+            Box edges in units of the CRS.
+
+        Returns
+        -------
+        VRT
+            A VRT reading the box from a copy of each band, with this VRT's band and
+            dataset metadata.
+
+        Raises
+        ------
+        ValueError
+            If the grid is rotated or not north-up, or the box is empty, not finite, off
+            the pixel grid or extends beyond this VRT.
+        """
+        from freezebase.vrt._steps import clip_box  # noqa: PLC0415  # _steps imports this module
+
+        return clip_box(self, minx, miny, maxx, maxy)
+
+    def colorize(
+        self,
+        colors: Sequence[tuple[float, tuple[int, ...]]] | str | Callable[[np.ndarray], Any],
+        *,
+        vmin: float | None = None,
+        vmax: float | None = None,
+        band: int = 1,
+    ) -> VRT:
+        """Render one band as an RGBA image through a color ramp.
+
+        Colors are interpolated linearly between stops; values below the first stop or
+        above the last take its color. Stop values compare with the stored pixel values,
+        before any scale and offset. Pixels equal to the band's nodata and NaN pixels are
+        transparent (all four bands 0); other pixels take the stop's alpha, 255 for an RGB
+        stop. Pixels no source covers, such as gaps in a mosaic, read as 0 unless the band
+        has a nodata value, and are colored as 0.
+
+        Parameters
+        ----------
+        colors : Sequence[tuple[float, tuple[int, ...]]] | str | Colormap
+            ``(value, (r, g, b))`` or ``(value, (r, g, b, a))`` stops with 0-255 channels,
+            in strictly ascending value order; or a matplotlib colormap or its name, which
+            needs matplotlib. A colormap of fewer than 256 colors, such as ``"tab10"``,
+            gives each color an equal, unblended share of ``vmin`` to ``vmax``.
+        vmin, vmax : float | None, optional
+            Values the ends of a colormap map to; required for a colormap, not allowed
+            with stops.
+        band : int, optional
+            1-based band to render.
+
+        Returns
+        -------
+        VRT
+            A four-band ``uint8`` RGBA VRT reading a copy of the band.
+
+        Raises
+        ------
+        ValueError
+            If ``band`` is out of range, there are fewer than two stops, the stops are not
+            ascending or a color is not 3 or 4 integers from 0 to 255, ``vmin`` and ``vmax``
+            are missing, not finite or not ascending for a colormap, or given with stops,
+            or matplotlib has no colormap of that name.
+        ImportError
+            If ``colors`` names a colormap and matplotlib is not installed.
+        """
+        from freezebase.vrt._steps import colorize  # noqa: PLC0415  # _steps imports this module
+
+        return colorize(self, colors, vmin=vmin, vmax=vmax, band=band)
+
     def to_xml(self, *, relative_to: UPath | None = None) -> str:
         """Serialize to VRT XML.
 
@@ -967,3 +1113,44 @@ class VRT:
         from freezebase.vrt._io import open_vrt  # noqa: PLC0415  # _io imports raster, like _xml
 
         return open_vrt(self, storage_options=storage_options, **kwargs)
+
+
+def band_copy(vrt: VRT, band: int, memo: dict[tuple[int, int], VRT]) -> tuple[VRT, int]:
+    """Copy band ``band`` (1-based) of ``vrt`` into a VRT of its own, with its number there.
+
+    Nested VRTs are narrowed to the bands read as well, so a chain of steps nests each band
+    once instead of every band once per output band. A warp covers all bands at once, so a
+    warped VRT is copied whole. ``memo`` shares the copies of one call between bands.
+    """
+    if vrt.warp is not None:
+        whole = memo.get((id(vrt), 0))
+        if whole is None:
+            whole = memo[id(vrt), 0] = copy.deepcopy(vrt)
+        return whole, band
+    narrowed = memo.get((id(vrt), band))
+    if narrowed is None:
+        narrowed = memo[id(vrt), band] = VRT(
+            vrt.crs,
+            vrt.transform,
+            vrt.width,
+            vrt.height,
+            [_band_copy(vrt.bands[band - 1], memo)],
+            metadata=dict(vrt.metadata),
+            metadata_domains=copy.deepcopy(vrt.metadata_domains),
+        )
+    return narrowed, 1
+
+
+def _band_copy(band: Band, memo: dict[tuple[int, int], VRT]) -> Band:
+    """Copy ``band``, narrowing the nested VRTs it reads to the bands it reads."""
+    sources: list[Source] = []
+    for source in band.sources:
+        if isinstance(source.path, VRT):
+            path, number = band_copy(source.path, source.band, memo)
+            # Copy the rest of the source, not the VRT it reads.
+            copied = copy.deepcopy(source, {id(source.path): path})
+            copied.band = number
+        else:
+            copied = copy.deepcopy(source)
+        sources.append(copied)
+    return copy.deepcopy(band, {id(band.sources): sources})
