@@ -115,6 +115,8 @@ _COG_REPROJECTION_OPTIONS = (
     "zoom_level_strategy",
 )
 
+_COG_OPTION_NAMES = frozenset(_COG_CREATION_OPTIONS + _COG_REPROJECTION_OPTIONS)
+
 
 @contextmanager
 def http_env(**options: str) -> Generator[None]:
@@ -755,6 +757,17 @@ def _cog_creation_options(profile: Mapping[str, Any]) -> dict[str, Any]:
     return options
 
 
+def _lowercase_cog_options(profile: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Spell the profile's ``COG`` option keys in lowercase; a later spelling wins."""
+    if profile is None:
+        return None
+    # GDAL creation options are case-insensitive; raster metadata keys are not.
+    return {
+        key.lower() if key.lower() in _COG_OPTION_NAMES else key: value
+        for key, value in profile.items()
+    }
+
+
 def _reject_reprojection_options(profile: Mapping[str, Any] | None) -> None:
     """Raise if ``profile`` asks the COG driver to reproject."""
     keys = [key for key in _COG_REPROJECTION_OPTIONS if key in (profile or {})]
@@ -1149,12 +1162,13 @@ def write_cog(
     dst_file : str | Path | UPath
         Destination COG (local or S3).
     profile : dict[str, Any] or None, optional
-        Raster metadata and native GDAL ``COG`` creation options; required for an array. For
-        a VRT or path only ``dtype``, ``nodata`` and the creation options apply: ``dtype``
-        casts every band, and a ``nodata`` value that differs from a band's moves the pixels
-        holding the old one to it. ``nodata=None`` keeps the VRT's nodata, as leaving it out.
-        A cast rounds and clamps out-of-range values, so a valid value can become the nodata
-        value. Bands that differ in dtype or nodata need ``dtype`` or ``nodata`` here.
+        Raster metadata and native GDAL ``COG`` creation options, the latter in any case;
+        required for an array. For a VRT or path only ``dtype``, ``nodata`` and the creation
+        options apply: ``dtype`` casts every band, and a ``nodata`` value that differs from a
+        band's moves the pixels holding the old one to it. ``nodata=None`` keeps the VRT's
+        nodata, as leaving it out. A cast rounds and clamps out-of-range values, so a valid
+        value can become the nodata value. Bands that differ in dtype or nodata need
+        ``dtype`` or ``nodata`` here.
     band_names : list[str] or None, optional
         Band descriptions, one per band.
     color_interp : list[ColorInterp] or None, optional
@@ -1187,6 +1201,7 @@ def write_cog(
         If the write fails, also when GeoTIFF cannot store the CRS, such as a projected
         CRS with ellipsoidal heights.
     """
+    profile = _lowercase_cog_options(profile)
     _reject_reprojection_options(profile)
     dst_file = UPath(dst_file)
     if _is_vrt_input(data):

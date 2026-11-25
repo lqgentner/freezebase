@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the project is pre-1.0 (`0.x`), minor releases may contain breaking changes.
 
+## Unreleased
+
+### Fixed
+
+- `write_cog` and `VRT.to_cog` read `COG` creation options in any case, as GDAL does.
+  An uppercase key such as `"BIGTIFF"` or `"COMPRESS"` was ignored, and an uppercase
+  reprojection option such as `"TARGET_SRS"` did not raise. When both spellings are given,
+  the later one wins.
+
 ## [0.12.0] - 2026-11-24
 
 freezebase 0.12 makes VRTs chainable: build one step by step, such as

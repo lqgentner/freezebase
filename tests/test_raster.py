@@ -1128,7 +1128,13 @@ class TestCogCreationOptions:
 
     @pytest.mark.parametrize("from_vrt", [False, True])
     @pytest.mark.parametrize(
-        "option", [{"target_srs": "EPSG:4326"}, {"tiling_scheme": "GoogleMapsCompatible"}]
+        "option",
+        [
+            {"target_srs": "EPSG:4326"},
+            {"tiling_scheme": "GoogleMapsCompatible"},
+            # Previously passed the guard because only lowercase keys were checked.
+            {"TARGET_SRS": "EPSG:4326"},
+        ],
     )
     def test_write_cog_refuses_reprojection_options(
         self, tmp_path: Path, from_vrt: bool, option: dict[str, str]
@@ -1141,6 +1147,35 @@ class TestCogCreationOptions:
             write_cog(src if from_vrt else self._data(), dst, {**self.profile, **option})
 
         assert not dst.exists()
+
+    @pytest.mark.parametrize("from_vrt", [False, True])
+    def test_write_cog_accepts_uppercase_options(self, tmp_path: Path, from_vrt: bool) -> None:
+        # Previously ignored uppercase keys, writing a classic DEFLATE TIFF.
+        src = tmp_path / "src.tif"
+        write_cog(self._data(), src, self.profile)
+        dst = tmp_path / "upper.tif"
+        options = {"BIGTIFF": "YES", "COMPRESS": "ZSTD"}
+
+        write_cog(src if from_vrt else self._data(), dst, {**self.profile, **options})
+
+        assert dst.read_bytes()[:4] == b"II+\x00"  # BigTIFF magic
+        with rasterio.open(dst) as ds:
+            assert ds.tags(ns="IMAGE_STRUCTURE")["COMPRESSION"] == "ZSTD"
+
+    def test_write_cog_later_option_spelling_wins(self, tmp_path: Path) -> None:
+        dst = tmp_path / "zstd.tif"
+        profile = {**self.profile, **COG_PROFILE, "COMPRESS": "ZSTD"}
+
+        write_cog(self._data(), dst, profile)
+
+        with rasterio.open(dst) as ds:
+            assert ds.tags(ns="IMAGE_STRUCTURE")["COMPRESSION"] == "ZSTD"
+        assert profile["compress"] == "deflate"  # the caller's profile is left as is
+
+    def test_lowercase_cog_options_leaves_metadata_keys(self) -> None:
+        options = raster._lowercase_cog_options({"NODATA": 0, "Compress": "zstd"})
+        assert options == {"NODATA": 0, "compress": "zstd"}
+        assert raster._lowercase_cog_options(None) is None
 
     def test_write_cog_respects_a_lossy_bound(self, tmp_path: Path) -> None:
         data = self._data()
