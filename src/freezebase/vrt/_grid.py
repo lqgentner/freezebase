@@ -6,10 +6,10 @@ import math
 from typing import TYPE_CHECKING, NamedTuple
 
 from rasterio.coords import BoundingBox
-from upath import UPath
 
 from freezebase.raster import rasterio_open
 from freezebase.vrt._model import _GDAL_DTYPE_NAMES, VRT, _nodata_equal
+from freezebase.vrt._paths import source_path
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -90,8 +90,7 @@ def raster_info(src: AnyPath | VRT) -> RasterInfo:
         ref: SourceRef = src
         opened = src.open()
     else:
-        path = UPath(src)
-        ref = path.absolute() if path.protocol == "" else path
+        ref = source_path(src)
         opened = rasterio_open(ref)
     with opened as ds:
         return RasterInfo(

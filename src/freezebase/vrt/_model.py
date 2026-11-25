@@ -793,8 +793,9 @@ class VRT:
         Raises
         ------
         ValueError
-            If a band or source dtype has no GDAL equivalent, a ``metadata_domains`` key
-            is empty, or a band of a warped VRT has sources or a pixel function.
+            If a source path is under a GDAL virtual file system such as ``/vsitar/``, a band or
+            source dtype has no GDAL equivalent, a ``metadata_domains`` key is empty, or a band of
+            a warped VRT has sources or a pixel function.
         RuntimeError
             If a source is a nested VRT and rasterio's GDAL is older than 3.11.
         """
@@ -983,7 +984,8 @@ class VRT:
         ValueError
             If ``driver`` is ``COG``, ``profile`` sets another driver, a per-band sequence
             has the wrong length, the dtype is unknown, a nodata value does not fit the
-            dtype, or the bands differ in dtype or nodata without ``profile`` setting it.
+            dtype, the bands differ in dtype or nodata without ``profile`` setting it, or
+            as ``to_xml``.
         RasterWriteError
             If the write fails, also when ``driver`` cannot hold the bands, such as
             ``float32`` in a PNG, writes several files, or is GeoTIFF and cannot store the
@@ -1106,7 +1108,7 @@ class VRT:
         Raises
         ------
         ValueError
-            As `env()`, or if a dtype has no GDAL equivalent.
+            As `env()` and ``to_xml``.
         ImportError
             As `env()`.
         """

@@ -1192,11 +1192,11 @@ def write_cog(
     Raises
     ------
     ValueError
-        If ``profile`` is missing for an array, a per-band sequence has the wrong length, the
-        dtype is unknown, a nodata value does not fit the dtype, a raster path has a
-        colour table or is south-up, or the bands differ in dtype or nodata without
-        ``profile`` setting it, or ``profile`` holds a ``COG`` option that reprojects,
-        such as ``target_srs`` or ``tiling_scheme``.
+        If ``profile`` is missing for an array, a per-band sequence has the wrong length, the dtype
+        is unknown, a nodata value does not fit the dtype, a raster path is under a GDAL virtual
+        file system such as ``/vsitar/`` or has a colour table or is south-up, or the bands differ
+        in dtype or nodata without ``profile`` setting it, or ``profile`` holds a ``COG`` option
+        that reprojects, such as ``target_srs`` or ``tiling_scheme``.
     RasterWriteError
         If the write fails, also when GeoTIFF cannot store the CRS, such as a projected
         CRS with ellipsoidal heights.

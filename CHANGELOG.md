@@ -8,6 +8,18 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## Unreleased
 
+### Changed
+
+- **Breaking:** VRT sources must be local, `s3://` or `http(s)://` paths. Before, a path
+  under a GDAL virtual file system, such as `/vsitar/tiles.tar/t.tif` or `/vsimem/t.tif`,
+  worked with `to_cog` and `to_raster` but failed in `reproject` or `vrt.read`, and `to_vrt`
+  wrote it as a broken relative path. Now `from_raster`, `stack`, `mosaic`, `derive`,
+  `reproject` and `write_cog` raise `ValueError` for such a path, and so do `to_xml`,
+  `to_vrt`, `to_cog`, `to_raster` and `open` for a hand-built `Source` holding one. Extract
+  the file from its archive, or write the in-memory file to disk, and pass that path. For
+  S3, `from_raster("/vsis3/bucket/t.tif")` becomes `from_raster("s3://bucket/t.tif")`, which
+  needs the `s3` extra.
+
 ### Fixed
 
 - `write_cog` and `VRT.to_cog` read `COG` creation options in any case, as GDAL does.

@@ -15,11 +15,14 @@ from rasterio.transform import Affine
 from rasterio.warp import reproject
 from rasterio.windows import Window
 
+from freezebase.raster import write_cog
 from freezebase.vrt import VRT, PixelFunction, Source, derive, from_raster, mosaic, stack
+from freezebase.vrt import reproject as reproject_vrt
 from freezebase.vrt._grid import raster_info
 from tests.rasters import make_tiff
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -61,6 +64,48 @@ class TestFromRaster:
         props = from_raster(p).bands[0].sources[0].properties
         assert props is not None
         assert (props.width, props.height, props.dtype) == (6, 4, "float32")
+
+
+class TestUnsupportedSources:
+    """Sources must be local, s3:// or http(s):// paths."""
+
+    @pytest.mark.parametrize(
+        "path", ["/vsitar/a.tar/t.tif", "/vsizip/a.zip/t.tif", "/vsimem/t.tif", "/vsis3/b/t.tif"]
+    )
+    @pytest.mark.parametrize("builder", ["from_raster", "stack", "mosaic", "derive", "reproject"])
+    def test_builders_refuse_gdal_virtual_file_systems(self, path: str, builder: str) -> None:
+        builds: dict[str, Callable[[], VRT]] = {
+            "from_raster": lambda: from_raster(path),
+            "stack": lambda: stack([path]),
+            "mosaic": lambda: mosaic([path]),
+            "derive": lambda: derive(path, PixelFunction("dB")),
+            "reproject": lambda: reproject_vrt(path, crs="EPSG:4326"),
+        }
+        # Previously accepted, then failed in reproject or was written as a broken path.
+        with pytest.raises(ValueError, match="Unsupported GDAL path"):
+            builds[builder]()
+
+    def test_reproject_refuses_a_virtual_like(self, tmp_path: Path) -> None:
+        tile = make_tiff(tmp_path / "a.tif")
+        with pytest.raises(ValueError, match="Unsupported GDAL path"):
+            reproject_vrt(tile, like="/vsimem/grid.tif")
+
+    @pytest.mark.parametrize("path", ["/vsitar/a.tar/t.tif", "/vsimem/t.tif"])
+    def test_write_cog_refuses_a_virtual_path(self, tmp_path: Path, path: str) -> None:
+        with pytest.raises(ValueError, match="Unsupported GDAL path"):
+            write_cog(path, tmp_path / "out.tif")
+
+    def test_s3_hint_names_the_path_as_given(self) -> None:
+        with pytest.raises(ValueError, match=r"'/vsis3/b/t\.tif'.*s3://bucket/key"):
+            from_raster("/vsis3/b/t.tif")
+
+    def test_local_directory_named_vsi_is_accepted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "vsidata").mkdir()
+        make_tiff(tmp_path / "vsidata" / "t.tif")
+        monkeypatch.chdir(tmp_path)
+        assert from_raster("vsidata/t.tif").count == 1
 
 
 class TestStack:

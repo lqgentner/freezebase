@@ -164,6 +164,10 @@ source paths.
 
 ## Building blocks
 
+Sources are local paths, `s3://` paths or `http(s)://` URLs. Files inside an archive or in
+memory, which GDAL reads through paths such as `/vsitar/` or `/vsimem/`, are not supported:
+extract them or write them to disk first.
+
 ### Mosaic tiles
 
 Use `vrt.mosaic` for tiles of one dataset that share a CRS, such as the Copernicus DEM
