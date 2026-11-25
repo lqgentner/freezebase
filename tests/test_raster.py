@@ -1162,6 +1162,15 @@ class TestCogCreationOptions:
         with rasterio.open(dst) as ds:
             assert ds.tags(ns="IMAGE_STRUCTURE")["COMPRESSION"] == "ZSTD"
 
+    def test_vrt_to_cog_accepts_uppercase_options(self, tmp_path: Path) -> None:
+        src = tmp_path / "src.tif"
+        write_cog(self._data(), src, self.profile)
+        dst = tmp_path / "upper.tif"
+
+        from_raster(src).to_cog(dst, COG_PROFILE | {"BIGTIFF": "YES"})
+
+        assert dst.read_bytes()[:4] == b"II+\x00"  # BigTIFF magic
+
     def test_write_cog_later_option_spelling_wins(self, tmp_path: Path) -> None:
         dst = tmp_path / "zstd.tif"
         profile = {**self.profile, **COG_PROFILE, "COMPRESS": "ZSTD"}
@@ -1173,8 +1182,9 @@ class TestCogCreationOptions:
         assert profile["compress"] == "deflate"  # the caller's profile is left as is
 
     def test_lowercase_cog_options_leaves_metadata_keys(self) -> None:
-        options = raster._lowercase_cog_options({"NODATA": 0, "Compress": "zstd"})
-        assert options == {"NODATA": 0, "compress": "zstd"}
+        profile: dict[Any, Any] = {"NODATA": 0, "Compress": "zstd", 1: "x"}
+        options = raster._lowercase_cog_options(profile)
+        assert options == {"NODATA": 0, "compress": "zstd", 1: "x"}
         assert raster._lowercase_cog_options(None) is None
 
     def test_write_cog_respects_a_lossy_bound(self, tmp_path: Path) -> None:

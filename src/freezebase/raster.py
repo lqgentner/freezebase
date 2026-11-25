@@ -763,7 +763,7 @@ def _lowercase_cog_options(profile: Mapping[str, Any] | None) -> dict[str, Any] 
         return None
     # GDAL creation options are case-insensitive; raster metadata keys are not.
     return {
-        key.lower() if key.lower() in _COG_OPTION_NAMES else key: value
+        key.lower() if isinstance(key, str) and key.lower() in _COG_OPTION_NAMES else key: value
         for key, value in profile.items()
     }
 
