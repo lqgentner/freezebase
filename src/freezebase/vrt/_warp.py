@@ -32,6 +32,7 @@ from freezebase.vrt._grid import (
     raster_info,
 )
 from freezebase.vrt._model import VRT, _check_nodata_fits
+from freezebase.vrt._paths import source_path
 from freezebase.vrt._xml import from_xml
 
 if TYPE_CHECKING:
@@ -124,20 +125,20 @@ def reproject(
     Raises
     ------
     ValueError
-        If neither ``crs`` nor ``like`` is given, ``like`` comes with ``crs``,
-        ``resolution`` or ``bounds``, ``bounds`` comes without ``resolution``,
-        ``resolution`` is not positive, ``bounds`` does not lie on the ``resolution`` grid,
-        ``tolerance`` is negative or NaN, the source has no CRS and no ``src_crs`` is given,
-        only one of the source CRS and the target CRS has a vertical datum, heights would
-        be shifted in a source of more than one band or with a scale or offset, no exact
-        transformation is available and ``allow_ballpark`` is false, the source has a
-        colour table, or the nodata (the given one, else the source's) does not fit in the
-        warped dtype.
+        If ``source`` or ``like`` is a path under a GDAL virtual file system such as ``/vsitar/``,
+        neither ``crs`` nor ``like`` is given, ``like`` comes with ``crs``, ``resolution`` or
+        ``bounds``, ``bounds`` comes without ``resolution``, ``resolution`` is not positive,
+        ``bounds`` does not lie on the ``resolution`` grid, ``tolerance`` is negative or NaN, the
+        source has no CRS and no ``src_crs`` is given, only one of the source CRS and the target
+        CRS has a vertical datum, heights would be shifted in a source of more than one band or
+        with a scale or offset, no exact transformation is available and ``allow_ballpark`` is
+        false, the source has a colour table, or the nodata (the given one, else the source's) does
+        not fit in the warped dtype.
     RuntimeError
         If GDAL's serialized transformer cannot be made exact or ballpark-free.
     """
     _check_tolerance(tolerance)
-    ref = copy.deepcopy(source) if isinstance(source, VRT) else _absolute(UPath(source))
+    ref = copy.deepcopy(source) if isinstance(source, VRT) else source_path(source)
     with _opened(ref) as src:
         _check_no_colour_table(
             [_has_colour_table(src, i) for i in src.indexes],
@@ -292,11 +293,6 @@ def _vertical_shift_options(
         "MULT_FACTOR_VERTICAL_SHIFT": f"{source_values / dst_axis:.18g}",
         "MULT_FACTOR_VERTICAL_SHIFT_PIPELINE": f"{source_axis / dst_axis:.18g}",
     }
-
-
-def _absolute(path: UPath) -> UPath:
-    """Return a local path made absolute, so GDAL records where it is."""
-    return path.absolute() if path.protocol == "" else path
 
 
 @contextmanager

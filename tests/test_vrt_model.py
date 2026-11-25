@@ -39,7 +39,7 @@ from freezebase.vrt import (
     read,
     reproject,
 )
-from freezebase.vrt._paths import gdal_path, parse_gdal_path
+from freezebase.vrt._paths import gdal_path, parse_gdal_path, source_path
 from freezebase.vrt._xml import from_xml
 from tests.rasters import make_tiff
 
@@ -486,6 +486,27 @@ class TestWrite:
         got = gdal_path(UPath(tile), relative_to=UPath("s3://b/m.vrt"))
         assert got == (str(tile.resolve()), False)
 
+    def test_source_path_makes_only_local_paths_absolute(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        assert source_path("a.tif") == UPath(tmp_path / "a.tif")
+        assert source_path("s3://b/a.tif") == UPath("s3://b/a.tif")
+
+    def test_vsi_source_is_not_written(self, tmp_path: Path) -> None:
+        # Previously written relative to the VRT, as "../../vsitar/a.tar/t.tif".
+        with pytest.raises(ValueError, match="Unsupported GDAL path"):
+            gdal_path(UPath("/vsitar/a.tar/t.tif"), relative_to=UPath(tmp_path / "m.vrt"))
+        with pytest.raises(ValueError, match="Unsupported GDAL path"):
+            gdal_path(UPath("/vsimem/t.tif"), relative_to=None)
+
+    def test_hand_built_vsi_source_is_refused(self, tmp_path: Path) -> None:
+        v = VRT(None, UTM_GRID, 1, 1, [Band("float32", [Source(UPath("/vsimem/t.tif"))])])
+        with pytest.raises(ValueError, match="Unsupported GDAL path"), v.open():
+            pass
+        with pytest.raises(ValueError, match="Unsupported GDAL path"):
+            v.to_cog(tmp_path / "out.tif")
+
     @pytest.mark.parametrize("path", ["gs://b/m.vrt", "https://ex.com/m.vrt"])
     def test_write_to_other_protocols_raises(self, tmp_path: Path, path: str) -> None:
         # Previously treated as local and failed obscurely.
@@ -830,6 +851,15 @@ class TestRead:
     def test_metadata_of_different_domains_is_not_a_duplicate(self) -> None:
         v = from_xml(one_band(dataset='<Metadata domain="A" /><Metadata domain="B" />'))
         assert v.metadata_domains == {"A": {}, "B": {}}
+
+    @pytest.mark.parametrize("relative", [False, True])
+    def test_read_refuses_a_vsi_source(self, tmp_path: Path, relative: bool) -> None:
+        path = tmp_path / "m.vrt"
+        # As to_vrt wrote a /vsitar/ source: enough ".." to climb to the root.
+        up = "../" * (len(tmp_path.parts) - 1) if relative else "/"
+        path.write_text(_one_source_vrt(f"{up}vsitar/tiles.tar/t.tif", relative=relative))
+        with pytest.raises(ValueError, match="Unsupported GDAL path"):
+            read(path)
 
     def test_unsupported_vsi_prefix_raises(self) -> None:
         with pytest.raises(ValueError, match="Unsupported GDAL path"):

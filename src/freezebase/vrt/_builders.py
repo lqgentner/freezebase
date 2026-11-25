@@ -108,7 +108,8 @@ def from_raster(path: AnyPath) -> VRT:
     Raises
     ------
     ValueError
-        If the raster is south-up or has a colour table.
+        If ``path`` is under a GDAL virtual file system such as ``/vsitar/``, or the raster is
+        south-up or has a colour table.
     """
     info = raster_info(path)
     _check_north_up(info, _label(info, 0))
@@ -182,9 +183,10 @@ def stack(
     Raises
     ------
     ValueError
-        If ``sources`` is empty, the grids differ (use ``reproject`` first), a source is
-        south-up or has a colour table, a ``bands`` entry is out of range, or ``bands``,
-        ``band_names`` or ``color_interp`` do not match.
+        If ``sources`` is empty, a path is under a GDAL virtual file system such as ``/vsitar/``,
+        the grids differ (use ``reproject`` first), a source is south-up or has a colour table, a
+        ``bands`` entry is out of range, or ``bands``, ``band_names`` or ``color_interp`` do not
+        match.
     """
     return _stack(
         _snapshot(sources), bands=bands, band_names=band_names, color_interp=color_interp
@@ -372,11 +374,11 @@ def mosaic(
     Raises
     ------
     ValueError
-        If ``sources`` is empty, ``nodata`` does not fit in a band's dtype, the tiles are
-        incompatible, off the pixel grid (with ``resolution=None``), rotated, south-up or
-        with a colour table, ``bounds`` is not whole pixels, ``resolution`` is not
-        positive, ``resampling`` is not supported, or ``band_names`` or ``color_interp``
-        do not match the band count.
+        If ``sources`` is empty, a path is under a GDAL virtual file system such as ``/vsitar/``,
+        ``nodata`` does not fit in a band's dtype, the tiles are incompatible, off the pixel grid
+        (with ``resolution=None``), rotated, south-up or with a colour table, ``bounds`` is not
+        whole pixels, ``resolution`` is not positive, ``resampling`` is not supported, or
+        ``band_names`` or ``color_interp`` do not match the band count.
     """
     if not sources:
         msg = "sources must not be empty."
@@ -456,9 +458,9 @@ def derive(
     Raises
     ------
     ValueError
-        If ``nodata`` does not fit in ``dtype``, ``sources`` is empty, the grids differ
-        (use ``reproject`` first), ``band`` is out of range, or an input band is complex or
-        has a scale or offset.
+        If ``nodata`` does not fit in ``dtype``, ``sources`` is empty, a path is under a GDAL
+        virtual file system such as ``/vsitar/``, the grids differ (use ``reproject`` first),
+        ``band`` is out of range, or an input band is complex or has a scale or offset.
     """
     _check_nodata_fits(dtype, nodata)
     inputs = _snapshot([sources] if isinstance(sources, (str, Path, UPath, VRT)) else sources)

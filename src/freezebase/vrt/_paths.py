@@ -15,6 +15,47 @@ from freezebase.raster import _to_vsi_uri
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from freezebase.raster import AnyPath
+
+
+def source_path(path: AnyPath) -> UPath:
+    """Return a source path, absolute if local.
+
+    Parameters
+    ----------
+    path : str | Path | UPath
+        A local, ``s3://`` or ``http(s)://`` raster path.
+
+    Returns
+    -------
+    UPath
+        The source path.
+
+    Raises
+    ------
+    ValueError
+        If ``path`` is under a GDAL virtual file system such as ``/vsitar/``.
+    """
+    if isinstance(path, str):
+        _check_local(path)  # names the path as given, before UPath normalizes it
+    path = UPath(path)
+    if path.protocol != "":
+        return path
+    path = path.absolute()
+    _check_local(posixpath.normpath(path.as_posix()))
+    return path
+
+
+def _check_local(text: str) -> None:
+    """Raise for a GDAL virtual file system path, which has no UPath equivalent."""
+    if text.startswith("/vsi"):
+        msg = (
+            f"Unsupported GDAL path {text!r}: sources must be local, s3:// or http(s):// "
+            "paths, such as s3://bucket/key for /vsis3/bucket/key. Extract a file from an "
+            "archive, or write an in-memory file to disk, first."
+        )
+        raise ValueError(msg)
+
 
 def _same_store(path: UPath, other: UPath) -> bool:
     """Whether both paths are local, or both on the same S3 bucket."""
@@ -39,9 +80,15 @@ def gdal_path(path: UPath, *, relative_to: UPath | None) -> tuple[str, bool]:
     -------
     tuple[str, bool]
         The path text and ``True`` when it is relative to ``relative_to``.
+
+    Raises
+    ------
+    ValueError
+        If ``path`` is under a GDAL virtual file system such as ``/vsitar/``.
     """
     if path.protocol == "":
         path = UPath(_absolute(path))
+        _check_local(path.as_posix())
     if relative_to is not None and _same_store(path, relative_to):
         if path.protocol == "s3":
             return posixpath.relpath(path.path, relative_to.parent.path), True
@@ -108,9 +155,7 @@ def parse_gdal_path(
         )
     if text.startswith("/vsicurl/"):
         return UPath(text.removeprefix("/vsicurl/"))
-    if text.startswith("/vsi"):
-        msg = f"Unsupported GDAL path {text!r}"
-        raise ValueError(msg)
+    _check_local(text)
     # GDAL reads an absolute path as absolute, whatever relativeToVRT says.
     if not relative or posixpath.isabs(text):
         return UPath(text)
@@ -122,4 +167,5 @@ def parse_gdal_path(
     joined = posixpath.normpath(posixpath.join(base.parent.path, text))
     if base.protocol == "s3":
         return UPath(f"s3://{joined}", **base.storage_options)
+    _check_local(joined)  # a relative path can resolve to one, as "../../vsitar/..."
     return base.with_segments(joined)
