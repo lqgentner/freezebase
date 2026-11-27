@@ -8,6 +8,10 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ## Unreleased
 
+## [0.13.0] - 2026-11-27
+
+freezebase 0.13 is a bug-fix release.
+
 ### Changed
 
 - **Breaking:** VRT sources must be local, `s3://` or `http(s)://` paths. Before, a path
